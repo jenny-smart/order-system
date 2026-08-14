@@ -8,7 +8,7 @@ with calendar date, and service period align with calendar period.
 
 
 def apply_patch(vcs, vcp):
-    import vip_calendar_patch4 as patch4
+    import function.vip_calendar_patch4 as patch4
 
     def _select_order(st, vcs_module, orders_list, key="vipcal_order"):
         if not orders_list:

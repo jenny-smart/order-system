@@ -104,7 +104,7 @@ def _backend_period_input(st, vcs, source, prefix, date_label="服務日期", pe
 
 
 def _patch_calendar(vcs, vcp, row, new_date, new_period, confirmation, color):
-    from vip_calendar_patch3 import _update_calendar_schedule
+    from function.vip_calendar_patch3 import _update_calendar_schedule
     return _update_calendar_schedule(vcs, vcp, row, new_date, new_period, confirmation, color)
 
 
@@ -293,7 +293,7 @@ def _render_manual_ui(vcs, vcp, backend_email, backend_password, env_name):
                 cal_date = cal_period = confirm = color = None
         if cal_row and st.button("🛑 取消訂單＋同步日曆", key="vipcal_cancel_exec", type="primary", use_container_width=True):
             try:
-                from cancel_order import cancel_orders
+                from function.cancel_order import cancel_orders
                 purchase_id = str(source.get("purchase_id") or "") or re.sub(r"\D", "", str(source.get("order_no") or ""))
                 rows = cancel_orders(
                     env_name, backend_email, backend_password,

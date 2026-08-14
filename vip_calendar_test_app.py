@@ -3,13 +3,13 @@ from datetime import date, timedelta
 import calendar
 
 import streamlit as st
-import vip_calendar_sync as vcs
-import vip_calendar_patch as vcp
-from vip_calendar_patch import apply_patch
-from vip_calendar_patch2 import apply_patch as apply_patch2
-from vip_calendar_patch3 import apply_patch as apply_patch3
-from vip_calendar_patch4 import apply_patch as apply_patch4
-from vip_calendar_patch5 import apply_patch as apply_patch5
+import function.vip_calendar_sync as vcs
+import function.vip_calendar_patch as vcp
+from function.vip_calendar_patch import apply_patch
+from function.vip_calendar_patch2 import apply_patch as apply_patch2
+from function.vip_calendar_patch3 import apply_patch as apply_patch3
+from function.vip_calendar_patch4 import apply_patch as apply_patch4
+from function.vip_calendar_patch5 import apply_patch as apply_patch5
 
 # Patch order matters. Patch 4 replaces the visible workflow with the compact,
 # manual-selection UI. Patch 5 aligns the left order fields with the right

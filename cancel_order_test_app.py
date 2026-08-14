@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 import streamlit as st
 
-from cancel_order import render_cancel_order
+from function.cancel_order import render_cancel_order
 
 st.set_page_config(page_title="取消訂單測試", layout="wide")
 st.title("取消訂單測試")

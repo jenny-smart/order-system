@@ -396,13 +396,13 @@ from datetime import date, timedelta, datetime
 
 from orders import run_process_web, get_region_by_address, run_standalone_consistency_check, run_backend_calendar_consistency_check, find_orders_without_line_link, find_pending_stored_value_orders, add_bonus_note_to_order, apply_bonus_notes, load_worksheet, fetch_member_edit_page, submit_member_preferences, fetch_recent_service_records
 from env import GOOGLE_CALENDAR_MAP
-from weekend_reminders import (
+from function.weekend_reminders import (
     upcoming_weekend, previous_workday, find_paid_weekend_orders,
     load_tracking_rows, merge_tracking_rows, save_tracking_rows,
     tracking_rows_tsv,
     NOTICE_STATUSES, REPLY_STATUSES,
 )
-from cleaner_reminders import find_paid_cleaner_reminders
+from function.cleaner_reminders import find_paid_cleaner_reminders
 from accounts import ACCOUNTS
 from memo_system.ui import render_memo_system
 
@@ -941,7 +941,7 @@ if _system_key == "memo":
 # v8.74：一般取消訂單
 # =========================================================
 if mode == "取消訂單":
-    from cancel_order import render_cancel_order
+    from function.cancel_order import render_cancel_order
 
     step("3", "取消訂單")
     info_panel("功能說明", [
@@ -963,13 +963,13 @@ if mode == "取消訂單":
 # =========================================================
 if mode == "VIP 訂單／Google 日曆同步":
     import calendar as _calendar
-    import vip_calendar_sync as _vcs
-    import vip_calendar_patch as _vcp
-    from vip_calendar_patch import apply_patch as _apply_patch1
-    from vip_calendar_patch2 import apply_patch as _apply_patch2
-    from vip_calendar_patch3 import apply_patch as _apply_patch3
-    from vip_calendar_patch4 import apply_patch as _apply_patch4
-    from vip_calendar_patch5 import apply_patch as _apply_patch5
+    import function.vip_calendar_sync as _vcs
+    import function.vip_calendar_patch as _vcp
+    from function.vip_calendar_patch import apply_patch as _apply_patch1
+    from function.vip_calendar_patch2 import apply_patch as _apply_patch2
+    from function.vip_calendar_patch3 import apply_patch as _apply_patch3
+    from function.vip_calendar_patch4 import apply_patch as _apply_patch4
+    from function.vip_calendar_patch5 import apply_patch as _apply_patch5
 
     # Streamlit 會重跑腳本；同一程序只套一次 patch。
     if not getattr(_vcs, "_ordersapp_vip_patches_applied", False):
@@ -3156,7 +3156,7 @@ else:
             "會自動跳過純儲值金訂單與已取消/已退款訂單。",
         ])
 
-        import next_service_dates as nsd
+        import function.next_service_dates as nsd
 
         _nsd_sheet_options = {
             f"{i+1}. {region}｜gid={gid}": (region, spreadsheet_id, gid)

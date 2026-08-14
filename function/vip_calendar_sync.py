@@ -19,7 +19,7 @@ import streamlit as st
 import orders
 import quick_order as qo
 from accounts import ACCOUNTS
-from cancel_order import cancel_orders
+from function.cancel_order import cancel_orders
 from env import GOOGLE_CALENDAR_MAP, COLOR_PURPLE, COLOR_YELLOW
 
 

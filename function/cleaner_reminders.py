@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 from bs4 import BeautifulSoup
 
 import orders
-from weekend_reminders import (
+from function.weekend_reminders import (
     _address,
     _configure_backend,
     _name_phone,
