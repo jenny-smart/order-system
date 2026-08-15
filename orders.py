@@ -4130,10 +4130,14 @@ def _calchk_service_date_time_from_lines(lines):
 
     回傳 (service_date, service_time)，都抓不到時回傳 ("", "")。
     """
+    # v2026.08.15 修正：.replace(" ", "") 只會去掉一般 ASCII 空白，後台頁面
+    # 實際可能用 &nbsp;（解析成 \xa0 不斷行空白）分隔時間跟連字號，導致這裡
+    # 永遠比對不到、time_idx 永遠是 None，整筆訂單解析不出服務時段。改用
+    # re.sub(r"\s+", "", ...) 才能正確吃掉 \xa0 等各種空白字元。
     time_idx = None
     system_time = ""
     for idx, line in enumerate(lines):
-        compact = str(line).strip().replace(" ", "")
+        compact = re.sub(r"\s+", "", str(line).strip())
         m = re.match(r"^(\d{2}:\d{2})[-~～](\d{2}:\d{2})$", compact)
         if m:
             time_idx = idx
@@ -4158,7 +4162,7 @@ def _calchk_service_date_time_from_lines(lines):
     for idx, line in enumerate(lines):
         if "簡訊實際服務時間" in str(line):
             for nxt in lines[idx + 1: idx + 3]:
-                m3 = re.match(r"^(\d{2}:\d{2})[-~～](\d{2}:\d{2})$", str(nxt).strip().replace(" ", ""))
+                m3 = re.match(r"^(\d{2}:\d{2})[-~～](\d{2}:\d{2})$", re.sub(r"\s+", "", str(nxt).strip()))
                 if m3:
                     service_time = f"{m3.group(1)}-{m3.group(2)}"
                     break

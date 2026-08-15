@@ -158,45 +158,81 @@ def _edit_payload_from_page(page_html: str) -> tuple[dict, dict]:
     return payload, purchase
 
 
-def _order_from_row(row):
-    checkbox = row.find("input", attrs={"name": "purchase_id[]"})
-    if checkbox is None:
+def _order_from_block(block):
+    """
+    v2026.08.14 修正：原本用 soup.select("table tbody tr") 假設 /purchase 頁面是
+    標準 HTML table，導致完全抓不到任何列（查詢永遠回傳空清單，即使後台明明
+    查得到相符訂單）。改成跟系統其他地方一致，用 orders.extract_order_cards_
+    from_purchase_html（純文字掃描＋訂單編號正則切卡片）解析同一份頁面，這是
+    已經被大量其他功能驗證過的作法。
+
+    原本 purchase_id 是從 <input name="purchase_id[]"> checkbox 的 value 讀出，
+    文字掃描法沒有這個欄位；改用跟 orders.py 的
+    _purchase_edit_id_from_order_no 相同的公式（訂單編號去掉英文字母、轉成
+    整數字串）直接算出來，這個公式已經在儲值獎金備註、查詢無LINE連結訂單等
+    功能驗證過可以正確對應 /purchase/edit/{id} 與 /purchase/cancel/{id}。
+    """
+    order_no = str(block.get("order_no", "") or "").strip()
+    if not order_no:
         return None
-    purchase_id = str(checkbox.get("value") or "").strip()
+
+    digits = re.sub(r"\D", "", order_no)
+    purchase_id = str(int(digits)) if digits else ""
     if not purchase_id:
         return None
 
-    text = "\n".join(
-        ln.strip() for ln in row.get_text("\n", strip=True).splitlines() if ln.strip()
-    )
-    order_m = re.search(r"\b(?:LC|TT|KK)\d+\b", text)
-    order_no = order_m.group(0) if order_m else ""
+    lines = block.get("lines", [])
+    joined = "\n".join(lines)
 
-    phone_m = re.search(r"\b09\d{8}\b", text)
-    phone = phone_m.group(0) if phone_m else ""
-
-    service_date = ""
-    for m in re.finditer(r"\b(20\d{2}-\d{2}-\d{2})\b", text):
-        candidate = m.group(1)
-        before = text[max(0, m.start() - 8):m.start()]
-        if "付款日期" not in before and "取消時間" not in before:
-            service_date = candidate
+    phone = ""
+    for ln in lines:
+        if re.fullmatch(r"09\d{8}", ln.strip()):
+            phone = ln.strip()
             break
 
-    period_m = re.search(r"\b(\d{2}:\d{2})\s*-\s*(\d{2}:\d{2})\b", text)
-    period = f"{period_m.group(1)}-{period_m.group(2)}" if period_m else ""
+    # v2026.08.14 修正：服務日期不能只抓「第一個看起來像日期的字串」——訂單
+    # 卡片裡「訂購日期（建立時間，格式 YYYY-MM-DD HH:MM:SS）」通常排在服務
+    # 日期前面，naive 抓法會抓到建立時間、不是真正的服務日期，導致日期區間
+    # 篩選永遠對不上。改成先定位「HH:MM-HH:MM」服務時段這一行（格式獨特，
+    # 卡片裡只會出現一次），再往回找最接近、且不是完整建立時間戳記（帶秒數）
+    # 的純日期行，才是真正的服務日期。
+    # v2026.08.15 修正：原本用 .replace(" ", "") 只會去掉一般 ASCII 空白，
+    # 後台頁面實際可能用 &nbsp;（解析成 \xa0 不斷行空白）分隔時間跟連字號，
+    # 導致這裡永遠比對不到、period_idx 永遠是 None，連真正有服務時段的訂單
+    # 也會被判定成「解析不出服務日期」而整批被上面新加的排除規則擋掉
+    # （真實案例：reboot 更新到最新程式碼後，連 LC00214361 都消失了）。
+    # 改成 re.sub(r"\s+", "", ...)，可以正確吃掉 \xa0 等各種空白字元。
+    period = ""
+    period_idx = None
+    for idx, ln in enumerate(lines):
+        compact = re.sub(r"\s+", "", ln.strip())
+        m = re.match(r"^(\d{2}:\d{2})[-~～](\d{2}:\d{2})$", compact)
+        if m:
+            period_idx = idx
+            period = f"{m.group(1)}-{m.group(2)}"
+            break
 
-    status_m = re.search(r"付款狀態[：:]\s*([^\n]+)", text)
+    service_date = ""
+    if period_idx is not None:
+        for j in range(period_idx - 1, max(-1, period_idx - 5), -1):
+            candidate_line = lines[j].strip()
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", candidate_line):
+                continue  # 這是訂購日期（建立時間），不是服務日期
+            m2 = re.match(r"^(\d{4}-\d{2}-\d{2})", candidate_line)
+            if m2:
+                service_date = m2.group(1)
+                break
+
+    status_m = re.search(r"付款狀態[：:]\s*([^\n]+)", joined)
     payment_status = status_m.group(1).strip() if status_m else ""
 
     name = ""
     if phone:
-        lines = [x.strip() for x in text.splitlines() if x.strip()]
         try:
             idx = lines.index(phone)
             if idx > 0:
-                candidate = lines[idx - 1]
-                if candidate not in {"LINE", order_no}:
+                candidate = lines[idx - 1].strip()
+                if candidate not in {"LINE", order_no} and "@" not in candidate:
                     name = candidate
         except ValueError:
             pass
@@ -221,8 +257,18 @@ def find_orders_for_cancel(
     clean_date_e: str,
     payment_status: str = "已付款",
     max_pages: int = 30,
+    return_debug: bool = False,
 ):
-    """Search backend orders by phone + service date range + payment status."""
+    """
+    Search backend orders by phone + service date range + payment status.
+
+    v2026.08.15：新增 return_debug——True 時額外回傳這支電話底下每一張
+    掃到的訂單卡片解析結果（不管有沒有通過篩選），以及被排除的原因。
+    這幾次修正每次都要靠客服截圖來回確認才能抓到根因，太沒效率；改成
+    直接把解析明細攤在畫面上，之後遇到查不到／查太多的狀況，客服自己
+    展開查詢明細就能看到是「電話解析錯誤」「日期解析錯誤」還是「付款
+    狀態不符」，不用再截圖。
+    """
     phone = re.sub(r"\D", "", str(phone or ""))
     if not re.fullmatch(r"09\d{8}", phone):
         raise ValueError("手機號碼需為 09 開頭共 10 碼")
@@ -239,42 +285,83 @@ def find_orders_for_cancel(
     purchase_url = f"{base_url}/purchase"
     found = []
     seen = set()
+    debug_rows = []
 
+    # v2026.08.15 修正：原本把 phone／clean_date_s／clean_date_e／
+    # purchase_status 一次全部送給後台當篩選條件，即使日期區間頭尾都有填，
+    # 後台在「多個篩選條件同時送」的情況下仍可能整個篩選失效、回傳空結果
+    # （這個 /purchase 頁面的日期篩選已經在 find_orders_without_line_link 等
+    # 功能踩過同樣的坑，最後都改成只用最少量、最可靠的條件當後台粗篩，
+    # 其餘條件自己在 Python 這邊比對）。改成只送 phone 這個單一、最可靠的
+    # 篩選條件（跟 verify_batch_order_consistency 查詢電話的作法一致），
+    # 撈出這支電話底下全部訂單後，服務日期區間跟付款狀態都在下面用
+    # _order_from_block 解析出的欄位自己比對篩選，不管後台的組合篩選準不準
+    # 都不影響最終結果正確性。
     for page in range(1, max_pages + 1):
         params = dict(PURCHASE_FILTER_PARAMS_TEMPLATE)
         params.update({
             "phone": phone,
-            "clean_date_s": clean_date_s,
-            "clean_date_e": clean_date_e,
-            "purchase_status": status_map[payment_status],
             "page": str(page),
         })
         resp = session.get(purchase_url, params=params, headers=orders.HEADERS, allow_redirects=True)
         if resp.status_code != 200:
             raise RuntimeError(f"訂單搜尋失敗：HTTP {resp.status_code}")
-        soup = BeautifulSoup(resp.text, "html.parser")
-        rows = soup.select("table tbody tr")
-        if not rows:
+        blocks = orders.extract_order_cards_from_purchase_html(resp.text)
+        if not blocks:
             break
 
-        page_added = 0
-        for row in rows:
-            item = _order_from_row(row)
-            if not item or item["purchase_id"] in seen:
+        for block in blocks:
+            item = _order_from_block(block)
+            if not item:
+                if return_debug:
+                    debug_rows.append({
+                        "order_no": str(block.get("order_no", "") or ""),
+                        "phone": "", "service_date": "", "period": "", "payment_status": "",
+                        "included": False, "reason": "解析不出訂單編號／購買編號",
+                    })
                 continue
+            if item["purchase_id"] in seen:
+                continue
+            reason = ""
             if item["phone"] and item["phone"] != phone:
+                reason = f"電話不符（解析到：{item['phone']}）"
+            # v2026.08.15 修正：原本「解析不出服務日期就不篩選、直接放行」，
+            # 導致像儲值金購買這種沒有服務時段（沒有 HH:MM-HH:MM 可定位）的
+            # 訂單，不管查詢的服務日期區間是哪個月，都會被無條件列進結果
+            # （真實案例：查 2026-09，卻混進服務日期是 2026-03 的儲值金購買
+            # 訂單 LC00206151）。改成解析不出服務日期時直接排除，因為沒辦法
+            # 確認是否落在查詢區間內，排除比誤放行安全。
+            elif not item["service_date"]:
+                reason = "解析不出服務日期（此卡片可能沒有服務時段，例如儲值金購買）"
+            elif not (clean_date_s <= item["service_date"] <= clean_date_e):
+                reason = f"服務日期 {item['service_date']} 不在查詢區間內"
+            elif item["payment_status"] and item["payment_status"] != payment_status:
+                reason = f"付款狀態不符（解析到：{item['payment_status']}）"
+
+            if return_debug:
+                debug_rows.append({**item, "included": not reason, "reason": reason})
+
+            if reason:
                 continue
-            if item["service_date"] and not (clean_date_s <= item["service_date"] <= clean_date_e):
-                continue
-            if item["payment_status"] and item["payment_status"] != payment_status:
-                continue
+
             seen.add(item["purchase_id"])
             found.append(item)
-            page_added += 1
 
-        if len(rows) < 20 or page_added == 0:
+        # v2026.08.15 修正：原本這裡多一個條件「這一頁沒有任何項目通過篩選
+        # 就停止翻頁」，把「這一頁 20 筆剛好都不符合篩選條件」誤判成「已經
+        # 翻到最後一頁」。這個系統的 /purchase 查詢預設依服務日期由舊到新
+        # 排序，老客戶（例如從 2021 年就開始訂閱、每兩週一次的客人）前面
+        # 好幾頁都是很久以前的舊訂單，全部會被日期區間濾掉，導致查詢直接
+        # 停在第一頁，永遠翻不到真正要找的最近日期訂單（真實案例：
+        # LC00214360，服務日期 2026-09-10，客人從 2021 年就開始訂閱，第一頁
+        # 全是 2021~2022 年的舊單）。只用「這一頁筆數 < 20」判斷是否翻到
+        # 最後一頁才正確，跟系統其他分頁查詢（例如
+        # _fetch_all_purchase_blocks_by_date_range）的作法一致。
+        if len(blocks) < 20:
             break
 
+    if return_debug:
+        return found, debug_rows
     return found
 
 
@@ -484,7 +571,7 @@ def render_cancel_order(backend_email: str, backend_password: str, env_name: str
         else:
             try:
                 with st.spinner("搜尋訂單中…"):
-                    rows = find_orders_for_cancel(
+                    rows, debug_rows = find_orders_for_cancel(
                         env_name,
                         backend_email,
                         backend_password,
@@ -492,8 +579,10 @@ def render_cancel_order(backend_email: str, backend_password: str, env_name: str
                         _date_value(start_date),
                         _date_value(end_date),
                         payment_status=payment_status,
+                        return_debug=True,
                     )
                 st.session_state.cancel_order_results = rows
+                st.session_state.cancel_order_debug = debug_rows
                 st.session_state.cancel_order_selected = {r["purchase_id"]: True for r in rows}
                 st.session_state.cancel_order_search_status = payment_status
                 if not rows:
@@ -502,7 +591,22 @@ def render_cancel_order(backend_email: str, backend_password: str, env_name: str
                     )
             except Exception as exc:
                 st.session_state.cancel_order_results = []
+                st.session_state.cancel_order_debug = []
                 st.error(str(exc))
+
+    debug_rows = st.session_state.get("cancel_order_debug") or []
+    if debug_rows:
+        with st.expander(f"🔍 查詢明細（此電話底下共掃到 {len(debug_rows)} 筆訂單，含被排除的）"):
+            for d in debug_rows:
+                mark = "✅" if d.get("included") else "❌"
+                st.text(
+                    f"{mark} {d.get('order_no') or '（無訂單編號）'}　"
+                    f"電話：{d.get('phone') or '（解析不到）'}　"
+                    f"服務日期：{d.get('service_date') or '（解析不到）'}　"
+                    f"時段：{d.get('period') or '（解析不到）'}　"
+                    f"付款狀態：{d.get('payment_status') or '（解析不到）'}"
+                    + (f"　原因：{d['reason']}" if d.get("reason") else "")
+                )
 
     rows = st.session_state.get("cancel_order_results") or []
     if not rows:
