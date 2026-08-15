@@ -389,12 +389,10 @@ __version__ = "8.76"
 
 import html
 import re
-import json
 import streamlit as st
-import streamlit.components.v1 as components
 from datetime import date, timedelta, datetime
 
-from orders import run_process_web, get_region_by_address, run_standalone_consistency_check, run_backend_calendar_consistency_check, find_orders_without_line_link, find_pending_stored_value_orders, add_bonus_note_to_order, apply_bonus_notes, load_worksheet, fetch_member_edit_page, submit_member_preferences, fetch_recent_service_records
+from orders import run_process_web, get_region_by_address, find_orders_without_line_link, find_pending_stored_value_orders, add_bonus_note_to_order, apply_bonus_notes, load_worksheet, fetch_member_edit_page, submit_member_preferences, fetch_recent_service_records
 from env import GOOGLE_CALENDAR_MAP
 from function.weekend_reminders import (
     upcoming_weekend, previous_workday, find_paid_weekend_orders,
@@ -403,6 +401,9 @@ from function.weekend_reminders import (
     NOTICE_STATUSES, REPLY_STATUSES,
 )
 from function.cleaner_reminders import find_paid_cleaner_reminders
+from function.ui_common import copy_button, show_duplicate_order_warning, step, info_panel
+from function import consistency_check as _consistency_check_page
+from function import calendar_check as _calendar_check_page
 from accounts import ACCOUNTS
 from memo_system.ui import render_memo_system
 
@@ -642,66 +643,6 @@ def last_summary_card_html(summary):
         + '<div class="history-note">以上已預設帶入，如有變動請手動調整對應欄位。</div>'
         + '</div>'
     )
-
-
-def copy_button(label, text, key):
-    payload = json.dumps(text, ensure_ascii=False)
-    label_payload = json.dumps(label, ensure_ascii=False)
-    components.html(
-        f"""
-        <button id="{key}" style="width:100%;padding:0.65rem 1rem;border:0;border-radius:10px;background:#F5C518;color:#1C1C1E;font-size:15px;font-weight:700;cursor:pointer;">{html.escape(label)}</button>
-        <script>
-        const btn = document.getElementById({json.dumps(key)});
-        const text = {payload};
-        const label = {label_payload};
-        btn.addEventListener("click", async () => {{
-            try {{ await navigator.clipboard.writeText(text); btn.textContent = "已複製"; }}
-            catch (err) {{ const ta = document.createElement("textarea"); ta.value = text; document.body.appendChild(ta); ta.select(); document.execCommand("copy"); document.body.removeChild(ta); btn.textContent = "已複製"; }}
-            setTimeout(() => {{ btn.textContent = label; }}, 1600);
-        }});
-        </script>
-        """,
-        height=54,
-    )
-
-
-def show_duplicate_order_warning(order_no, count, dedup_key=""):
-    """
-    v8.13：訂單編號重複提醒視窗。
-    優先使用 st.dialog 跳出真正的提醒視窗（Streamlit 1.31+）；
-    若目前版本不支援 st.dialog，退回使用醒目的 st.error 區塊，
-    確保任何 Streamlit 版本都看得到警示，不會被畫面其他內容淹沒。
-    dedup_key 用來避免同一筆訂單在同一次畫面重繪中重複跳出視窗。
-    """
-    _seen_key = f"_dup_order_seen_{dedup_key or order_no}"
-    if st.session_state.get(_seen_key):
-        return
-    st.session_state[_seen_key] = True
-
-    message = (
-        f"訂單編號 **{order_no}** 目前查詢到 **{count}** 張不同的訂單卡片，"
-        f"這是後台偶發的「訂單編號重複」問題。\n\n"
-        f"請務必至後台人工確認這幾張訂單卡片的實際內容，避免訂單資料互相搞混或覆蓋！"
-    )
-
-    if hasattr(st, "dialog"):
-        @st.dialog("⚠️ 訂單編號重複警示")
-        def _dup_order_dialog():
-            st.error(message)
-            if st.button("我知道了", use_container_width=True, key=f"dup_ack_{dedup_key or order_no}"):
-                st.rerun()
-        _dup_order_dialog()
-    else:
-        st.error(f"⚠️ 訂單編號重複警示\n\n{message}")
-
-
-def step(num, title):
-    st.markdown(f'<div class="step-pill"><span class="step-num">{num}</span>{title}</div>', unsafe_allow_html=True)
-
-
-def info_panel(title, bullets):
-    items = "".join(f"<li>{html.escape(str(item))}</li>" for item in bullets)
-    st.markdown(f'<div class="hint-box"><b>{html.escape(str(title))}</b><ul style="margin:0.45rem 0 0 1.1rem; padding:0;">{items}</ul></div>', unsafe_allow_html=True)
 
 
 def parse_row_input(row_text: str):
@@ -1158,119 +1099,10 @@ if mode == "批次建單（Google Sheet）":
 
 
 elif mode == "雙向訂單檢查":
-    step("3", "雙向訂單檢查")
-    info_panel("功能說明", [
-        "不用重新跑一次批次建單，直接針對一份已經有「訂單編號」欄位的成單工作表，"
-        "跟後台系統做一次雙向比對。",
-        "方向一：工作表寫的訂單編號，回查後台是否真的存在，電話/地址/日期/時段是否跟這一列相符。",
-        "方向二（加強版，需要填服務日期區間）：不是只查工作表裡已出現的電話，"
-        "而是直接抓後台這段日期區間內的『全部』已付款訂單，逐筆核對訂單編號有沒有"
-        "出現在工作表裡——這樣才抓得到「客人電話整筆漏登記進工作表」這種情況。",
-        "沒有填日期區間的話，方向二只會用舊方式（工作表裡已出現的電話）去查，"
-        "抓不到完全沒登記進工作表的訂單，建議務必填上服務日期區間。",
-    ])
-
-    dc_sheet_name = st.text_input("工作表名稱", value="", placeholder="例：202604", key="dc_sheet_name")
-    dc_region = st.selectbox("只檢查特定區域（不指定則檢查全部）", ["全部"] + list(ACCOUNTS.keys()), key="dc_region")
-
-    st.markdown("**方向二用：服務日期區間**（建議務必填寫，才能抓到工作表完全漏登記的訂單）")
-    dc_col1, dc_col2 = st.columns(2)
-    with dc_col1:
-        dc_date_start = st.date_input("服務日期-起", value=None, key="dc_date_start")
-    with dc_col2:
-        dc_date_end = st.date_input("服務日期-迄", value=None, key="dc_date_end")
-
-    if st.button("🔍 開始雙向比對", use_container_width=True, key="dc_run_btn", type="primary"):
-        if not backend_email.strip() or not backend_password.strip():
-            st.error("請先在上方輸入後台帳號密碼")
-        elif not dc_sheet_name.strip():
-            st.error("請輸入工作表名稱")
-        else:
-            try:
-                with st.spinner("讀取工作表 → 登入後台 → 雙向比對中（有填日期區間的話會多花一點時間掃後台整段期間的訂單）…"):
-                    dc_problems = run_standalone_consistency_check(
-                        env_name=env,
-                        backend_email=backend_email.strip(),
-                        backend_password=backend_password.strip(),
-                        sheet_name=dc_sheet_name.strip(),
-                        region=None if dc_region == "全部" else dc_region,
-                        date_range_start=dc_date_start.strftime("%Y-%m-%d") if dc_date_start else None,
-                        date_range_end=dc_date_end.strftime("%Y-%m-%d") if dc_date_end else None,
-                    )
-                st.session_state.dc_result = {"problems": dc_problems, "sheet_name": dc_sheet_name.strip()}
-            except Exception as e:
-                st.error(f"檢查失敗：{e}")
-
-    dc_result = st.session_state.get("dc_result")
-    if dc_result:
-        st.markdown("#### 檢查結果")
-        _problems = dc_result.get("problems") or []
-        if _problems:
-            st.error(f"⚠️ 工作表「{dc_result.get('sheet_name')}」發現 {len(_problems)} 筆異常，請人工確認：")
-            for _p in _problems:
-                _row_label = f"第 {_p.get('row_num')} 列" if _p.get("row_num") is not None else "（系統反查，不是特定一列）"
-                st.warning(f"{_row_label}（訂單 {_p.get('order_no', '') or '（無）'}）：{_p.get('issue')}")
-        else:
-            st.success(f"✅ 工作表「{dc_result.get('sheet_name')}」檢查通過，訂單編號皆與電話/地址/日期/時段相符，後台也沒有查到工作表未記錄的訂單。")
+    _consistency_check_page.render(backend_email, backend_password, env, ACCOUNTS)
 
 elif mode == "後台／Google 日曆雙向比對":
-    step("3", "後台／Google 日曆雙向比對")
-    info_panel("功能說明", [
-        "以 Google 日曆事件的時間與顏色為比對基準（沿用既有慣例：紫色＝未安排、"
-        "黃色＝已安排、綠色＝暫停），只有黃色事件代表「已安排／應該已成單」，"
-        "才會拿來跟後台已付款訂單互相比對。",
-        "方向一（後台有、日曆沒有）：後台這段服務日期區間內的已付款訂單，"
-        "找不到日期／時段完全相符的黃色日曆事件。",
-        "方向二（日曆有、後台沒有）：日曆這段期間的黃色事件，找不到日期／時段"
-        "相符的後台已付款訂單。",
-        "只能比對已設定 Google Calendar ID 的區域（目前為：" + "、".join(GOOGLE_CALENDAR_MAP.keys()) + "）。",
-    ])
-
-    cc_date_c1, cc_date_c2 = st.columns(2)
-    with cc_date_c1:
-        cc_date_s = st.date_input("服務日期-起", value=date.today(), key="cc_date_s")
-    with cc_date_c2:
-        cc_date_e = st.date_input("服務日期-迄", value=date.today() + timedelta(days=7), key="cc_date_e")
-    cc_region = st.selectbox("只檢查特定區域（不指定則檢查全部已設定日曆的區域）", ["全部"] + list(GOOGLE_CALENDAR_MAP.keys()), key="cc_region")
-
-    if st.button("🔍 開始雙向比對", use_container_width=True, key="cc_run_btn", type="primary"):
-        if not backend_email.strip() or not backend_password.strip():
-            st.error("請先在上方輸入後台帳號密碼")
-        elif cc_date_s > cc_date_e:
-            st.error("服務日期起日不可晚於迄日")
-        else:
-            try:
-                with st.spinner("登入後台、查詢已付款訂單並讀取 Google 日曆事件，雙向比對中…"):
-                    cc_result = run_backend_calendar_consistency_check(
-                        env_name=env,
-                        backend_email=backend_email.strip(),
-                        backend_password=backend_password.strip(),
-                        date_range_start=cc_date_s.strftime("%Y-%m-%d"),
-                        date_range_end=cc_date_e.strftime("%Y-%m-%d"),
-                        region=None if cc_region == "全部" else cc_region,
-                    )
-                st.session_state.cc_result = cc_result
-            except Exception as e:
-                st.error(f"檢查失敗：{e}")
-
-    cc_result = st.session_state.get("cc_result")
-    if cc_result:
-        st.markdown("#### 檢查結果")
-        _backend_missing = cc_result.get("backend_missing_in_calendar") or []
-        _calendar_missing = cc_result.get("calendar_missing_in_backend") or []
-        if not _backend_missing and not _calendar_missing:
-            st.success("✅ 檢查通過，後台已付款訂單與 Google 日曆黃色事件皆一一對應。")
-        else:
-            if _backend_missing:
-                st.error(f"⚠️ 後台有、日曆沒有：{len(_backend_missing)} 筆")
-                for _p in _backend_missing:
-                    st.warning(f"訂單 {_p.get('order_no')}：{_p.get('issue')}")
-            if _calendar_missing:
-                st.error(f"⚠️ 日曆有、後台沒有：{len(_calendar_missing)} 筆")
-                for _p in _calendar_missing:
-                    st.warning(_p.get("issue"))
-                    if _p.get("event_link"):
-                        st.link_button("開啟日曆事件", _p["event_link"], key=f"cc_event_{_p.get('event_link')}")
+    _calendar_check_page.render(backend_email, backend_password, env, GOOGLE_CALENDAR_MAP)
 
 elif mode == "專員隔日上班提醒":
     step("3", "專員隔日上班提醒")
