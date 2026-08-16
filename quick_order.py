@@ -439,7 +439,6 @@ BOOKING_ENDPOINT_MAP = {"信用卡": "/booking/single", "ATM": "/booking/single"
 TAX_RATE = 1.05
 
 
-COUPON_COMPANY_ID_MAP = {"台北": "1", "桃園": "2", "新竹": "3", "台中": "4"}
 COUNTRY_ID_BY_CITY_AREA = {
     ("台北市", "中正區"): "8", ("台北市", "大同區"): "9", ("台北市", "中山區"): "10",
     ("台北市", "松山區"): "11", ("台北市", "大安區"): "12", ("台北市", "萬華區"): "13",
@@ -475,16 +474,10 @@ COUNTRY_ID_BY_CITY_AREA.update({
     for (city, area), country_id in list(COUNTRY_ID_BY_CITY_AREA.items())
     if "台" in city
 })
-COUPON_SERVICE_ITEM_MAP = {
-    "居家清潔": "1", "辦公室清潔": "2", "裝修細清": "3", "年節大掃除": "4",
-    "冷氣機清潔": "5", "洗衣機清潔": "6", "沙發/床墊清潔": "7", "整理收納": "8",
-}
-COUPON_TYPE_MAP = {
-    "不得與其他優惠券重複": "1",
-    "可重複使用，每個帳號限用一次": "2",
-    "可重複使用，不限使用次數": "3",
-}
-COUPON_ADD_URL_PATH = "/coupon/add"
+from shared.coupon import (
+    COUPON_COMPANY_ID_MAP, COUPON_SERVICE_ITEM_MAP, COUPON_TYPE_MAP, COUPON_ADD_URL_PATH,
+    _get_newest_coupon_code, _build_coupon_via_session,
+)
 
 from shared.cleaner_shift import (
     VALUE_TO_SHIFT_CODE, SHIFT_CONFLICT_TABLE, PERIOD_TO_SHIFT_CODE,
@@ -1619,58 +1612,6 @@ def quick_create_order(
 # =========================================================
 # 優惠券 & 訂單備註工具
 # =========================================================
-
-def _get_newest_coupon_code(session, base_url, prefix):
-    try:
-        list_resp = session.get(f"{base_url}/coupon", headers=HEADERS, allow_redirects=True)
-        if list_resp.status_code != 200:
-            return ""
-        ids = re.findall(r"/coupon/detail/(\d+)", list_resp.text)
-        if not ids:
-            return ""
-        prefix_esc = re.escape(prefix)
-        for coupon_id in ids[:10]:
-            detail_resp = session.get(f"{base_url}/coupon/detail/{coupon_id}", headers=HEADERS)
-            if detail_resp.status_code != 200:
-                continue
-            codes = re.findall(rf"\b{prefix_esc}[A-Za-z0-9]*\b", detail_resp.text)
-            if codes:
-                return codes[0]
-        return ""
-    except Exception:
-        return ""
-
-
-def _build_coupon_via_session(session, base_url, title, discount, date_s, date_e, prefix, piece, regions, service_items):
-    """用既有 session 建優惠券，不重新登入。回傳實際優惠碼字串。"""
-    coupon_add_url = f"{base_url}{COUPON_ADD_URL_PATH}"
-    get_resp = session.get(coupon_add_url, headers=HEADERS, allow_redirects=True)
-    if get_resp.status_code != 200:
-        raise Exception("無法開啟優惠券新增頁面")
-    token_m = re.search(r'<meta name="csrf-token" content="([^"]+)"', get_resp.text)
-    csrf = token_m.group(1) if token_m else ""
-    if not csrf:
-        raise Exception("無法取得 CSRF token")
-    coupon_fields = [
-        ("coupon_type_id", "1"), ("title", str(title)),
-        ("date_s", str(date_s)), ("date_e", str(date_e)),
-        ("prefix", str(prefix)), ("discount", str(int(float(discount)))),
-        ("piece", str(int(piece))), ("_token", csrf),
-    ]
-    for rn in (regions or ["台北", "台中"]):
-        coupon_fields.append(("company_id[]", COUPON_COMPANY_ID_MAP.get(rn, "1")))
-    for svc in (service_items or ["居家清潔", "裝修細清"]):
-        coupon_fields.append(("service_item[]", COUPON_SERVICE_ITEM_MAP.get(svc, "1")))
-    coupon_files = [(k, (None, v)) for k, v in coupon_fields]
-    post_headers = {k: v for k, v in HEADERS.items() if k.lower() != "content-type"}
-    post_resp = session.post(coupon_add_url, files=coupon_files, headers=post_headers, allow_redirects=True)
-    if post_resp.status_code not in (200, 302):
-        snippet = post_resp.text[:200].replace("\n", " ")
-        raise Exception(f"優惠券建立失敗：HTTP {post_resp.status_code}｜{snippet}")
-    if post_resp.url and "add" in post_resp.url:
-        raise Exception("優惠券建立失敗：後台驗證未通過，請確認區域/服務項目欄位")
-    time.sleep(1)
-    return _get_newest_coupon_code(session, base_url, str(prefix))
 
 
 def create_coupon(
