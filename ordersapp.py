@@ -390,9 +390,8 @@ __version__ = "8.76"
 import streamlit as st
 from datetime import date, timedelta
 
-from orders import get_region_by_address, fetch_member_edit_page, submit_member_preferences, fetch_recent_service_records
 from env import GOOGLE_CALENDAR_MAP
-from function.ui_common import copy_button, show_duplicate_order_warning, step, info_panel, NJ_MEMO
+from function.ui_common import step, info_panel
 from function import consistency_check as _consistency_check_page
 from function import calendar_check as _calendar_check_page
 from function import cleaner_next_day_reminder as _cleaner_next_day_page
@@ -400,11 +399,15 @@ from function import weekend_reminder_page as _weekend_reminder_page
 from function import no_line_link_search as _no_line_link_page
 from function import bonus_note as _bonus_note_page
 from function import order_creation as _order_creation_page
+from function import line_notice_generator as _line_notice_page
+from function import next_appointment_list as _next_appointment_page
+from function import next_service_time_updater as _next_service_time_page
+from function import member_preferences as _member_preferences_page
 from accounts import ACCOUNTS
 from memo_system.ui import render_memo_system
 
 try:
-    import quick_order as qo
+    import quick_order
 except Exception as e:
     st.error(f"quick_order.py 載入失敗：{type(e).__name__}: {e}")
     st.stop()
@@ -761,7 +764,20 @@ if mode == "VIP 訂單／Google 日曆同步":
 if mode == "批次建單（Google Sheet）":
     _order_creation_page.render_batch(backend_email, backend_password, env)
 
+elif mode == "建立舊客訂單":
+    _order_creation_page.render_old_customer(backend_email, backend_password, env)
 
+elif mode == "建立新客訂單":
+    _order_creation_page.render_new_customer(backend_email, backend_password, env)
+
+elif mode == "建立儲值金訂單":
+    _order_creation_page.render_stored_value_order(backend_email, backend_password, env)
+
+elif mode == "訂單轉換":
+    _order_creation_page.render_order_conversion(backend_email, backend_password, env)
+
+elif mode == "儲值金補價差":
+    _order_creation_page.render_topup_diff(backend_email, backend_password, env)
 
 elif mode == "雙向訂單檢查":
     _consistency_check_page.render(backend_email, backend_password, env, ACCOUNTS)
@@ -781,327 +797,14 @@ elif mode == "查詢無LINE連結訂單":
 elif mode == "儲值獎金備註":
     _bonus_note_page.render(backend_email, backend_password, env)
 
+elif mode == "LINE 通知產生器":
+    _line_notice_page.render(backend_email, backend_password, env)
 
-# =========================================================
-# 其他功能
-# =========================================================
-else:
-    single_feature = mode
-    step("3", single_feature)
+elif mode == "整理預約下次服務":
+    _next_appointment_page.render(backend_email, backend_password, env)
 
-    # --------------------------------------------------
-    # LINE 通知產生器
-    # --------------------------------------------------
-    if single_feature == "LINE 通知產生器":
-        col_left, col_right = st.columns([3, 1])
-        with col_left:
-            info_panel("使用說明", ["輸入已成立訂單編號，每行一個，可一次輸入多筆。", "系統讀取訂單日期、地址、付款方式與金額，區域由地址自動判斷。"])
-            line_order_nos_input = st.text_area("訂單編號（每行一個）", value="", height=120, placeholder="LC00211537\nLC00211538", key="line_order_nos")
-            if st.button("產生 LINE 訊息", use_container_width=True, key="make-line-from-order-no"):
-                if not backend_email.strip() or not backend_password.strip():
-                    st.error("請先輸入後台帳號密碼")
-                else:
-                    raw_lines = [x.strip() for x in line_order_nos_input.splitlines() if x.strip()]
-                    order_groups = []
-                    for line in raw_lines:
-                        nos = [n.strip() for n in line.split(",") if n.strip()]
-                        if nos:
-                            order_groups.append(nos)
-                    if not order_groups:
-                        st.error("請輸入至少一個訂單編號")
-                    else:
-                        st.session_state.line_from_order_nos_results = []
-                        for _k in list(st.session_state.keys()):
-                            if _k.startswith("line_text_") or _k.startswith("nj_memo_"):
-                                del st.session_state[_k]
-                        results_list = []
-                        for nos in order_groups:
-                            label = "、".join(nos)
-                            try:
-                                with st.spinner(f"查詢訂單 {label}…"):
-                                    line_result, line_text = qo.build_combined_line_message_from_order_nos(
-                                        env_name=env, backend_email=backend_email.strip(),
-                                        backend_password=backend_password.strip(), order_nos=nos,
-                                    )
-                                safe_result = {k: v for k, v in line_result.items() if k != "session"}
-                                results_list.append({"order_no": label, "result": safe_result, "text": line_text, "error": None})
-                            except Exception as e:
-                                results_list.append({"order_no": label, "result": None, "text": "", "error": str(e)})
-                        st.session_state.line_from_order_nos_results = results_list
-                        st.rerun()
-        with col_right:
-            st.markdown('<div class="sec-label">N-J Memo</div>', unsafe_allow_html=True)
-            st.text_area("N-J Memo", NJ_MEMO, height=220, key="nj_memo_fixed", label_visibility="collapsed")
-            copy_button("複製 N-J Memo", NJ_MEMO, "copy-nj-memo-fixed")
-        results_list = st.session_state.get("line_from_order_nos_results", [])
-        for idx, item in enumerate(results_list):
-            if item["error"]:
-                st.error(f"訂單 {item['order_no']} 產生失敗：{item['error']}")
-                continue
-            line_result = item["result"]
-            line_text = item["text"]
-            all_nos = line_result.get("all_order_nos") or [line_result.get("order_no")]
-            order_no_display = "、".join(str(n) for n in all_nos if n)
-            is_combined = len(all_nos) > 1
-            is_multi_date = line_result.get("multi_date", False)
-            combined_note = "　⚠️ 跨日合併單" if (is_combined and is_multi_date) else ("　⚠️ 同日合併單" if is_combined else "")
-            st.caption(f"訂單：{order_no_display}{combined_note}　付款方式：{line_result.get('payway')}　區域：{line_result.get('region')}　金額：{line_result.get('service_amount') or '—'}　車馬費：{line_result.get('fare') or '0'}")
-            st.text_area(f"LINE 訊息（{line_result.get('order_no')}）", line_text, height=380, label_visibility="collapsed")
-            copy_button("複製 LINE 訊息", line_text, f"copy-line-msg-{idx}")
-            if idx < len(results_list) - 1:
-                st.markdown("<hr>", unsafe_allow_html=True)
+elif mode == "更新建議下次服務時間":
+    _next_service_time_page.render(backend_email, backend_password, env)
 
-
-    # --------------------------------------------------
-    # 建立訂單流程（批次建單／舊客／新客／儲值金訂單／訂單轉換／儲值金補價差）
-    # 都是「建立訂單」，共用邏輯集中在 function/order_creation.py。
-    # --------------------------------------------------
-    elif single_feature == "建立舊客訂單":
-        _order_creation_page.render_old_customer(backend_email, backend_password, env)
-
-    elif single_feature == "建立新客訂單":
-        _order_creation_page.render_new_customer(backend_email, backend_password, env)
-
-    elif single_feature == "訂單轉換":
-        _order_creation_page.render_order_conversion(backend_email, backend_password, env)
-
-    elif single_feature == "儲值金補價差":
-        _order_creation_page.render_topup_diff(backend_email, backend_password, env)
-
-    elif single_feature == "建立儲值金訂單":
-        _order_creation_page.render_stored_value_order(backend_email, backend_password, env)
-
-    elif single_feature == "整理預約下次服務":
-        info_panel("使用說明", [
-            "搜尋「評價日期」區間內、有勾選預約下次服務的評價紀錄。",
-            "每一筆會回頭查詢被評價的訂單本身，抓出電話/地址/服務日期時數/人數。",
-            "查詢筆數多時（例如整月）會需要一點時間，請耐心等候。",
-        ])
-        rn_col1, rn_col2 = st.columns(2)
-        with rn_col1:
-            rn_date_s = st.date_input("評價日期-起", value=None, key="rn_date_s")
-        with rn_col2:
-            rn_date_e = st.date_input("評價日期-迄", value=None, key="rn_date_e")
-        if st.button("🔍 開始搜尋", key="rn_search_btn", use_container_width=True):
-            if not backend_email.strip() or not backend_password.strip():
-                st.error("請先在上方輸入後台帳號密碼")
-            else:
-                try:
-                    with st.spinner("查詢評價與訂單中，可能需要一點時間…"):
-                        rn_results = qo.fetch_rating_next_appointments(
-                            env_name=env, backend_email=backend_email.strip(),
-                            backend_password=backend_password.strip(),
-                            date_s=rn_date_s.strftime("%Y-%m-%d") if rn_date_s else "",
-                            date_e=rn_date_e.strftime("%Y-%m-%d") if rn_date_e else "",
-                        )
-                    st.session_state.rn_results = rn_results
-                except Exception as e:
-                    st.error(f"搜尋失敗：{e}")
-
-        rn_results = st.session_state.get("rn_results")
-        if rn_results is not None:
-            if not rn_results:
-                st.info("這個區間內沒有預約下次服務的評價紀錄。")
-            else:
-                st.success(f"✅ 找到 {len(rn_results)} 筆預約下次服務的紀錄：")
-                # v2026.07.07 新增：姓名可以直接點擊連到客人的 LINE 聊天視窗。
-                # st.dataframe 的 LinkColumn 沒辦法讓儲存格顯示「姓名文字」但連到
-                # 「另一個網址」（display_text 只能重新格式化網址本身的文字），
-                # 所以改用 markdown 表格，姓名欄直接用 [姓名](LINE網址) 的超連結。
-                _rn_headers = ["評價日期", "姓名", "電話", "地址", "預約下次日期", "預約下次時間", "服務日期及時間", "服務人數", "訂單編號"]
-                _rn_md_lines = [
-                    "| " + " | ".join(_rn_headers) + " |",
-                    "|" + "|".join(["---"] * len(_rn_headers)) + "|",
-                ]
-                for r in rn_results:
-                    name_cell = f"[{r['姓名']}]({r['LINE']})" if r.get("LINE") else r["姓名"]
-                    _rn_md_lines.append(
-                        "| " + " | ".join([
-                            r["評價日期"], name_cell, r["電話"], r["地址"],
-                            r["預約下次日期"], r["預約下次時間"], r["服務日期及時間"], r["服務人數"],
-                            r["訂單編號"],
-                        ]) + " |"
-                    )
-                st.markdown("\n".join(_rn_md_lines))
-                rn_text = "\n".join(
-                    f"{r['評價日期']}/ {r['姓名']}/ {r['電話']} /{r['地址']}/{r['預約下次日期']} "
-                    f"/{r['預約下次時間']}/{r['服務日期及時間']} {r['服務人數']}/{r['訂單編號']}"
-                    for r in rn_results
-                )
-                # v2026.07.07 新增：Google Sheets 貼上時要能自動分欄，必須是用
-                # Tab 字元分隔（貼上純文字時瀏覽器複製到剪貼簿只會是斜線分隔的
-                # 一整行文字，Sheets 不會自動拆欄）。這裡另外組一份 Tab 分隔版本，
-                # 供貼到 Google Sheets 專用。
-                rn_tsv = "\n".join(
-                    ["\t".join(_rn_headers + ["LINE"])] +
-                    [
-                        "\t".join([
-                            r["評價日期"], r["姓名"], r["電話"], r["地址"],
-                            r["預約下次日期"], r["預約下次時間"], r["服務日期及時間"], r["服務人數"],
-                            r["訂單編號"], r.get("LINE") or "",
-                        ])
-                        for r in rn_results
-                    ]
-                )
-                copy_button("複製整理結果（文字訊息用）", rn_text, "copy_rn_results")
-                copy_button("複製整理結果（貼到 Google Sheets 用，會自動分欄，含 LINE 網址）", rn_tsv, "copy_rn_results_tsv")
-
-    elif single_feature == "更新建議下次服務時間":
-        info_panel("功能說明", [
-            "依「地址(B欄) + 電話(E欄)」查後台該電話底下所有訂單，比對地址後取最近3次"
-            "服務日期，寫入 L/M/N 欄（L=最近一次，N=最遠一次）。",
-            "登入帳密沿用 Step 1 上方輸入的後台帳號密碼，不用另外輸入。",
-            "會自動跳過純儲值金訂單與已取消/已退款訂單。",
-        ])
-
-        import function.next_service_dates as nsd
-
-        _nsd_sheet_options = {
-            f"{i+1}. {region}｜gid={gid}": (region, spreadsheet_id, gid)
-            for i, (region, spreadsheet_id, gid) in enumerate(nsd.SHEETS)
-        }
-        nsd_sheet_choice = st.selectbox(
-            "目標工作表", ["全部四份"] + list(_nsd_sheet_options.keys()), key="nsd_sheet_choice",
-        )
-
-        if st.button("🚀 開始查詢並更新", use_container_width=True, key="nsd_run_btn", type="primary"):
-            nsd_logs = []
-            nsd_log_box = st.empty()
-
-            def _nsd_ui_log(msg):
-                nsd_logs.append(str(msg))
-                nsd_log_box.text("\n".join(nsd_logs[-200:]))
-
-            if not backend_email.strip() or not backend_password.strip():
-                st.error("請先在上方 Step 1 輸入後台帳號密碼")
-            else:
-                try:
-                    targets = nsd.SHEETS if nsd_sheet_choice == "全部四份" else [_nsd_sheet_options[nsd_sheet_choice]]
-                    total_updated = 0
-                    with st.spinner("查詢中，依資料量可能需要幾分鐘…"):
-                        _session = nsd.login_backend(env, backend_email.strip(), backend_password.strip())
-                        for _region, _spreadsheet_id, _gid in targets:
-                            _nsd_ui_log(f"▶ 開始處理：{_region}｜gid={_gid}")
-                            total_updated += nsd.update_next_service_dates_sheet(
-                                _session, _spreadsheet_id, _gid, logger=_nsd_ui_log,
-                            )
-                    st.success(f"✅ 完成，共更新 {total_updated} 列。")
-                except Exception as e:
-                    st.error(f"執行失敗：{e}")
-
-    elif single_feature == "會員喜好設定":
-        info_panel("使用說明", [
-            "輸入電話查詢會員，會列出目前設定的喜愛專員性別。",
-            "下方會列出近 N 次「有排班」的服務紀錄（日期＋專員姓名），可針對每位出現過的專員勾選「喜愛」或「不喜愛」。",
-            "按下「更新會員喜好設定」才會真的送出，其餘會員資料（姓名/電話/備註等）不會被更動。",
-        ])
-        mp_phone = st.text_input("客人電話", key="mp_phone")
-        mp_n = st.number_input("列出近幾次服務紀錄", min_value=1, max_value=20, value=5, key="mp_n")
-        if st.button("🔍 查詢會員", key="mp_lookup_btn"):
-            if not mp_phone.strip():
-                st.error("請輸入電話")
-            elif not backend_email.strip() or not backend_password.strip():
-                st.error("請先在上方輸入後台帳號密碼")
-            else:
-                try:
-                    with st.spinner("查詢會員中…"):
-                        lookup = qo.quick_lookup_member(
-                            env_name=env, backend_email=backend_email.strip(),
-                            backend_password=backend_password.strip(),
-                            phone=mp_phone.strip(),
-                        )
-                        if not lookup.get("member_payload"):
-                            st.error("查無此會員")
-                            st.session_state.mp_data = None
-                        else:
-                            member = lookup["member_payload"]["member"]
-                            member_id = member["member_id"]
-                            edit_page = fetch_member_edit_page(lookup["session"], member_id)
-                            records = fetch_recent_service_records(
-                                lookup["session"], mp_phone.strip(), member.get("name", ""), n=int(mp_n),
-                            )
-                            st.session_state.mp_data = {
-                                "session": lookup["session"], "member_id": member_id,
-                                "member_name": member.get("name", ""), "edit_page": edit_page,
-                                "records": records,
-                            }
-                except Exception as e:
-                    st.error(f"查詢失敗：{e}")
-                    st.session_state.mp_data = None
-
-        mp_data = st.session_state.get("mp_data")
-        if mp_data:
-            st.success(f"✅ 會員：{mp_data['member_name']}")
-            gender_labels = ["不限", "限女", "1女", "限男", "1男", "1男1女"]
-            current_gender = int(mp_data["edit_page"]["fields"].get("preferredGender") or "0")
-            mp_gender_choice = st.radio(
-                "喜愛專員性別", gender_labels, index=current_gender, key="mp_gender", horizontal=True,
-            )
-
-            roster = mp_data["edit_page"]["roster"]
-            # 依姓名建立 name -> cleaner_id 對照（同名時取第一個符合的，並在畫面上提醒可能有同名狀況）
-            name_to_ids = {}
-            for cid, info in roster.items():
-                name_to_ids.setdefault(info["name"], []).append(cid)
-
-            if not mp_data["records"]:
-                st.info("查無近期有排班的服務紀錄。")
-            else:
-                st.markdown("**近期服務紀錄：**")
-                unique_names = []
-                for rec in mp_data["records"]:
-                    date_part = f"{rec['date_clean']}（{rec['order_no']}）" if rec["order_no"] else rec["date_clean"]
-                    st.caption(f"{date_part}：{' X '.join(rec['cleaner_names']) or '（無資料）'}")
-                    for cn in rec["cleaner_names"]:
-                        if cn not in unique_names:
-                            unique_names.append(cn)
-
-                st.markdown("**設定喜愛/不喜愛專員：**（同一位不能同時勾選兩個，若都勾了送出前會被擋下並提示）")
-                pref_choices = {}
-                has_conflict = False
-                for cn in unique_names:
-                    ids = name_to_ids.get(cn, [])
-                    if not ids:
-                        st.warning(f"⚠️「{cn}」在會員編輯頁的專員名單裡找不到對應資料，無法設定（可能是離職或名字打法不同）。")
-                        continue
-                    if len(ids) > 1:
-                        st.caption(f"（注意：「{cn}」有 {len(ids)} 位同名專員，將套用到第一位，麻煩人工確認是否正確）")
-                    cid = ids[0]
-
-                    # v2026.07.07 修正：改成兩個獨立的勾選框放在姓名前面
-                    # （喜愛專員／不喜愛專員），取代原本的單選按鈕。
-                    col_like, col_dislike, col_name = st.columns([1, 1.3, 3])
-                    with col_like:
-                        is_liked = st.checkbox("喜愛專員", value=roster[cid]["liked"], key=f"mp_like_{cid}")
-                    with col_dislike:
-                        is_disliked = st.checkbox("不喜愛專員", value=roster[cid]["disliked"], key=f"mp_dislike_{cid}")
-                    with col_name:
-                        st.markdown(f"　{cn}")
-
-                    if is_liked and is_disliked:
-                        st.error(f"「{cn}」不能同時勾選喜愛和不喜愛，請取消其中一個。")
-                        has_conflict = True
-
-                    pref_choices[cid] = "喜愛" if is_liked else ("不喜愛" if is_disliked else "不變")
-
-                if st.button("✅ 更新會員喜好設定", key="mp_submit_btn", type="primary", disabled=has_conflict):
-                    try:
-                        liked_ids = {cid for cid, info in roster.items() if info["liked"]}
-                        disliked_ids = {cid for cid, info in roster.items() if info["disliked"]}
-                        for cid, choice in pref_choices.items():
-                            liked_ids.discard(cid)
-                            disliked_ids.discard(cid)
-                            if choice == "喜愛":
-                                liked_ids.add(cid)
-                            elif choice == "不喜愛":
-                                disliked_ids.add(cid)
-                        with st.spinner("更新中…"):
-                            submit_member_preferences(
-                                mp_data["session"], mp_data["member_id"], mp_data["edit_page"],
-                                preferred_gender=gender_labels.index(mp_gender_choice),
-                                liked_ids=liked_ids, disliked_ids=disliked_ids,
-                            )
-                        st.success("✅ 已更新會員喜好設定。")
-                        st.session_state.mp_data = None
-                    except Exception as e:
-                        st.error(f"更新失敗：{e}")
+elif mode == "會員喜好設定":
+    _member_preferences_page.render(backend_email, backend_password, env)

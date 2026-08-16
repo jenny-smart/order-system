@@ -246,6 +246,7 @@ def render_batch(backend_email, backend_password, env):
 
 
 def render_old_customer(backend_email, backend_password, env):
+    step("3", "建立舊客訂單")
     info_panel("功能說明", ["用電話查詢會員與歷史已付款服務。", "多地址客人會顯示各地址近一年紀錄，請先跟客人確認地址。", "可選已知日期查班表，也可依客人需求搜尋可服務日期。"])
     q1, q2 = st.columns(2)
     with q1:
@@ -647,6 +648,7 @@ def render_old_customer(backend_email, backend_password, env):
 
 
 def render_new_customer(backend_email, backend_password, env):
+    step("3", "建立新客訂單")
     info_panel("功能說明", [
         "貼上客人提供的完整資料（含姓名/電話/email/地址/坪數/付款/發票），",
         "填入服務日期與人時後按建單，系統自動拆解、建會員、建單，",
@@ -1023,6 +1025,7 @@ def render_new_customer(backend_email, backend_password, env):
 
 
 def render_order_conversion(backend_email, backend_password, env):
+    step("3", "訂單轉換")
     info_panel(
         "流程說明",
         [
@@ -1220,6 +1223,7 @@ def render_order_conversion(backend_email, backend_password, env):
 
 
 def render_topup_diff(backend_email, backend_password, env):
+    step("3", "儲值金補價差")
     info_panel("流程說明", [
         "此功能拆成兩段：先成立儲值金折抵單，再成立客付補價差訂單。",
         "兩段都可勾選安全自動補檸檬人；已有任何班別的專員一律跳過，不動其他客人已配班專員。",
@@ -1390,6 +1394,7 @@ def render_topup_diff(backend_email, backend_password, env):
 
 
 def render_stored_value_order(backend_email, backend_password, env):
+    step("3", "建立儲值金訂單")
     info_panel("流程說明", [
         "地區＝登入帳號本身所屬地區（例如用台北帳號登入，就會建在台北）。",
         "付款方式與發票不用手動選：自動抓這支電話最近一次 VIP 或儲值金購買訂單的設定，"
