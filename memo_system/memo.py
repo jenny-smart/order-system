@@ -280,27 +280,14 @@ def get_spreadsheet():
     （大寫）→ 本機檔案，只有「取得憑證」這步會 fallback，open_by_key
     的錯誤會直接拋出。
     """
+    from shared.gsheet import get_service_account_info
+
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive",
     ]
-    service_account_info = None
-    if st is not None:
-        try:
-            if "gcp_service_account" in st.secrets:
-                service_account_info = dict(st.secrets["gcp_service_account"])
-            elif "GOOGLE_SERVICE_ACCOUNT" in st.secrets:
-                service_account_info = dict(st.secrets["GOOGLE_SERVICE_ACCOUNT"])
-        except Exception:
-            pass
-
-    if service_account_info is not None:
-        creds = Credentials.from_service_account_info(service_account_info, scopes=scopes)
-    else:
-        creds = Credentials.from_service_account_file(
-            GOOGLE_SERVICE_ACCOUNT_FILE,
-            scopes=scopes,
-        )
+    service_account_info = get_service_account_info()
+    creds = Credentials.from_service_account_info(service_account_info, scopes=scopes)
     gc = gspread.authorize(creds)
     return gc.open_by_key(SHEET_ID)
 
