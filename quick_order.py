@@ -412,12 +412,14 @@ import orders
 from orders import (
     login, get_csrf_token, get_member, pick_best_address_info,
     geocode_address, check_contain, calculate_hour, extract_calc_fields,
-    get_section_raw, slot_exists_in_section_response,
-    extract_cleaners_from_section_response, format_staff_from_cleaners,
     fetch_order_meta_by_order_no, extract_order_cards_from_purchase_html,
     _extract_staff_line, send_confirmation_mail, normalize_phone,
     normalize_addr_for_match, display_period_text, first_nonzero,
     find_nested_value, get_region_by_address, HEADERS,
+)
+from shared.staff_section import (
+    get_section_raw, slot_exists_in_section_response,
+    extract_cleaners_from_section_response, format_staff_from_cleaners,
 )
 from shared.text_parsing import (
     PAYWAY_MAP, CLEAN_TYPE_LABELS, PERIOD_DISPLAY_INFO,
