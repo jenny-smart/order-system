@@ -425,7 +425,7 @@ from shared.text_parsing import (
     PAYWAY_MAP, CLEAN_TYPE_LABELS, PERIOD_DISPLAY_INFO,
     normalize_booking_payway, _format_period_display, _extract_actual_service_time,
     _extract_phone_from_block_lines, _parse_service_date_time_loose, _extract_money_line,
-    _extract_total_amount_line, _extract_person_hour_line, _count_staff_from_lines,
+    _extract_total_amount_line, _extract_fare_line, _extract_person_hour_line, _count_staff_from_lines,
     _fix_address_district_order, _extract_district_from_address, _normalize_city_for_country_id,
     _extract_address_line, _date_not_after_today, _extract_label_value,
     _is_target_day, _filter_periods_by_preference, lookup_company_name_by_tax_id, _day_type_from_date,
@@ -702,11 +702,6 @@ def _check_order_no_duplicate(session, order_no):
 
 
 
-
-
-
-def _extract_fare_line(joined_text):
-    return _extract_money_line(joined_text, ["車馬費"])
 
 
 

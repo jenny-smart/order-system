@@ -353,6 +353,9 @@ def _extract_money_line(joined_text, labels):
 def _extract_total_amount_line(joined_text):
     return _extract_money_line(joined_text, ["訂單總金額", "總金額", "合計", "總計"])
 
+def _extract_fare_line(joined_text):
+    return _extract_money_line(joined_text, ["車馬費"])
+
 def _extract_person_hour_line(joined_text):
     text = str(joined_text or "")
     compact_match = re.search(r"(\d+)\s*人\s*(\d+(?:\.\d+)?)\s*(?:小時|時)", text)

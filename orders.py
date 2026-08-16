@@ -365,7 +365,7 @@ from shared.text_parsing import (
     first_nonzero, find_nested_value, parse_date_value, get_date_str, normalize_sheet_date, is_weekend,
     parse_time_slot, calc_hours_from_time, calc_effective_hours_from_time, normalize_period_text,
     display_period_text, normalize_sheet_period, slot_duration_hours, slot_start_hour, is_morning_slot,
-    map_to_system_slot, parse_service_human_hour, normalize_hours_text,
+    map_to_system_slot, parse_service_human_hour, normalize_hours_text, _extract_fare_line,
 )
 
 
@@ -1020,17 +1020,6 @@ def _extract_status_line(lines):
     return "未處理"
 
 
-def _extract_fare_line(lines):
-    joined = "\n".join(lines)
-    normalized = normalize_text_for_parse(joined)
-
-    m = re.search(r'車馬費[：:]?(\d+)', normalized)
-    if m:
-        return m.group(1)
-
-    return "0"
-
-
 def _extract_service_date_time(lines):
     service_date = ""
     service_time = ""
@@ -1068,7 +1057,7 @@ def fetch_order_meta_by_order_no(session, order_no):
             service_date, service_time = _extract_service_date_time(lines)
             staff = _extract_staff_line(lines)
             status = _extract_status_line(lines)
-            fare = _extract_fare_line(lines)
+            fare = _extract_fare_line("\n".join(lines))
 
             return {
                 "服務人員": staff if staff else "無人力",
