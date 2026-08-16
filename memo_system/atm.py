@@ -53,9 +53,6 @@ from zoneinfo import ZoneInfo
 from typing import Dict, List, Optional, Callable
 from difflib import SequenceMatcher
 
-import gspread
-from google.oauth2.service_account import Credentials
-
 from . import memo
 
 
@@ -188,46 +185,13 @@ def _get_gspread_client():
     """
     取得授權過的 gspread client。
 
-    v2026.07.11：修正憑證讀取邏輯——原本只檢查 st.secrets["GOOGLE_SERVICE_
-    ACCOUNT"]（大寫），但實際部署的 Streamlit secrets 是用小寫的
-    "gcp_service_account" 這個 key，導致這裡一直取不到、默默失敗
-    （except Exception: pass），接著 fallback 到根本不存在的本機檔案
-    google_service_account.json，最後報出「[Errno 2] No such file or
-    directory」這種看起來像是缺檔案、實際上是憑證 key 名稱查錯的誤導性
-    錯誤訊息。
-    改成跟 orders.py 的 get_service_account_info() 一致：依序檢查
-    gcp_service_account（小寫）→ GOOGLE_SERVICE_ACCOUNT（大寫）→
-    GOOGLE_SERVICE_ACCOUNT_JSON 環境變數 → 本機檔案，任何一種有設定
-    都能正確讀到。
+    改呼叫 shared.gsheet.build_gsheet_client()——同一套憑證解析邏輯（依序檢查
+    gcp_service_account／GOOGLE_SERVICE_ACCOUNT secrets → GOOGLE_SERVICE_
+    ACCOUNT_JSON 環境變數 → 本機檔案），orders.py／memo.py 都已經改用這份共用
+    版本，這裡不再自己重複一份。
     """
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive",
-    ]
-    service_account_info = None
-    try:
-        import streamlit as _st
-        if "gcp_service_account" in _st.secrets:
-            service_account_info = dict(_st.secrets["gcp_service_account"])
-        elif "GOOGLE_SERVICE_ACCOUNT" in _st.secrets:
-            service_account_info = dict(_st.secrets["GOOGLE_SERVICE_ACCOUNT"])
-    except Exception:
-        pass
-
-    if service_account_info is None:
-        raw_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
-        if raw_json:
-            service_account_info = json.loads(raw_json)
-
-    if service_account_info is not None:
-        creds = Credentials.from_service_account_info(service_account_info, scopes=scopes)
-        return gspread.authorize(creds)
-
-    creds = Credentials.from_service_account_file(
-        memo.GOOGLE_SERVICE_ACCOUNT_FILE,
-        scopes=scopes,
-    )
-    return gspread.authorize(creds)
+    from shared.gsheet import build_gsheet_client
+    return build_gsheet_client()
 
 
 def get_atm_spreadsheet(sheet_id: str):

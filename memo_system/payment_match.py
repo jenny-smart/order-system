@@ -7,9 +7,6 @@ from datetime import datetime
 from itertools import combinations
 from typing import Callable, Dict, List, Optional
 
-import gspread
-from google.oauth2.service_account import Credentials
-
 from . import memo
 
 
@@ -45,24 +42,8 @@ def _logger(callback: Optional[Callable[[str], None]] = None):
 
 
 def _client():
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive",
-    ]
-    info = None
-    try:
-        import streamlit as st
-        for key in ("gcp_service_account", "GOOGLE_SERVICE_ACCOUNT"):
-            if key in st.secrets:
-                info = dict(st.secrets[key])
-                break
-    except Exception:
-        pass
-    if info is None and os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip():
-        info = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
-    if info is not None:
-        return gspread.authorize(Credentials.from_service_account_info(info, scopes=scopes))
-    return gspread.authorize(Credentials.from_service_account_file(memo.GOOGLE_SERVICE_ACCOUNT_FILE, scopes=scopes))
+    from shared.gsheet import build_gsheet_client
+    return build_gsheet_client()
 
 
 def _secret_text(key: str) -> str:

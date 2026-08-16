@@ -111,7 +111,6 @@ from typing import Optional
 import requests
 from bs4 import BeautifulSoup
 import gspread
-from google.oauth2.service_account import Credentials
 
 try:
     import streamlit as st
@@ -243,47 +242,16 @@ def _sheet_config(region: str) -> dict:
 def _get_gspread_client():
     """
     建立（並快取）gspread client。
-    服務帳號設定比照 memo.py：優先讀 st.secrets["gcp_service_account"]（TOML 區塊），
-    沒有的話再試 st.secrets["GOOGLE_SERVICE_ACCOUNT"]（整包 JSON 字串）。
-    若您 memo.py 用的 key 名稱不同，請把下面兩個 _secret_value(...) 的 key 改成一致即可。
+    改呼叫 shared.gsheet.build_gsheet_client()，跟 orders.py／memo.py／atm.py
+    用同一套憑證解析邏輯（gcp_service_account／GOOGLE_SERVICE_ACCOUNT secrets →
+    GOOGLE_SERVICE_ACCOUNT_JSON 環境變數 → 本機檔案），這裡只保留快取。
     """
     global _gspread_client
     if _gspread_client is not None:
         return _gspread_client
 
-    if st is None:
-        raise RuntimeError("找不到 streamlit，無法讀取 st.secrets 取得 Google 憑證")
-
-    sa_info = None
-
-    # 依序嘗試這幾個 key（實際命名以 memo.py 為準：GOOGLE_SERVICE_ACCOUNT 是 TOML 區塊）
-    # 與 memo.py 保持一致，避免同時存在兩組憑證時選到未被分享 Sheet 的帳號。
-    for key in ("gcp_service_account", "GOOGLE_SERVICE_ACCOUNT"):
-        try:
-            block = st.secrets.get(key, None)
-        except Exception:
-            block = None
-
-        if not block:
-            continue
-
-        if isinstance(block, str):
-            # 萬一是整包 JSON 字串
-            import json
-            sa_info = json.loads(block)
-        else:
-            # TOML 區塊讀出來是 AttrDict / Mapping，直接轉成一般 dict
-            sa_info = dict(block)
-        break
-
-    if not sa_info:
-        raise RuntimeError(
-            "找不到 Google 服務帳號憑證，請確認 secrets.toml 裡有 [GOOGLE_SERVICE_ACCOUNT] "
-            "區塊或 GOOGLE_SERVICE_ACCOUNT（JSON 字串），命名請跟 memo.py 現有設定一致"
-        )
-
-    creds = Credentials.from_service_account_info(sa_info, scopes=_SCOPES)
-    _gspread_client = gspread.authorize(creds)
+    from shared.gsheet import build_gsheet_client
+    _gspread_client = build_gsheet_client()
     return _gspread_client
 
 
