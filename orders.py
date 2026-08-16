@@ -441,10 +441,6 @@ def is_weekend(date_value):
     return parse_date_value(date_value).weekday() >= 5
 
 
-def get_unit_price_by_date(date_value):
-    return 700 if is_weekend(date_value) else 600
-
-
 def parse_time_slot(start_time_str, end_time_str):
     if not str(start_time_str).strip() or not str(end_time_str).strip():
         raise Exception(f"開始時間或結束時間為空：{start_time_str} / {end_time_str}")
@@ -490,12 +486,6 @@ def display_period_text(start_time_str, end_time_str):
 
 def normalize_sheet_period(start_time_str, end_time_str):
     return normalize_period_text(start_time_str, end_time_str)
-
-
-def build_target_slot_from_row(row):
-    date_part = normalize_sheet_date(row["日期"])
-    period_part = normalize_sheet_period(row["開始時間"], row["結束時間"])
-    return f"{date_part}_{period_part}"
 
 
 def slot_duration_hours(slot_text):
@@ -2420,17 +2410,6 @@ def prepare_base_order_data(row, member_payload, address_info, clean_type_id, pe
     }
 
 
-def filter_dates_by_balance(date_slots, date_prices, stored_value):
-    # 只用服務費 price 判斷，車馬費不算在儲值金
-    selected_slots, selected_prices, total = [], [], 0
-    for slot, price in zip(date_slots, date_prices):
-        if total + price <= stored_value:
-            selected_slots.append(slot)
-            selected_prices.append(price)
-            total += price
-    return selected_slots, selected_prices, total
-
-
 def stage_send_confirmation(order_no, session):
     if not order_no:
         return {"確認信": ""}
@@ -3072,140 +3051,6 @@ def process_one_group(session, rows_with_idx, token, gcal_service, region, backe
 # =========================
 # 主執行
 # =========================
-def run_process(sheet_name, start_row, end_row, env_name_from_ui=None, allow_auto_lemon_shift=False):
-    print(f"目前環境：{ENV}")
-    print(f"BASE_URL：{BASE_URL}")
-    print(f"執行工作表：{sheet_name}")
-    print(f"執行列範圍：{start_row} ~ {end_row}")
-
-    ws, df = load_worksheet(sheet_name)
-
-    required_cols = [
-        "服務人時",
-        "備註",
-        "姓名",
-        "電話",
-        "地址",
-        "日期",
-        "開始時間",
-        "結束時間",
-        "狀態",
-        "購買項目",
-        "訂單編號",
-    ]
-    for col in required_cols:
-        if col not in df.columns:
-            raise Exception(f"工作表缺少必要欄位: {col}")
-
-    df = df[(df["__sheet_row__"] >= start_row) & (df["__sheet_row__"] <= end_row)]
-    df = df[df.apply(should_process_row, axis=1)]
-
-    if df.empty:
-        print("沒有符合條件的資料可執行。")
-        return
-
-    gcal_service = None
-    if ENABLE_GCAL_COLOR_SYNC:
-        try:
-            gcal_service = build_gcal_service()
-            print("Google Calendar 已啟用")
-        except Exception as e:
-            print(f"Google Calendar 初始化失敗：{e}")
-            gcal_service = None
-
-    grouped_orders = defaultdict(list)
-
-    for _, row in df.iterrows():
-        region = get_region_by_address(str(row["地址"]), ACCOUNTS)
-        if not region:
-            continue
-        if not should_create_order(row):
-            continue
-
-        key = (region, build_group_key(row))
-        grouped_orders[key].append((int(row["__sheet_row__"]), row))
-
-    all_row_results = {}
-
-    region_groups = defaultdict(list)
-    for (region, group_key), items in grouped_orders.items():
-        region_groups[region].append((group_key, items))
-
-    for region, group_items in region_groups.items():
-        config = ACCOUNTS.get(region)
-        if not config:
-            continue
-
-        email = config["email"]
-        password = config["password"]
-
-        print(f"\n===== 開始處理區域：{region} ({email}) =====")
-
-        session = requests.Session()
-        if not login(session, email, password):
-            print("登入失敗，略過該區域")
-            continue
-
-        used_order_nos_this_region = set()
-
-        for group_no, (_, rows_with_idx) in enumerate(group_items, start=1):
-            _, first_row = rows_with_idx[0]
-            print(f"\n--- 處理第 {group_no} 組：{first_row['姓名']}，共 {len(rows_with_idx)} 筆 ---")
-
-            try:
-                token = get_csrf_token(session)
-                row_results = process_one_group(
-                    session,
-                    rows_with_idx,
-                    token,
-                    gcal_service,
-                    region,
-                    None,
-                    ["建單", "寄確認信", "改 Google 日曆"],
-                    allow_auto_lemon_shift=allow_auto_lemon_shift,
-                    used_order_nos=used_order_nos_this_region,
-                )
-                all_row_results.update(row_results)
-            except Exception as e:
-                print(f"❌ 整組失敗：{e}")
-                for row_num, _ in rows_with_idx:
-                    all_row_results[row_num] = build_row_result(
-                        result="失敗",
-                        reason=str(e),
-                        status_value="",
-                        staff="無人力",
-                        service_status="未處理",
-                        fare="0",
-                    )
-
-            time.sleep(REQUEST_DELAY)
-
-    update_sheet_rows(ws, all_row_results)
-    print("已回填 Google Sheet。")
-
-    try:
-        consistency_problems = verify_batch_order_consistency(session, df, all_row_results)
-        if consistency_problems:
-            print(f"⚠️ 訂單一致性檢查發現 {len(consistency_problems)} 筆異常")
-            for p in consistency_problems:
-                _row_label = f"第 {p['row_num']} 列" if p.get("row_num") is not None else "（系統反查）"
-                print(f"  {_row_label}：{p['issue']}")
-    except Exception as e:
-        print(f"訂單一致性檢查失敗：{e}")
-
-
-def get_runtime_config(env_name: str):
-    if env_name == "dev":
-        return {
-            "BASE_URL": BASE_URL_DEV,
-            "ORDER_PREFIX": ORDER_PREFIX_DEV,
-        }
-    return {
-        "BASE_URL": BASE_URL_PROD,
-        "ORDER_PREFIX": ORDER_PREFIX_PROD,
-    }
-
-
 def run_process_web(env_name, region, backend_email, backend_password, sheet_name, start_row, end_row, selected_actions=None, logger=print, allow_auto_lemon_shift=False):
     global BASE_URL, ORDER_PREFIX
     if env_name == "dev":
@@ -3454,26 +3299,6 @@ def _extract_order_dates_from_block_lines(lines):
         if m_start and created_at is not None and service_date is None:
             service_date = m_start.group(1)
     return created_at, service_date, paid_date
-
-
-def _fetch_all_purchase_blocks_with_filters(session, extra_params, max_pages=80):
-    """依給定的篩選參數（會疊加在 PURCHASE_FILTER_PARAMS_TEMPLATE 上）撈出全部
-    分頁的訂單卡片。"""
-    all_blocks = []
-    for page in range(1, max_pages + 1):
-        params = dict(PURCHASE_FILTER_PARAMS_TEMPLATE)
-        params.update(extra_params)
-        params["page"] = str(page)
-        resp = session.get(PURCHASE_URL, params=params, headers=HEADERS, allow_redirects=True)
-        if resp.status_code != 200:
-            break
-        blocks = extract_order_cards_from_purchase_html(resp.text)
-        if not blocks:
-            break
-        all_blocks.extend(blocks)
-        if len(blocks) < 20:
-            break
-    return all_blocks
 
 
 def find_orders_without_line_link(
@@ -4479,80 +4304,3 @@ def run_backend_calendar_consistency_check(env_name, backend_email, backend_pass
     return result
 
 
-def run_batch_consistency_check(env_name, region, backend_email, backend_password, sheet_name, target_rows, logger=print):
-    """
-    v2026.07.05：批次「整批列都執行完」之後，統一做一次雙向一致性比對，
-    取代原本掛在 run_process_web 裡、每呼叫一次就各自比對一次的寫法
-    （那樣同一支電話在多列批次裡會被重複查詢很多次，也不是真正「全部成單到
-    一個段落後」的整批核對）。
-
-    做法：重新讀一次 Google Sheet 目前的狀態（此時 M 欄等欄位應該都已經是
-    這批次執行完、回填後的最終結果），只取 target_rows 這些列、且屬於
-    region 這個區域的資料，組成 verify_batch_order_consistency 需要的
-    all_row_results（每一列目前 Sheet 上寫的訂單編號），再呼叫既有的雙向
-    比對邏輯。
-
-    target_rows: 這次批次實際跑過的列號，可以是不連續的 list，例如 [2, 5, 9]。
-    回傳 list of dict：[{row_num, order_no, issue}, ...]，沒有問題則回傳空 list。
-    """
-    global BASE_URL, ORDER_PREFIX
-    if env_name == "dev":
-        BASE_URL = BASE_URL_DEV
-        ORDER_PREFIX = ORDER_PREFIX_DEV
-    else:
-        BASE_URL = BASE_URL_PROD
-        ORDER_PREFIX = ORDER_PREFIX_PROD
-
-    global LOGIN_URL, BOOKING_URL, PURCHASE_URL, GET_MEMBER_URL
-    global CHECK_CONTAIN_URL, CALCULATE_HOUR_URL, GET_SECTION_URL, MAIL_SUCCESS_URL
-
-    LOGIN_URL = f"{BASE_URL}/login"
-    BOOKING_URL = f"{BASE_URL}/booking/stored_value_routine"
-    PURCHASE_URL = f"{BASE_URL}/purchase"
-    GET_MEMBER_URL = f"{BASE_URL}/ajax/get_member"
-    CHECK_CONTAIN_URL = f"{BASE_URL}/ajax/check_contain"
-    CALCULATE_HOUR_URL = f"{BASE_URL}/ajax/calculate_hour"
-    GET_SECTION_URL = f"{BASE_URL}/ajax/get_section"
-    MAIL_SUCCESS_URL = f"{BASE_URL}/purchase/mail_success/{{order_no}}"
-
-    target_row_set = {int(r) for r in (target_rows or [])}
-    if not target_row_set:
-        return []
-
-    ws, df = load_worksheet(sheet_name)
-    required_cols = ["電話", "地址", "日期", "開始時間", "結束時間", "訂單編號"]
-    for col in required_cols:
-        if col not in df.columns:
-            raise Exception(f"工作表缺少必要欄位: {col}")
-
-    df = df[df["__sheet_row__"].isin(target_row_set)]
-    if df.empty:
-        logger("一致性檢查：指定的列號在工作表裡查無資料，略過。")
-        return []
-
-    df = df[df.apply(lambda row: get_region_by_address(str(row["地址"]), ACCOUNTS) == region, axis=1)]
-    if df.empty:
-        logger(f"一致性檢查：指定的列號裡沒有屬於 {region} 區域的資料，略過。")
-        return []
-
-    session = requests.Session()
-    if not login(session, backend_email, backend_password):
-        raise Exception("後台登入失敗，請確認帳號密碼（一致性檢查階段）")
-
-    all_row_results = {}
-    for _, row in df.iterrows():
-        row_num = int(row["__sheet_row__"])
-        all_row_results[row_num] = {"訂單編號": str(row.get("訂單編號", "") or "").strip()}
-
-    logger(f"開始整批一致性檢查（共 {len(all_row_results)} 列）…")
-    problems = verify_batch_order_consistency(session, df, all_row_results)
-
-    if problems:
-        logger(f"⚠️ 訂單一致性檢查發現 {len(problems)} 筆異常，請人工確認：")
-        for p in problems:
-            _row_label = f"第 {p['row_num']} 列" if p.get("row_num") is not None else "（系統反查）"
-            logger(f"  {_row_label}（訂單 {p['order_no']}）：{p['issue']}")
-    else:
-        logger("✅ 訂單一致性檢查通過，本次寫回的訂單編號皆與 Google Sheet 電話/地址/日期/時段相符。")
-
-    return problems
