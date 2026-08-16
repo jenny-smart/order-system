@@ -1276,44 +1276,7 @@ def send_confirmation_mail(session, order_no):
 # =========================
 # Google Calendar
 # =========================
-def build_gcal_service():
-    if not ENABLE_GCAL_COLOR_SYNC:
-        return None
-
-    scopes = ["https://www.googleapis.com/auth/calendar"]
-    service_account_info = get_service_account_info()
-    credentials = Credentials.from_service_account_info(service_account_info, scopes=scopes)
-    return build("calendar", "v3", credentials=credentials)
-
-
-def parse_event_time(dt_str):
-    if not dt_str:
-        return None
-    try:
-        return datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
-    except Exception:
-        try:
-            return datetime.strptime(dt_str, "%Y-%m-%d")
-        except Exception:
-            return None
-
-
-def color_name_from_id(color_id):
-    mapping = {
-        "1": "薰衣草紫",
-        "2": "鼠尾草綠",
-        "3": "葡萄紫",
-        "4": "火鶴紅",
-        "5": "香蕉黃",
-        "6": "橘子橙",
-        "7": "孔雀藍",
-        "8": "石墨灰",
-        "9": "藍莓藍",
-        "10": "羅勒綠",
-        "11": "番茄紅",
-    }
-    return mapping.get(str(color_id), f"未知({color_id})")
-
+from shared.gcal import build_gcal_service, parse_event_time, color_name_from_id
 
 def find_matching_calendar_event(service, calendar_id, address, target_date, start_time_str, end_time_str):
     target_date_obj = parse_date_value(target_date)
