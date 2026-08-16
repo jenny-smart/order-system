@@ -429,6 +429,7 @@ from shared.text_parsing import (
     _fix_address_district_order, _extract_district_from_address, _normalize_city_for_country_id,
     _extract_address_line, _date_not_after_today, _extract_label_value,
     _is_target_day, _filter_periods_by_preference, lookup_company_name_by_tax_id, _day_type_from_date,
+    _extract_payway_line, _is_paid_order_text, _extract_invoice_line, _extract_clean_type_line,
 )
 from accounts import ACCOUNTS
 from env import BASE_URL_DEV, BASE_URL_PROD, ORDER_PREFIX_DEV, ORDER_PREFIX_PROD
@@ -654,30 +655,6 @@ def _extract_service_type_label(lines):
     return ""
 
 
-def _extract_payway_line(joined_text):
-    text = str(joined_text or "")
-    for line in text.splitlines():
-        if "付款方式" not in line:
-            continue
-        m_line = re.search(r"付款方式[：:]\s*(.+)", line)
-        if m_line:
-            value = normalize_booking_payway(m_line.group(1).strip())
-            if value in ("信用卡", "ATM", "儲值金"):
-                return value
-    m = re.search(r"付款方式[：:]\s*([^\s\n]+)", text)
-    if m:
-        value = normalize_booking_payway(m.group(1).strip())
-        if value in ("信用卡", "ATM", "儲值金"):
-            return value
-    if "藍新ATM" in text or "ATM" in text:
-        return "ATM"
-    if "儲值金" in text:
-        return "儲值金"
-    if _extract_total_amount_line(text) == "0" and not _extract_invoice_line(text):
-        return "儲值金"
-    return ""
-
-
 def _service_amount_from_block(joined_text, fare):
     total = _extract_total_amount_line(joined_text)
     if not total:
@@ -691,47 +668,17 @@ def _service_amount_from_block(joined_text, fare):
         return total
 
 
-def _is_paid_order_text(joined_text, trusted_paid_filter=False):
-    if "已取消" in joined_text or "已退款" in joined_text:
-        return False
-    if trusted_paid_filter:
-        return True
-    compact = re.sub(r"\s+", "", str(joined_text or ""))
-    if "待付款" in compact or "未付款" in compact:
-        return False
-    if "已付款" in compact:
-        return True
-    if "儲值金" in compact and (
-        _extract_total_amount_line(joined_text) == "0"
-        or "扣儲值金" in compact or "儲值金扣款" in compact
-    ):
-        return True
-    if re.search(r"付款.{0,12}(完成|成功)", compact):
-        return True
-    return False
-
-
-def _extract_invoice_line(joined_text):
-    m = re.search(r"((?:二聯式|三聯式|捐贈發票)[：:][^\n]*)", joined_text)
-    return m.group(1).strip() if m else ""
-
-
-
-
-def _extract_clean_type_line(joined_text):
-    for label in CLEAN_TYPE_LABELS:
-        if label in joined_text:
-            return label
-    return ""
-
-
-
-
 
 
 # =========================================================
 # 會員查詢 & 訂單建立
 # =========================================================
+
+from shared.member_lookup import (
+    get_customer_paid_orders, _match_person_hour, _order_person_hour,
+    get_last_paid_per_address, get_last_paid_summary, get_unserved_paid_orders,
+)
+
 
 def quick_lookup_member(env_name, backend_email, backend_password, phone, clean_type_id="1"):
     base_url = _configure_environment(env_name)
@@ -744,169 +691,6 @@ def quick_lookup_member(env_name, backend_email, backend_password, phone, clean_
     return {"session": session, "token": token, "phone": phone, "member_payload": member_payload, "base_url": base_url, "env_name": env_name}
 
 
-def get_customer_paid_orders(session, phone, known_addresses=None, name=""):
-    known_addresses = known_addresses or []
-    blocks = _fetch_purchase_blocks_for_phone(session, phone, name=name, purchase_status=PURCHASE_STATUS_PAID)
-    trusted_paid_filter = (
-        get_last_purchase_fetch_debug().get("effective_purchase_status_filter") == PURCHASE_STATUS_PAID
-    )
-    results = []
-    for block in blocks:
-        lines = block.get("lines", [])
-        joined = "\n".join(lines)
-        if not _is_paid_order_text(joined, trusted_paid_filter=trusted_paid_filter):
-            continue
-        service_date, service_time = _parse_service_date_time_loose(joined)
-        if not service_date:
-            continue
-        joined_norm = normalize_addr_for_match(joined)
-        matched_addr = ""
-        for addr in known_addresses:
-            if addr and normalize_addr_for_match(addr) in joined_norm:
-                matched_addr = addr
-                break
-        person, hour = _extract_person_hour_line(joined)
-        payway = _extract_payway_line(joined)
-        invoice_text = "" if payway == "儲值金" else _extract_invoice_line(joined)
-        results.append({
-            "order_no": block["order_no"], "date": service_date, "time": service_time,
-            "address": matched_addr, "clean_type": _extract_clean_type_line(joined),
-            "staff": _extract_staff_line(lines), "payway": payway, "invoice_text": invoice_text,
-            "service_notice": _extract_label_value(lines, "客服備註", ["財務備註", "客人備註"]),
-            "person": person, "hour": hour,
-            "total_amount": _extract_total_amount_line(joined),
-            "fare": _extract_fare_line(joined),
-        })
-    results.sort(key=lambda x: (x["date"], x.get("time", "")), reverse=True)
-    return results
-
-
-def _match_person_hour(member_payload, order_no, address):
-    if not isinstance(member_payload, dict):
-        return "", ""
-    last_purchase = member_payload.get("lastPurchase", {}) or {}
-    member = member_payload.get("member", {}) or {}
-    addr_list = member.get("memberAddressList", []) or []
-    candidates = []
-    if last_purchase:
-        candidates.append(last_purchase)
-    target_norm = normalize_addr_for_match(address) if address else ""
-    for item in addr_list:
-        if target_norm and normalize_addr_for_match(item.get("address", "")) == target_norm:
-            item_purchase = item.get("purchase", {})
-            if isinstance(item_purchase, dict) and item_purchase:
-                candidates.append(item_purchase)
-    for c in candidates:
-        if str(c.get("order_no", "")).strip() == str(order_no).strip():
-            return c.get("person", ""), c.get("hour", "")
-    return "", ""
-
-
-def _order_person_hour(member_payload, order):
-    person, hour = _match_person_hour(member_payload, order.get("order_no", ""), order.get("address", ""))
-    return person or order.get("person", ""), hour or order.get("hour", "")
-
-
-def get_last_paid_per_address(session, phone, member_payload, known_addresses, within_days=365):
-    cutoff = date.today() - timedelta(days=within_days)
-    name = (member_payload.get("member", {}) or {}).get("name", "") if isinstance(member_payload, dict) else ""
-    paid_orders = get_customer_paid_orders(session, phone, known_addresses, name=name)
-    by_address = {}
-    for o in paid_orders:
-        addr = o.get("address", "")
-        if not addr or addr in by_address:
-            continue
-        try:
-            d = datetime.strptime(o["date"], "%Y-%m-%d").date()
-        except Exception:
-            continue
-        if d > date.today() or d < cutoff:
-            continue
-        by_address[addr] = o
-    result = {}
-    for addr in known_addresses:
-        order = by_address.get(addr)
-        if not order:
-            result[addr] = None
-            continue
-        person, hour = _order_person_hour(member_payload, order)
-        result[addr] = {
-            "order_no": order["order_no"], "date": order["date"], "time": order["time"],
-            "clean_type": order["clean_type"], "staff": order["staff"], "payway": order["payway"],
-            "invoice_text": order["invoice_text"], "service_notice": order["service_notice"],
-            "person": person, "hour": hour, "fare": order.get("fare", ""),
-        }
-    return result
-
-
-def get_last_paid_summary(session, phone, member_payload, known_addresses):
-    name = (member_payload.get("member", {}) or {}).get("name", "") if isinstance(member_payload, dict) else ""
-    paid_orders = get_customer_paid_orders(session, phone, known_addresses, name=name)
-    paid_orders = [o for o in paid_orders if _date_not_after_today(o.get("date", ""))]
-    if not paid_orders:
-        return None
-    latest = paid_orders[0]
-    same_date_orders = []
-    for order in paid_orders:
-        if order["date"] != latest["date"]:
-            continue
-        person, hour = _order_person_hour(member_payload, order)
-        enriched = dict(order)
-        enriched["person"] = person
-        enriched["hour"] = hour
-        same_date_orders.append(enriched)
-    person, hour = _order_person_hour(member_payload, latest)
-    return {
-        "order_no": latest["order_no"], "date": latest["date"], "time": latest["time"],
-        "address": latest["address"], "clean_type": latest["clean_type"], "staff": latest["staff"],
-        "payway": latest["payway"], "invoice_text": latest["invoice_text"],
-        "service_notice": latest["service_notice"], "person": person, "hour": hour,
-        "fare": latest.get("fare", ""), "same_date_orders": same_date_orders,
-    }
-
-
-def get_unserved_paid_orders(session, phone, member_payload, known_addresses, today_value=None):
-    today_value = today_value or date.today()
-    name = (member_payload.get("member", {}) or {}).get("name", "") if isinstance(member_payload, dict) else ""
-    blocks = _fetch_purchase_blocks_for_phone(session, phone, name=name, purchase_status=PURCHASE_STATUS_PAID)
-    trusted_paid_filter = (
-        get_last_purchase_fetch_debug().get("effective_purchase_status_filter") == PURCHASE_STATUS_PAID
-    )
-    upcoming = []
-    for block in blocks:
-        lines = block.get("lines", [])
-        joined = "\n".join(lines)
-        if not _is_paid_order_text(joined, trusted_paid_filter=trusted_paid_filter):
-            continue
-        service_date, service_time = _parse_service_date_time_loose(joined)
-        if not service_date:
-            continue
-        try:
-            d = datetime.strptime(service_date, "%Y-%m-%d").date()
-        except Exception:
-            continue
-        if d < today_value:
-            continue
-        joined_norm = normalize_addr_for_match(joined)
-        matched_addr = ""
-        for addr in known_addresses or []:
-            if addr and normalize_addr_for_match(addr) in joined_norm:
-                matched_addr = addr
-                break
-        payway = _extract_payway_line(joined)
-        parsed_person, parsed_hour = _extract_person_hour_line(joined)
-        person, hour = _match_person_hour(member_payload, block["order_no"], matched_addr)
-        person = person or parsed_person
-        hour = hour or parsed_hour
-        upcoming.append({
-            "order_no": block["order_no"], "date": service_date, "time": service_time,
-            "address": matched_addr, "clean_type": _extract_clean_type_line(joined),
-            "staff": _extract_staff_line(lines), "payway": payway,
-            "invoice_text": "" if payway == "儲值金" else _extract_invoice_line(joined),
-            "person": person, "hour": hour, "fare": _extract_fare_line(joined),
-        })
-    upcoming.sort(key=lambda x: x["date"])
-    return upcoming
 
 
 def quick_check_available_slots(env_name, payway, lookup_result, address, clean_type_id, date_s, hour, person="2", periods=None, period_hours=None):

@@ -513,3 +513,55 @@ def _day_type_from_date(date_text):
     except Exception:
         return "平日"
     return "週末" if d.weekday() >= 5 else "平日"
+
+def _extract_payway_line(joined_text):
+    text = str(joined_text or "")
+    for line in text.splitlines():
+        if "付款方式" not in line:
+            continue
+        m_line = re.search(r"付款方式[：:]\s*(.+)", line)
+        if m_line:
+            value = normalize_booking_payway(m_line.group(1).strip())
+            if value in ("信用卡", "ATM", "儲值金"):
+                return value
+    m = re.search(r"付款方式[：:]\s*([^\s\n]+)", text)
+    if m:
+        value = normalize_booking_payway(m.group(1).strip())
+        if value in ("信用卡", "ATM", "儲值金"):
+            return value
+    if "藍新ATM" in text or "ATM" in text:
+        return "ATM"
+    if "儲值金" in text:
+        return "儲值金"
+    if _extract_total_amount_line(text) == "0" and not _extract_invoice_line(text):
+        return "儲值金"
+    return ""
+
+def _is_paid_order_text(joined_text, trusted_paid_filter=False):
+    if "已取消" in joined_text or "已退款" in joined_text:
+        return False
+    if trusted_paid_filter:
+        return True
+    compact = re.sub(r"\s+", "", str(joined_text or ""))
+    if "待付款" in compact or "未付款" in compact:
+        return False
+    if "已付款" in compact:
+        return True
+    if "儲值金" in compact and (
+        _extract_total_amount_line(joined_text) == "0"
+        or "扣儲值金" in compact or "儲值金扣款" in compact
+    ):
+        return True
+    if re.search(r"付款.{0,12}(完成|成功)", compact):
+        return True
+    return False
+
+def _extract_invoice_line(joined_text):
+    m = re.search(r"((?:二聯式|三聯式|捐贈發票)[：:][^\n]*)", joined_text)
+    return m.group(1).strip() if m else ""
+
+def _extract_clean_type_line(joined_text):
+    for label in CLEAN_TYPE_LABELS:
+        if label in joined_text:
+            return label
+    return ""
