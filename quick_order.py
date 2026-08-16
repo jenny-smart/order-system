@@ -459,9 +459,10 @@ from shared.cleaner_shift import (
     _get_schedule_edit_info,
 )
 
-from shared.backend_client import PURCHASE_FILTER_PARAMS_TEMPLATE, _fetch_order_edit_id
-_LAST_PURCHASE_FETCH_DEBUG = {}
-PURCHASE_STATUS_PAID = "1"
+from shared.backend_client import (
+    PURCHASE_FILTER_PARAMS_TEMPLATE, _fetch_order_edit_id, PURCHASE_STATUS_PAID,
+    get_last_purchase_fetch_debug, _fetch_purchase_blocks_for_phone, list_order_numbers_for_phone,
+)
 
 
 # =========================================================
@@ -556,84 +557,6 @@ def _build_booking_submit_data(base_data, token, payway, slot):
             data.pop(_k, None)
     return data
 
-
-def get_last_purchase_fetch_debug():
-    return dict(_LAST_PURCHASE_FETCH_DEBUG)
-
-
-def _block_matches_phone_filter(block, phone_norm):
-    if not phone_norm:
-        return True
-    joined = "\n".join(block.get("lines", []))
-    compact = joined.replace("-", "").replace(" ", "")
-    if phone_norm in compact:
-        return True
-    visible_phones = {
-        normalize_phone(m.group(0))
-        for m in re.finditer(r"(?:\+?886[-\s]?)?0?9[\d\-\s]{8,12}", joined)
-    }
-    visible_phones.discard("")
-    if visible_phones:
-        return phone_norm in visible_phones
-    return True
-
-
-def _fetch_purchase_blocks_for_phone(session, phone, name="", purchase_status=""):
-    global _LAST_PURCHASE_FETCH_DEBUG
-    params = dict(PURCHASE_FILTER_PARAMS_TEMPLATE)
-    params["phone"] = normalize_phone(phone)
-    if purchase_status:
-        params["purchase_status"] = purchase_status
-    if name and not params["phone"]:
-        params["name"] = name
-    resp = session.get(orders.PURCHASE_URL, params=params, headers=HEADERS, allow_redirects=True)
-    raw_blocks = []
-    if resp.status_code == 200:
-        raw_blocks = extract_order_cards_from_purchase_html(resp.text)
-    looks_like_login_page = "login" in resp.url.lower() or (len(raw_blocks) == 0 and "password" in resp.text.lower())
-    effective_purchase_status = purchase_status
-    fallback_info = {}
-    if purchase_status and resp.status_code == 200 and not raw_blocks and not looks_like_login_page:
-        fallback_params = dict(PURCHASE_FILTER_PARAMS_TEMPLATE)
-        fallback_params["phone"] = normalize_phone(phone)
-        if name and not fallback_params["phone"]:
-            fallback_params["name"] = name
-        fallback_resp = session.get(orders.PURCHASE_URL, params=fallback_params, headers=HEADERS, allow_redirects=True)
-        fallback_blocks = []
-        if fallback_resp.status_code == 200:
-            fallback_blocks = extract_order_cards_from_purchase_html(fallback_resp.text)
-        fallback_info = {
-            "fallback_request_url": getattr(fallback_resp.request, "url", ""),
-            "fallback_status_code": fallback_resp.status_code,
-            "fallback_raw_block_count": len(fallback_blocks),
-        }
-        if fallback_blocks:
-            resp = fallback_resp
-            raw_blocks = fallback_blocks
-            effective_purchase_status = ""
-            looks_like_login_page = "login" in resp.url.lower()
-    _LAST_PURCHASE_FETCH_DEBUG = {
-        "request_url": getattr(resp.request, "url", ""), "final_url": resp.url,
-        "status_code": resp.status_code, "purchase_status_filter": purchase_status,
-        "effective_purchase_status_filter": effective_purchase_status,
-        "raw_block_count": len(raw_blocks), "looks_like_login_page": looks_like_login_page,
-        "snippet": resp.text[:300].replace("\n", " ").strip() if resp.status_code == 200 else "",
-        **fallback_info,
-    }
-    if resp.status_code != 200:
-        return []
-    phone_norm = normalize_phone(phone)
-    if not phone_norm:
-        _LAST_PURCHASE_FETCH_DEBUG["filtered_block_count"] = len(raw_blocks)
-        return raw_blocks
-    filtered = [block for block in raw_blocks if _block_matches_phone_filter(block, phone_norm)]
-    _LAST_PURCHASE_FETCH_DEBUG["filtered_block_count"] = len(filtered)
-    return filtered
-
-
-def list_order_numbers_for_phone(session, phone, name=""):
-    blocks = _fetch_purchase_blocks_for_phone(session, phone, name=name)
-    return {block["order_no"] for block in blocks if block.get("order_no")}
 
 
 def _fetch_line_url_for_order_no(session, order_no):
