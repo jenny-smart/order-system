@@ -299,20 +299,8 @@ MAIL_SUCCESS_URL = f"{BASE_URL}/purchase/mail_success/{{order_no}}"
 
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-# v2026.07.05：後台 /purchase 訂單列表頁的搜尋表單，瀏覽器送出時會帶上全部
-# 欄位（沒填的欄位是空字串，不是完全不送）。如果我們用 requests 查詢時只帶
-# 想篩選的那一兩個參數（例如只送 phone），後台某些邏輯是用「這個參數有沒有
-# 出現在請求裡」而不是「值是不是空字串」來判斷，可能會觸發跟瀏覽器不一樣的
-# 預設篩選（例如自動加上當月日期區間），導致查到的結果變少甚至查無資料。
-# 所以查詢時一律以這份樣板為底，只覆蓋真正要篩選的欄位，其餘保持空字串。
-PURCHASE_FILTER_PARAMS_TEMPLATE = {
-    "keyword": "", "name": "", "phone": "", "orderNo": "",
-    "date_s": "", "date_e": "", "clean_date_s": "", "clean_date_e": "",
-    "paid_at_s": "", "paid_at_e": "", "refundDateS": "", "refundDateE": "",
-    "buy": "", "area_id": "", "isCharge": "", "isRefund": "",
-    "payway": "", "purchase_status": "", "progress_status": "",
-    "invoiceStatus": "", "otherFee": "", "orderBy": "",
-}
+from shared.backend_client import PURCHASE_FILTER_PARAMS_TEMPLATE, _fetch_order_edit_id
+
 MAIL_HEADERS = {
     "Accept": "application/json, text/plain, */*",
     "User-Agent": "Mozilla/5.0",
@@ -2719,18 +2707,6 @@ def _fetch_order_edit_notice(session, order_no, edit_id=None):
         return None
     value = notice.get("value") if notice.name == "input" else notice.get_text()
     return str(value or "").strip()
-
-
-def _fetch_order_edit_id(session, order_no):
-    """跟 quick_order.py 裡同名函式邏輯一致，這裡另外放一份是因為 orders.py
-    不匯入 quick_order（避免循環匯入：quick_order 本身會匯入 orders）。"""
-    params = dict(PURCHASE_FILTER_PARAMS_TEMPLATE)
-    params["orderNo"] = str(order_no).strip()
-    resp = session.get(PURCHASE_URL, params=params, headers=HEADERS, allow_redirects=True)
-    if resp.status_code != 200:
-        return None
-    m = re.search(r"/purchase/edit/(\d+)", resp.text)
-    return m.group(1) if m else None
 
 
 def add_bonus_note_to_order(session, base_url, order_no, bonus_names, edit_id=None):

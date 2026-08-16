@@ -459,14 +459,7 @@ from shared.cleaner_shift import (
     _get_schedule_edit_info,
 )
 
-PURCHASE_FILTER_PARAMS_TEMPLATE = {
-    "keyword": "", "name": "", "phone": "", "orderNo": "",
-    "date_s": "", "date_e": "", "clean_date_s": "", "clean_date_e": "",
-    "paid_at_s": "", "paid_at_e": "", "refundDateS": "", "refundDateE": "",
-    "buy": "", "area_id": "", "isCharge": "", "isRefund": "",
-    "payway": "", "purchase_status": "", "progress_status": "",
-    "invoiceStatus": "", "otherFee": "", "orderBy": "",
-}
+from shared.backend_client import PURCHASE_FILTER_PARAMS_TEMPLATE, _fetch_order_edit_id
 _LAST_PURCHASE_FETCH_DEBUG = {}
 PURCHASE_STATUS_PAID = "1"
 
@@ -1523,16 +1516,6 @@ def _service_due_after_fare(session, order_no):
         return int(float(str(service_amount or "0").replace(",", "")))
     except Exception:
         return None
-
-
-def _fetch_order_edit_id(session, order_no):
-    params = dict(PURCHASE_FILTER_PARAMS_TEMPLATE)
-    params["orderNo"] = str(order_no).strip()
-    resp = session.get(orders.PURCHASE_URL, params=params, headers=HEADERS, allow_redirects=True)
-    if resp.status_code != 200:
-        return None
-    m = re.search(r"/purchase/edit/(\d+)", resp.text)
-    return m.group(1) if m else None
 
 
 def _extract_purchase_json_from_edit_html(html_text):
