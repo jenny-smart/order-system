@@ -16,7 +16,7 @@ from typing import Dict, List, Optional, Callable, Tuple
 import requests
 from bs4 import BeautifulSoup
 
-from . import memo
+from shared import memo_backend as memo
 
 # -----------------------------------------------------------------------------
 # 類型對照表

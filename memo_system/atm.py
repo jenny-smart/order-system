@@ -53,7 +53,7 @@ from zoneinfo import ZoneInfo
 from typing import Dict, List, Optional, Callable
 from difflib import SequenceMatcher
 
-from . import memo
+from shared import memo_backend as memo
 
 
 # -----------------------------------------------------------------------------

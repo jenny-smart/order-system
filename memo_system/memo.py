@@ -2,81 +2,22 @@
 # -*- coding: utf-8 -*-
 import re
 import time
-from datetime import datetime
-from typing import Optional, List, Dict, Callable
+from typing import Optional, List, Dict
 
-import streamlit as st  # 僅用於讀取 st.secrets，不做任何畫面輸出
-import requests
 from bs4 import BeautifulSoup
-import gspread
-from google.oauth2.service_account import Credentials
 
-
-# -----------------------------------------------------------------------------
-# Config
-# -----------------------------------------------------------------------------
-try:
-    from . import env  # type: ignore
-except Exception:
-    class env:  # type: ignore
-        ENV = "prod"
-        BASE_URL_DEV = "https://backend-dev.lemonclean.com.tw"
-        BASE_URL_PROD = "https://backend.lemonclean.com.tw"
-        WORKSHEET_NAME = "memo"
-        LOG_SHEET_NAME = "memo_log"
-        GOOGLE_SERVICE_ACCOUNT_FILE = ""
-        SLEEP_SECONDS = 0.5
-        SHEET_ID = ""
-
-
-def secret_value(key: str, default=""):
-    try:
-        return st.secrets.get(key, default)
-    except Exception:
-        return default
-
-
-ENV_NAME = str(secret_value("ENV", getattr(env, "ENV", "prod"))).lower()
-BASE_URL_DEV = str(secret_value("BASE_URL_DEV", getattr(env, "BASE_URL_DEV", "https://backend-dev.lemonclean.com.tw")))
-BASE_URL_PROD = str(secret_value("BASE_URL_PROD", getattr(env, "BASE_URL_PROD", "https://backend.lemonclean.com.tw")))
-SHEET_ID = str(secret_value("SHEET_ID", getattr(env, "SHEET_ID", "")))
-
-BASE_URL = ""
-LOGIN_URL = ""
-PURCHASE_URL = ""
-
-
-def set_env(env_name: str):
-    global ENV_NAME, BASE_URL, LOGIN_URL, PURCHASE_URL
-    ENV_NAME = (env_name or "prod").lower()
-    BASE_URL = BASE_URL_DEV if ENV_NAME == "dev" else BASE_URL_PROD
-    BASE_URL = BASE_URL.rstrip("/")
-    LOGIN_URL = f"{BASE_URL}/login"
-    PURCHASE_URL = f"{BASE_URL}/purchase"
-
-
-set_env(ENV_NAME)
-
-RUNTIME_EMAIL = ""
-RUNTIME_PASSWORD = ""
-
-
-def set_runtime_credentials(email: str, password: str):
-    global RUNTIME_EMAIL, RUNTIME_PASSWORD
-    RUNTIME_EMAIL = (email or "").strip()
-    RUNTIME_PASSWORD = (password or "").strip()
-
-
-WORKSHEET_NAME = str(secret_value("WORKSHEET_NAME", getattr(env, "WORKSHEET_NAME", "memo")))
-LOG_SHEET_NAME = str(secret_value("LOG_SHEET_NAME", getattr(env, "LOG_SHEET_NAME", "memo_log")))
-GOOGLE_SERVICE_ACCOUNT_FILE = str(secret_value("GOOGLE_SERVICE_ACCOUNT_FILE", getattr(env, "GOOGLE_SERVICE_ACCOUNT_FILE", "")))
-SLEEP_SECONDS = float(secret_value("SLEEP_SECONDS", getattr(env, "SLEEP_SECONDS", 0.5)))
-
-REQUEST_TIMEOUT = 30
-MAX_RETRIES = 3
-RETRY_BACKOFF = 1.2
-
-CURRENT_ROW_LOGS: List[str] = []
+from shared import memo_backend
+from shared.memo_backend import (
+    set_env, set_runtime_credentials, secret_value, SLEEP_SECONDS, CURRENT_ROW_LOGS,
+    make_logger, blank_result, with_retry, session_get, session_post,
+    get_ws, get_log_ws, append_log_row, apply_sheet_presentation, login,
+)
+from shared.memo_text import (
+    normalize_phone, parse_phone_list, normalize_text, same_address,
+    safe_cell, parse_date, parse_row_spec, extract_name_from_text_block,
+    extract_service_date_from_page_text, extract_address_from_text_block,
+    get_purchase_id_from_edit_url, display_service_date, item_service_date_obj,
+)
 
 # 新成單（地址完全沒有歷史訂單）時，自動帶入的固定提醒文字
 DEFAULT_NEW_ORDER_NOTICE = (
@@ -85,237 +26,6 @@ DEFAULT_NEW_ORDER_NOTICE = (
     "＊特別注意事項\n"
     "＊服務小貼心"
 )
-
-
-def make_logger(ui_logger: Optional[Callable[[str], None]] = None):
-    def _log(msg: str):
-        msg = str(msg)
-        print(msg, flush=True)
-        CURRENT_ROW_LOGS.append(msg)
-        if ui_logger:
-            ui_logger(msg)
-    return _log
-
-
-def blank_result():
-    return {
-        "processed": 0,
-        "success": 0,
-        "failed": 0,
-        "skipped": 0,
-        "updated_orders": 0,
-        "errors": [],
-    }
-
-
-def with_retry(fn, *args, **kwargs):
-    last_err = None
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            return fn(*args, **kwargs)
-        except Exception as e:
-            last_err = e
-            if attempt >= MAX_RETRIES:
-                break
-            time.sleep(RETRY_BACKOFF * attempt)
-    raise last_err
-
-
-def session_get(session: requests.Session, url: str, **kwargs):
-    return with_retry(session.get, url, timeout=REQUEST_TIMEOUT, **kwargs)
-
-
-def session_post(session: requests.Session, url: str, **kwargs):
-    return with_retry(session.post, url, timeout=REQUEST_TIMEOUT, **kwargs)
-
-
-from shared.memo_text import (
-    normalize_phone, parse_phone_list, normalize_text, normalize_address, same_address,
-    clip_text, safe_cell, parse_date, parse_row_spec, extract_name_from_text_block,
-    extract_service_date_from_page_text, extract_address_from_text_block,
-    get_purchase_id_from_edit_url, display_service_date, item_service_date_obj,
-)
-
-def get_spreadsheet():
-    """
-    v2026.07.11：修正憑證讀取邏輯——原本只檢查 st.secrets["GOOGLE_SERVICE_
-    ACCOUNT"]（大寫），但實際部署的 Streamlit secrets 是用小寫的
-    "gcp_service_account" 這個 key，導致這裡一直取不到、默默失敗
-    （except Exception: pass），接著 fallback 到根本不存在的本機檔案，
-    報出誤導性的 FileNotFoundError。且原本的 try/except 範圍太大，連
-    open_by_key 的權限錯誤也會被吞掉一起 fallback。
-    改成：依序檢查 gcp_service_account（小寫）→ GOOGLE_SERVICE_ACCOUNT
-    （大寫）→ 本機檔案，只有「取得憑證」這步會 fallback，open_by_key
-    的錯誤會直接拋出。
-    """
-    from shared.gsheet import get_service_account_info
-
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive",
-    ]
-    service_account_info = get_service_account_info()
-    creds = Credentials.from_service_account_info(service_account_info, scopes=scopes)
-    gc = gspread.authorize(creds)
-    return gc.open_by_key(SHEET_ID)
-
-
-def get_ws():
-    return get_spreadsheet().worksheet(WORKSHEET_NAME)
-
-
-def get_log_ws():
-    sh = get_spreadsheet()
-    try:
-        return sh.worksheet(LOG_SHEET_NAME)
-    except Exception:
-        ws = sh.add_worksheet(title=LOG_SHEET_NAME, rows=1000, cols=20)
-        ws.append_row([
-            "執行時間",
-            "來源",
-            "查詢值",
-            "電話",
-            "客戶姓名",
-            "地址",
-            "目前訂單",
-            "目前服務日期",
-            "前次訂單",
-            "前次服務日期",
-            "前次客服備註",
-            "回寫筆數",
-            "狀態",
-            "錯誤訊息",
-            "完整LOG",
-        ])
-        return ws
-
-
-def append_log_row(
-    log_ws,
-    source_type: str,
-    source_value: str,
-    phone: str,
-    name: str,
-    address: str,
-    current_order: str,
-    current_service_date: str,
-    prev_order: str,
-    prev_service_date: str,
-    prev_notice: str,
-    updated_orders: int,
-    status: str,
-    error_msg: str,
-    full_log: str,
-):
-    with_retry(
-        log_ws.append_row,
-        [
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            source_type,
-            source_value,
-            phone,
-            name,
-            address,
-            current_order,
-            current_service_date,
-            prev_order,
-            prev_service_date,
-            clip_text(prev_notice, 2000),
-            updated_orders,
-            status,
-            error_msg,
-            clip_text(full_log, 20000),
-        ],
-    )
-
-
-def apply_sheet_presentation(ws, updated_rows: List[int]):
-    if not updated_rows:
-        return
-
-    sheet_id = ws._properties["sheetId"]
-    requests_body = []
-
-    for row_num in updated_rows:
-        requests_body.append({
-            "updateDimensionProperties": {
-                "range": {
-                    "sheetId": sheet_id,
-                    "dimension": "ROWS",
-                    "startIndex": row_num - 1,
-                    "endIndex": row_num,
-                },
-                "properties": {"pixelSize": 21},
-                "fields": "pixelSize"
-            }
-        })
-
-    requests_body.append({
-        "repeatCell": {
-            "range": {
-                "sheetId": sheet_id,
-                "startRowIndex": 1,
-                "startColumnIndex": 22,
-                "endColumnIndex": 24,
-            },
-            "cell": {
-                "userEnteredFormat": {
-                    "wrapStrategy": "CLIP",
-                    "verticalAlignment": "MIDDLE"
-                }
-            },
-            "fields": "userEnteredFormat.wrapStrategy,userEnteredFormat.verticalAlignment"
-        }
-    })
-
-    with_retry(ws.spreadsheet.batch_update, {"requests": requests_body})
-
-
-def login(ui_logger=None):
-    log = make_logger(ui_logger)
-
-    email = RUNTIME_EMAIL
-    password = RUNTIME_PASSWORD
-
-    if not email or not password:
-        raise RuntimeError("缺少 Email / Password")
-
-    s = requests.Session()
-    s.headers.update({
-        "User-Agent": "Mozilla/5.0",
-        "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
-    })
-
-    r = session_get(s, LOGIN_URL)
-    r.raise_for_status()
-    soup = BeautifulSoup(r.text, "html.parser")
-
-    token_el = soup.select_one("input[name=_token]")
-    if not token_el:
-        raise RuntimeError("登入頁找不到 _token")
-
-    token = token_el.get("value", "")
-
-    resp = session_post(
-        s,
-        LOGIN_URL,
-        data={
-            "_token": token,
-            "email": email,
-            "password": password,
-        },
-        allow_redirects=True,
-    )
-    resp.raise_for_status()
-
-    check = session_get(s, PURCHASE_URL, allow_redirects=True)
-    check.raise_for_status()
-
-    if "/login" in check.url:
-        raise RuntimeError("登入失敗，請確認帳密")
-
-    log("[登入] 已登入")
-    return s
 
 
 def parse_purchase_row_text(txt: str) -> Dict:
@@ -398,7 +108,7 @@ def parse_purchase_list_page(html: str) -> List[Dict]:
             continue
 
         edit_link = tr.select_one('a[href*="/purchase/edit/"]')
-        edit_url = f"{BASE_URL}{edit_link['href']}" if edit_link and edit_link.get("href", "").startswith("/") else (edit_link["href"] if edit_link else "")
+        edit_url = f"{memo_backend.BASE_URL}{edit_link['href']}" if edit_link and edit_link.get("href", "").startswith("/") else (edit_link["href"] if edit_link else "")
         row_data["edit_url"] = edit_url
         row_data["purchase_id"] = get_purchase_id_from_edit_url(edit_url)
         data.append(row_data)
@@ -412,7 +122,7 @@ def parse_purchase_list_page(html: str) -> List[Dict]:
 def search_all_orders_by_phone(session, phone, log=None) -> List[Dict]:
     r = session_get(
         session,
-        PURCHASE_URL,
+        memo_backend.PURCHASE_URL,
         params={
             "keyword": "",
             "name": "",
@@ -479,7 +189,7 @@ def debug_dump_list_rows(html: str, log, max_rows: int = 20):
 def search_orders_by_order_no(session, order_no: str) -> List[Dict]:
     r = session_get(
         session,
-        PURCHASE_URL,
+        memo_backend.PURCHASE_URL,
         params={
             "keyword": "",
             "name": "",
@@ -548,7 +258,7 @@ def search_by_conditions_once(session, date_mode: str, date_start: str, date_end
         params["date_s"] = (date_start or "").replace("/", "-")
         params["date_e"] = (date_end or "").replace("/", "-")
 
-    r = session_get(session, PURCHASE_URL, params=params)
+    r = session_get(session, memo_backend.PURCHASE_URL, params=params)
     r.raise_for_status()
 
     items = parse_purchase_list_page(r.text)
@@ -606,7 +316,7 @@ def parse_edit_page(session, edit_url, phone=""):
 
     action = form.get("action") or edit_url
     if action.startswith("/"):
-        action = f"{BASE_URL}{action}"
+        action = f"{memo_backend.BASE_URL}{action}"
 
     current_query_params = {}
     if "?" in r.url:

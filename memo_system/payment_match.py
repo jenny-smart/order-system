@@ -7,7 +7,7 @@ from datetime import datetime
 from itertools import combinations
 from typing import Callable, Dict, List, Optional
 
-from . import memo
+from shared import memo_backend as memo
 
 
 REGION_SECRET_PREFIX = {
