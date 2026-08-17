@@ -20,7 +20,7 @@ import streamlit as st
 from bs4 import BeautifulSoup
 
 import orders
-from env import BASE_URL_DEV, BASE_URL_PROD
+from shared.env_config import apply_env
 
 
 PURCHASE_FILTER_PARAMS_TEMPLATE = {
@@ -75,17 +75,9 @@ JSON_BACKED_EDIT_FIELDS = [
 ]
 
 
-def _base_url(env_name: str) -> str:
-    return BASE_URL_DEV if env_name == "dev" else BASE_URL_PROD
-
-
 def _configure_orders_env(env_name: str) -> str:
     """Keep orders.login() on the same backend selected in ordersapp.py."""
-    base_url = _base_url(env_name)
-    orders.BASE_URL = base_url
-    orders.LOGIN_URL = f"{base_url}/login"
-    orders.PURCHASE_URL = f"{base_url}/purchase"
-    return base_url
+    return apply_env(orders, env_name)
 
 
 def _new_logged_in_session(env_name: str, email: str, password: str):

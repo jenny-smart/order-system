@@ -281,31 +281,17 @@ except Exception:
 # =========================
 # 環境
 # =========================
-if ENV == "dev":
-    BASE_URL = BASE_URL_DEV
-    ORDER_PREFIX = ORDER_PREFIX_DEV
-else:
-    BASE_URL = BASE_URL_PROD
-    ORDER_PREFIX = ORDER_PREFIX_PROD
+from shared.env_config import compute_env_url_tuple
 
-LOGIN_URL = f"{BASE_URL}/login"
-BOOKING_URL = f"{BASE_URL}/booking/stored_value_routine"
-PURCHASE_URL = f"{BASE_URL}/purchase"
-GET_MEMBER_URL = f"{BASE_URL}/ajax/get_member"
-CHECK_CONTAIN_URL = f"{BASE_URL}/ajax/check_contain"
-CALCULATE_HOUR_URL = f"{BASE_URL}/ajax/calculate_hour"
-GET_SECTION_URL = f"{BASE_URL}/ajax/get_section"
-MAIL_SUCCESS_URL = f"{BASE_URL}/purchase/mail_success/{{order_no}}"
+(
+    BASE_URL, ORDER_PREFIX, LOGIN_URL, BOOKING_URL, PURCHASE_URL,
+    GET_MEMBER_URL, CHECK_CONTAIN_URL, CALCULATE_HOUR_URL,
+    GET_SECTION_URL, MAIL_SUCCESS_URL,
+) = compute_env_url_tuple(ENV)
 
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 from shared.backend_client import PURCHASE_FILTER_PARAMS_TEMPLATE, _fetch_order_edit_id
-
-MAIL_HEADERS = {
-    "Accept": "application/json, text/plain, */*",
-    "User-Agent": "Mozilla/5.0",
-    "Referer": PURCHASE_URL,
-}
 
 CLEAN_TYPE_MAP = {
     "居家清潔": "1",
@@ -1239,7 +1225,12 @@ def verify_batch_order_consistency(session, df, all_row_results):
 
 def send_confirmation_mail(session, order_no):
     url = MAIL_SUCCESS_URL.format(order_no=order_no)
-    resp = session.get(url, headers=MAIL_HEADERS, allow_redirects=True)
+    mail_headers = {
+        "Accept": "application/json, text/plain, */*",
+        "User-Agent": "Mozilla/5.0",
+        "Referer": PURCHASE_URL,
+    }
+    resp = session.get(url, headers=mail_headers, allow_redirects=True)
 
     if resp.status_code != 200:
         return False, f"HTTP {resp.status_code}"
@@ -2098,25 +2089,13 @@ def process_one_group(session, rows_with_idx, token, gcal_service, region, backe
 # 主執行
 # =========================
 def run_process_web(env_name, region, backend_email, backend_password, sheet_name, start_row, end_row, selected_actions=None, logger=print, allow_auto_lemon_shift=False):
-    global BASE_URL, ORDER_PREFIX
-    if env_name == "dev":
-        BASE_URL = BASE_URL_DEV
-        ORDER_PREFIX = ORDER_PREFIX_DEV
-    else:
-        BASE_URL = BASE_URL_PROD
-        ORDER_PREFIX = ORDER_PREFIX_PROD
-
-    global LOGIN_URL, BOOKING_URL, PURCHASE_URL, GET_MEMBER_URL
-    global CHECK_CONTAIN_URL, CALCULATE_HOUR_URL, GET_SECTION_URL, MAIL_SUCCESS_URL
-
-    LOGIN_URL = f"{BASE_URL}/login"
-    BOOKING_URL = f"{BASE_URL}/booking/stored_value_routine"
-    PURCHASE_URL = f"{BASE_URL}/purchase"
-    GET_MEMBER_URL = f"{BASE_URL}/ajax/get_member"
-    CHECK_CONTAIN_URL = f"{BASE_URL}/ajax/check_contain"
-    CALCULATE_HOUR_URL = f"{BASE_URL}/ajax/calculate_hour"
-    GET_SECTION_URL = f"{BASE_URL}/ajax/get_section"
-    MAIL_SUCCESS_URL = f"{BASE_URL}/purchase/mail_success/{{order_no}}"
+    global BASE_URL, ORDER_PREFIX, LOGIN_URL, BOOKING_URL, PURCHASE_URL
+    global GET_MEMBER_URL, CHECK_CONTAIN_URL, CALCULATE_HOUR_URL, GET_SECTION_URL, MAIL_SUCCESS_URL
+    (
+        BASE_URL, ORDER_PREFIX, LOGIN_URL, BOOKING_URL, PURCHASE_URL,
+        GET_MEMBER_URL, CHECK_CONTAIN_URL, CALCULATE_HOUR_URL,
+        GET_SECTION_URL, MAIL_SUCCESS_URL,
+    ) = compute_env_url_tuple(env_name)
 
     logger(f"目前環境：{env_name}")
     logger(f"BASE_URL：{BASE_URL}")
@@ -2378,18 +2357,13 @@ def find_orders_without_line_link(
     </a>，這裡用 extract_order_cards_from_purchase_html 解析後只留得下
     "LINE" 這個文字），沒有 LINE 的客人這一行整個不會出現。
     """
-    global BASE_URL, ORDER_PREFIX, PURCHASE_URL, LOGIN_URL
-    if env_name == "dev":
-        BASE_URL = BASE_URL_DEV
-        ORDER_PREFIX = ORDER_PREFIX_DEV
-    else:
-        BASE_URL = BASE_URL_PROD
-        ORDER_PREFIX = ORDER_PREFIX_PROD
-    PURCHASE_URL = f"{BASE_URL}/purchase"
-    LOGIN_URL = f"{BASE_URL}/login"  # v2026.07.06 修正：原本這裡漏了同步更新 LOGIN_URL，
-    # 導致不管選哪個環境，login() 永遠登入模組載入當下 env.py 的 ENV 對應網域
-    # （目前是 dev），session cookie 只在該網域有效，選 prod 時後續查詢就會
-    # 因為帶著錯網域的 cookie 被當成未登入，掃到 0 筆候選訂單。
+    global BASE_URL, ORDER_PREFIX, LOGIN_URL, BOOKING_URL, PURCHASE_URL
+    global GET_MEMBER_URL, CHECK_CONTAIN_URL, CALCULATE_HOUR_URL, GET_SECTION_URL, MAIL_SUCCESS_URL
+    (
+        BASE_URL, ORDER_PREFIX, LOGIN_URL, BOOKING_URL, PURCHASE_URL,
+        GET_MEMBER_URL, CHECK_CONTAIN_URL, CALCULATE_HOUR_URL,
+        GET_SECTION_URL, MAIL_SUCCESS_URL,
+    ) = compute_env_url_tuple(env_name)
 
     session = requests.Session()
     if not login(session, backend_email, backend_password):
@@ -2551,18 +2525,13 @@ def find_pending_stored_value_orders(
     「客服備註是否為空白」用 _extract_notice_map_from_raw_html 從原始
     HTML 判斷（get_text() 純文字解析看不到這個資訊）。
     """
-    global BASE_URL, ORDER_PREFIX, PURCHASE_URL, LOGIN_URL
-    if env_name == "dev":
-        BASE_URL = BASE_URL_DEV
-        ORDER_PREFIX = ORDER_PREFIX_DEV
-    else:
-        BASE_URL = BASE_URL_PROD
-        ORDER_PREFIX = ORDER_PREFIX_PROD
-    PURCHASE_URL = f"{BASE_URL}/purchase"
-    LOGIN_URL = f"{BASE_URL}/login"  # v2026.07.06 修正：原本這裡漏了同步更新 LOGIN_URL，
-    # 導致不管選哪個環境，login() 永遠登入模組載入當下 env.py 的 ENV 對應網域
-    # （目前是 dev），session cookie 只在該網域有效，選 prod 時後續查詢就會
-    # 因為帶著錯網域的 cookie 被當成未登入，掃到 0 筆候選訂單。
+    global BASE_URL, ORDER_PREFIX, LOGIN_URL, BOOKING_URL, PURCHASE_URL
+    global GET_MEMBER_URL, CHECK_CONTAIN_URL, CALCULATE_HOUR_URL, GET_SECTION_URL, MAIL_SUCCESS_URL
+    (
+        BASE_URL, ORDER_PREFIX, LOGIN_URL, BOOKING_URL, PURCHASE_URL,
+        GET_MEMBER_URL, CHECK_CONTAIN_URL, CALCULATE_HOUR_URL,
+        GET_SECTION_URL, MAIL_SUCCESS_URL,
+    ) = compute_env_url_tuple(env_name)
 
     session = requests.Session()
     if not login(session, backend_email, backend_password):
@@ -2805,18 +2774,13 @@ def apply_bonus_notes(env_name, backend_email, backend_password, mapping):
     [{"order_no": ..., "cust_name": ..., "bonus_names": [...]}]
     這裡統一登入一次後，逐筆呼叫 add_bonus_note_to_order。
     """
-    global BASE_URL, ORDER_PREFIX, PURCHASE_URL, LOGIN_URL
-    if env_name == "dev":
-        BASE_URL = BASE_URL_DEV
-        ORDER_PREFIX = ORDER_PREFIX_DEV
-    else:
-        BASE_URL = BASE_URL_PROD
-        ORDER_PREFIX = ORDER_PREFIX_PROD
-    PURCHASE_URL = f"{BASE_URL}/purchase"
-    LOGIN_URL = f"{BASE_URL}/login"  # v2026.07.06 修正：原本這裡漏了同步更新 LOGIN_URL，
-    # 導致不管選哪個環境，login() 永遠登入模組載入當下 env.py 的 ENV 對應網域
-    # （目前是 dev），session cookie 只在該網域有效，選 prod 時後續查詢就會
-    # 因為帶著錯網域的 cookie 被當成未登入，掃到 0 筆候選訂單。
+    global BASE_URL, ORDER_PREFIX, LOGIN_URL, BOOKING_URL, PURCHASE_URL
+    global GET_MEMBER_URL, CHECK_CONTAIN_URL, CALCULATE_HOUR_URL, GET_SECTION_URL, MAIL_SUCCESS_URL
+    (
+        BASE_URL, ORDER_PREFIX, LOGIN_URL, BOOKING_URL, PURCHASE_URL,
+        GET_MEMBER_URL, CHECK_CONTAIN_URL, CALCULATE_HOUR_URL,
+        GET_SECTION_URL, MAIL_SUCCESS_URL,
+    ) = compute_env_url_tuple(env_name)
 
     session = requests.Session()
     if not login(session, backend_email, backend_password):
@@ -2865,25 +2829,13 @@ def run_standalone_consistency_check(env_name, backend_email, backend_password, 
 
     回傳 list of dict：[{row_num, order_no, issue}, ...]，沒有問題則回傳空 list。
     """
-    global BASE_URL, ORDER_PREFIX
-    if env_name == "dev":
-        BASE_URL = BASE_URL_DEV
-        ORDER_PREFIX = ORDER_PREFIX_DEV
-    else:
-        BASE_URL = BASE_URL_PROD
-        ORDER_PREFIX = ORDER_PREFIX_PROD
-
-    global LOGIN_URL, BOOKING_URL, PURCHASE_URL, GET_MEMBER_URL
-    global CHECK_CONTAIN_URL, CALCULATE_HOUR_URL, GET_SECTION_URL, MAIL_SUCCESS_URL
-
-    LOGIN_URL = f"{BASE_URL}/login"
-    BOOKING_URL = f"{BASE_URL}/booking/stored_value_routine"
-    PURCHASE_URL = f"{BASE_URL}/purchase"
-    GET_MEMBER_URL = f"{BASE_URL}/ajax/get_member"
-    CHECK_CONTAIN_URL = f"{BASE_URL}/ajax/check_contain"
-    CALCULATE_HOUR_URL = f"{BASE_URL}/ajax/calculate_hour"
-    GET_SECTION_URL = f"{BASE_URL}/ajax/get_section"
-    MAIL_SUCCESS_URL = f"{BASE_URL}/purchase/mail_success/{{order_no}}"
+    global BASE_URL, ORDER_PREFIX, LOGIN_URL, BOOKING_URL, PURCHASE_URL
+    global GET_MEMBER_URL, CHECK_CONTAIN_URL, CALCULATE_HOUR_URL, GET_SECTION_URL, MAIL_SUCCESS_URL
+    (
+        BASE_URL, ORDER_PREFIX, LOGIN_URL, BOOKING_URL, PURCHASE_URL,
+        GET_MEMBER_URL, CHECK_CONTAIN_URL, CALCULATE_HOUR_URL,
+        GET_SECTION_URL, MAIL_SUCCESS_URL,
+    ) = compute_env_url_tuple(env_name)
 
     ws, df = load_worksheet(sheet_name)
     required_cols = ["電話", "地址", "日期", "開始時間", "結束時間", "訂單編號"]
@@ -3063,25 +3015,13 @@ def run_backend_calendar_consistency_check(env_name, backend_email, backend_pass
                 "issue"}, ...],
         }
     """
-    global BASE_URL, ORDER_PREFIX
-    if env_name == "dev":
-        BASE_URL = BASE_URL_DEV
-        ORDER_PREFIX = ORDER_PREFIX_DEV
-    else:
-        BASE_URL = BASE_URL_PROD
-        ORDER_PREFIX = ORDER_PREFIX_PROD
-
-    global LOGIN_URL, BOOKING_URL, PURCHASE_URL, GET_MEMBER_URL
-    global CHECK_CONTAIN_URL, CALCULATE_HOUR_URL, GET_SECTION_URL, MAIL_SUCCESS_URL
-
-    LOGIN_URL = f"{BASE_URL}/login"
-    BOOKING_URL = f"{BASE_URL}/booking/stored_value_routine"
-    PURCHASE_URL = f"{BASE_URL}/purchase"
-    GET_MEMBER_URL = f"{BASE_URL}/ajax/get_member"
-    CHECK_CONTAIN_URL = f"{BASE_URL}/ajax/check_contain"
-    CALCULATE_HOUR_URL = f"{BASE_URL}/ajax/calculate_hour"
-    GET_SECTION_URL = f"{BASE_URL}/ajax/get_section"
-    MAIL_SUCCESS_URL = f"{BASE_URL}/purchase/mail_success/{{order_no}}"
+    global BASE_URL, ORDER_PREFIX, LOGIN_URL, BOOKING_URL, PURCHASE_URL
+    global GET_MEMBER_URL, CHECK_CONTAIN_URL, CALCULATE_HOUR_URL, GET_SECTION_URL, MAIL_SUCCESS_URL
+    (
+        BASE_URL, ORDER_PREFIX, LOGIN_URL, BOOKING_URL, PURCHASE_URL,
+        GET_MEMBER_URL, CHECK_CONTAIN_URL, CALCULATE_HOUR_URL,
+        GET_SECTION_URL, MAIL_SUCCESS_URL,
+    ) = compute_env_url_tuple(env_name)
 
     if region and region not in GOOGLE_CALENDAR_MAP:
         raise Exception(f"{region} 尚未設定 Google Calendar ID，無法比對")

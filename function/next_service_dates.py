@@ -40,18 +40,14 @@ from orders import (
     build_gsheet_client,
 )
 from quick_order import _extract_address_line, _parse_service_date_time_loose
-from env import BASE_URL_DEV, BASE_URL_PROD
+from shared.env_config import apply_env
 
 
 # =========================
 # 環境設定（沿用 orders.py 既有做法：依 env_name 動態切換 dev/prod）
 # =========================
 def _configure_env_globals(env_name):
-    base_url = BASE_URL_DEV if env_name == "dev" else BASE_URL_PROD
-    orders.BASE_URL = base_url
-    orders.LOGIN_URL = f"{base_url}/login"
-    orders.PURCHASE_URL = f"{base_url}/purchase"
-    return base_url
+    return apply_env(orders, env_name)
 
 
 # =========================

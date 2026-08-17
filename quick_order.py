@@ -432,7 +432,7 @@ from shared.text_parsing import (
     _extract_payway_line, _is_paid_order_text, _extract_invoice_line, _extract_clean_type_line,
 )
 from accounts import ACCOUNTS
-from env import BASE_URL_DEV, BASE_URL_PROD, ORDER_PREFIX_DEV, ORDER_PREFIX_PROD
+from shared.env_config import apply_env
 
 BOOKING_ENDPOINT_MAP = {"信用卡": "/booking/single", "ATM": "/booking/single", "儲值金": "/booking/stored_value_routine"}
 
@@ -503,19 +503,7 @@ def _build_combined_period_display(orders_data):
 
 
 def _configure_environment(env_name):
-    base_url = BASE_URL_DEV if env_name == "dev" else BASE_URL_PROD
-    order_prefix = ORDER_PREFIX_DEV if env_name == "dev" else ORDER_PREFIX_PROD
-    orders.BASE_URL = base_url
-    orders.ORDER_PREFIX = order_prefix
-    orders.LOGIN_URL = f"{base_url}/login"
-    orders.BOOKING_URL = f"{base_url}/booking/stored_value_routine"
-    orders.PURCHASE_URL = f"{base_url}/purchase"
-    orders.GET_MEMBER_URL = f"{base_url}/ajax/get_member"
-    orders.CHECK_CONTAIN_URL = f"{base_url}/ajax/check_contain"
-    orders.CALCULATE_HOUR_URL = f"{base_url}/ajax/calculate_hour"
-    orders.GET_SECTION_URL = f"{base_url}/ajax/get_section"
-    orders.MAIL_SUCCESS_URL = f"{base_url}/purchase/mail_success/{{order_no}}"
-    return base_url
+    return apply_env(orders, env_name)
 
 
 def _booking_url_for_payway(base_url, payway):

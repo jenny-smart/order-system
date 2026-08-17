@@ -9,6 +9,7 @@ from bs4 import BeautifulSoup
 import requests
 
 import orders
+from shared.env_config import apply_env
 
 
 TRACKING_SHEET_TITLE = "週末服務提醒"
@@ -48,14 +49,7 @@ def previous_workday(day_value, holidays=None):
 
 
 def _configure_backend(env_name):
-    if env_name == "dev":
-        orders.BASE_URL = orders.BASE_URL_DEV
-        orders.ORDER_PREFIX = orders.ORDER_PREFIX_DEV
-    else:
-        orders.BASE_URL = orders.BASE_URL_PROD
-        orders.ORDER_PREFIX = orders.ORDER_PREFIX_PROD
-    orders.PURCHASE_URL = f"{orders.BASE_URL}/purchase"
-    orders.LOGIN_URL = f"{orders.BASE_URL}/login"
+    apply_env(orders, env_name)
 
 
 def _line_urls_from_html(raw_html):
