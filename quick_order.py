@@ -650,7 +650,11 @@ def _service_amount_from_block(joined_text, fare):
     try:
         total_num = int(round(float(str(total).replace(",", ""))))
         fare_num = int(round(float(str(fare or "0").replace(",", ""))))
-        amount = total_num - fare_num if fare_num and total_num > fare_num else total_num
+        # 車馬費等於總金額時（服務本身已被折抵完畢，只剩車馬費）也要視為
+        # 服務金額歸零，不能因為 total_num > fare_num 用嚴格大於就漏掉相等
+        # 的情況（原本會錯誤回傳整筆 total_num，導致該自動標記已付款／不
+        # 開立發票的訂單被誤判成「服務金額未歸零」而卡住）。
+        amount = max(0, total_num - fare_num) if fare_num else total_num
         return str(amount)
     except Exception:
         return total
