@@ -23,7 +23,6 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
     # -*- coding: utf-8 -*-
     import streamlit as st
     from shared import memo_backend as memo
-    from . import change_order
 
     from function.ui_common import step
     from function import memo_customer_service as _memo_customer_service_page
@@ -288,7 +287,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         # 由整合頁面（pages/訂單系統.py）統一提供帳密/環境，這裡不再重複顯示登入欄位。
         email, password, env_option = shared_backend_email, shared_backend_password, shared_env
         memo.set_env(env_option)
-        change_order.set_env(env_option)
+        _change_order_page.set_env(env_option)
         memo.set_runtime_credentials(email, password)
         st.session_state.credentials_ready = bool((email or "").strip()) and bool((password or "").strip())
 
@@ -314,7 +313,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                 env_option = st.selectbox("環境", ["prod", "dev"], index=0, key="login_env")
 
             memo.set_env(env_option)
-            change_order.set_env(env_option)
+            _change_order_page.set_env(env_option)
             memo.set_runtime_credentials(email, password)
             st.session_state.credentials_ready = bool(email.strip()) and bool(password.strip())
 

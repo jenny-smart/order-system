@@ -24,7 +24,7 @@ def render(backend_email, backend_password, env):
     ])
     _default_sat, _default_sun = upcoming_weekend()
     try:
-        from memo_system.change_order import TAIWAN_PUBLIC_HOLIDAYS
+        from function.change_order_page import TAIWAN_PUBLIC_HOLIDAYS
         _holidays = TAIWAN_PUBLIC_HOLIDAYS
     except Exception:
         _holidays = set()
