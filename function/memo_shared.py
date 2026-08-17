@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """memo 系統各功能共用的登入 session 快取（登入本身由 memo_system/ui.py 的
-Step 1 設定好 memo.set_runtime_credentials／memo.set_env 之後，這裡只負責
-沿用或視帳號／環境是否切換重新登入）。"""
+Step 1 設定好 shared.memo_backend.set_runtime_credentials／set_env 之後，這裡
+只負責沿用或視帳號／環境是否切換重新登入）。"""
 
 import streamlit as st
 
-from memo_system import memo
+from shared import memo_backend as memo
 
 DEFAULT_RESULT = {
     "processed": 0, "success": 0, "failed": 0,

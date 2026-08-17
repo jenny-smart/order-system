@@ -22,7 +22,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
     # memoapp.py
     # -*- coding: utf-8 -*-
     import streamlit as st
-    from . import memo
+    from shared import memo_backend as memo
     from . import change_order
 
     from function.ui_common import step
