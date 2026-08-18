@@ -1,120 +1,354 @@
 # ============================================================
 # 檔名：function/batch_booking_optimized.py
-# 功能：批次建單優化 UI；多日期、多時段查班與批次建單，不影響既有批次建單。
+# 功能：儲值金訂單批次建單優化；依同一人＋同一地址自動分組，可一次複選多個日期／時段建立訂單。
 # 更新時間：2026-08-19
 # ============================================================
 # -*- coding: utf-8 -*-
-from datetime import date, timedelta
+from __future__ import annotations
+
+from collections import OrderedDict
+from datetime import datetime
+
 import pandas as pd
 import streamlit as st
+
 from accounts import ACCOUNTS
 from function.ui_common import step, info_panel
-from shared.batch_booking_core import PERIOD_HOUR_MAP, SlotPlan, build_grid, execute_batch
-from shared import booking_service, order_query_service
+from orders import get_region_by_address, load_worksheet, run_process_web
 
-PERIODS = list(PERIOD_HOUR_MAP.keys())
+STORED_VALUE_SHEET_ID = "1de41gNvBZCGdfy0qNouRNEaQD7R019VAvz2cfq88ZrE"
+STORED_VALUE_SHEET_TITLE = "儲值金訂單"
+
+REQUIRED_COLUMNS = ["姓名", "電話", "地址", "日期", "開始時間", "結束時間", "狀態", "訂單編號"]
 
 
-def _member_addresses(lookup_result):
-    payload = lookup_result.get("member_payload") or {}
-    member = payload.get("member") or {}
+def _text(value) -> str:
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    return str(value).strip()
+
+
+def _date_text(value) -> str:
+    raw = _text(value)
+    if not raw:
+        return ""
+    for fmt in ("%Y/%m/%d", "%Y-%m-%d", "%Y/%m/%d %H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(raw, fmt).strftime("%Y-%m-%d")
+        except Exception:
+            pass
+    return raw.replace("/", "-")
+
+
+def _time_text(value) -> str:
+    raw = _text(value)
+    if not raw:
+        return ""
+    if len(raw) >= 5 and ":" in raw:
+        return raw[:5]
+    return raw
+
+
+def _ensure_sheet_row(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    if "__sheet_row__" not in df.columns:
+        # 第 1 列是標題，因此 DataFrame 第 1 筆資料對應 Sheet 第 2 列。
+        df["__sheet_row__"] = range(2, len(df) + 2)
+    return df
+
+
+def _load_candidates(sheet_name: str) -> pd.DataFrame:
+    _, df = load_worksheet(sheet_name)
+    df = _ensure_sheet_row(df)
+    missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
+    if missing:
+        raise RuntimeError("工作表缺少必要欄位：" + "、".join(missing))
+
+    work = df.copy()
+    for c in REQUIRED_COLUMNS:
+        work[c] = work[c].map(_text)
+
+    # 優化版只處理尚未有訂單編號的列；既有訂單完全不碰。
+    work = work[work["訂單編號"].eq("")]
+    work = work[
+        work["姓名"].ne("")
+        & work["電話"].ne("")
+        & work["地址"].ne("")
+        & work["日期"].ne("")
+        & work["開始時間"].ne("")
+        & work["結束時間"].ne("")
+    ]
+    work["日期顯示"] = work["日期"].map(_date_text)
+    work["時段顯示"] = work.apply(lambda r: f"{_time_text(r['開始時間'])}-{_time_text(r['結束時間'])}", axis=1)
+    work["群組鍵"] = work.apply(lambda r: (_text(r["姓名"]), _text(r["電話"]), _text(r["地址"])), axis=1)
+    return work
+
+
+def _build_groups(df: pd.DataFrame):
+    groups = []
+    for key, g in df.groupby("群組鍵", sort=False):
+        name, phone, address = key
+        g = g.sort_values(["日期顯示", "開始時間", "__sheet_row__"])
+        dates = [x for x in g["日期顯示"].tolist() if x]
+        groups.append({
+            "key": key,
+            "name": name,
+            "phone": phone,
+            "address": address,
+            "count": len(g),
+            "date_count": len(set(dates)),
+            "rows": g,
+        })
+    # 有多個日期者排前面，方便優先處理真正需要批次優化的客人。
+    groups.sort(key=lambda x: (x["date_count"] <= 1, -x["date_count"], -x["count"], x["name"]))
+    return groups
+
+
+def _group_label(group) -> str:
+    address = group["address"]
+    short_addr = address if len(address) <= 28 else address[:28] + "…"
+    suffix = "多日期" if group["date_count"] > 1 else "單日期"
+    return f"{group['name']}｜{group['phone']}｜{short_addr}｜{group['count']} 筆 / {group['date_count']} 日期（{suffix}）"
+
+
+def _option_label(row) -> str:
+    return (
+        f"第 {int(row['__sheet_row__'])} 列｜{row['日期顯示']} {row['時段顯示']}"
+        f"｜狀態：{_text(row.get('狀態')) or '空白'}"
+        f"｜{_text(row.get('購買項目')) or '未填購買項目'}"
+    )
+
+
+def _contiguous_ranges(row_numbers):
+    rows = sorted({int(x) for x in row_numbers})
+    if not rows:
+        return []
     result = []
-    for row in member.get("memberAddressList") or []:
-        if isinstance(row, dict):
-            addr = str(row.get("address") or "").strip()
-            if addr and addr not in result:
-                result.append(addr)
-    last = payload.get("lastPurchase") or {}
-    last_addr = str(last.get("address") or "").strip() if isinstance(last, dict) else ""
-    if last_addr and last_addr not in result:
-        result.insert(0, last_addr)
+    start = prev = rows[0]
+    for current in rows[1:]:
+        if current == prev + 1:
+            prev = current
+            continue
+        result.append((start, prev))
+        start = prev = current
+    result.append((start, prev))
     return result
 
 
-def _check_one(lookup, env, payway, address, clean_type_id, date_s, period, person):
-    rows = booking_service.check_available_slots(env, payway, lookup, address, clean_type_id, date_s, str(PERIOD_HOUR_MAP[period]), person=str(person), periods=[period], period_hours=PERIOD_HOUR_MAP)
-    row = rows[0] if rows else {}
-    return bool(row.get("available")), str(row.get("staff") or "")
-
-
-def _editor_rows(slots):
-    return [{"執行": bool(s.selected), "日期": s.service_date, "時段": s.period, "有人力": bool(s.available), "可用專員": s.staff} for s in slots]
+def _format_log(msg) -> str:
+    text = str(msg or "").replace("\\n", "\n")
+    return text.strip()
 
 
 def render(backend_email: str, backend_password: str, env: str) -> None:
     step("3", "批次建單優化")
-    info_panel("功能說明", ["新增功能，不修改既有『批次建單（Google Sheet）』。", "可一次選擇日期範圍與多個服務時段。", "建單前逐張重查即時人力，避免重複占用。", "儲值金客人亦可一次建立多個有人力時段。"])
-    info_panel("效率設計", ["日期 × 時段集中查班。", "建單共用 batch_booking_core。", "新 Sheet 型流程採每 10 筆 checkpoint 批次回寫。"])
+    info_panel("功能說明", [
+        "此優化功能固定使用 Google Sheet「儲值金訂單」，不另外輸入客人電話或付款方式。",
+        "系統會依『姓名＋電話＋地址』自動判斷同一位客人的同一服務地址。",
+        "若同一人、同一地址有不同服務日期，可在同一畫面一次複選多個日期／時段一起建單。",
+        "仍沿用既有儲值金建單核心：查會員、查班表、餘額判斷、建單、確認信、日曆與 Sheet 回填規則不變。",
+        "既有『批次建單（Google Sheet）』完全保留，不受此功能影響。",
+    ])
+    info_panel("效率設計", [
+        "工作表只載入一次，再由程式自動把相同客人／地址分組。",
+        "選取多筆時，連續列會合併成同一批次範圍交給既有批次核心執行，減少重複初始化。",
+        "只列出『訂單編號空白』的資料，已有訂單編號的列不會進入優化建單清單。",
+    ])
+
     if not backend_email.strip() or not backend_password.strip():
         st.warning("請先輸入上方後台帳號與密碼。")
         return
 
-    phone = st.text_input("會員手機", key="batch_opt_phone")
-    if st.button("讀取會員", width="stretch", key="batch_opt_lookup"):
-        try:
-            with st.spinner("讀取會員中..."):
-                st.session_state.batch_opt_lookup_result = booking_service.lookup_member(env, backend_email.strip(), backend_password.strip(), phone.strip(), clean_type_id="1")
-            st.session_state.pop("batch_opt_slots", None)
-            st.session_state.pop("batch_opt_results", None)
-            st.success("會員讀取完成。") if st.session_state.batch_opt_lookup_result.get("member_payload") else st.error("查無會員。")
-        except Exception as exc:
-            st.session_state.batch_opt_lookup_result = None
-            st.error(str(exc))
+    st.caption(f"固定資料來源：{STORED_VALUE_SHEET_TITLE}｜Sheet ID：{STORED_VALUE_SHEET_ID}")
 
-    lookup = st.session_state.get("batch_opt_lookup_result")
-    if not lookup or not lookup.get("member_payload"):
-        return
-    addresses = _member_addresses(lookup)
-    if not addresses:
-        st.error("此會員沒有可用既有地址。")
-        return
+    c1, c2 = st.columns([2.2, 1])
+    with c1:
+        sheet_name = st.text_input(
+            "工作表名稱",
+            value=st.session_state.get("batch_opt_sheet_name", ""),
+            placeholder="例如：台北202609、台中202609",
+            key="batch_opt_sheet_name",
+        )
+    with c2:
+        load_clicked = st.button("載入儲值金訂單", width="stretch", key="batch_opt_load_sheet")
 
-    c1, c2, c3 = st.columns(3)
-    with c1: address = st.selectbox("服務地址", addresses, key="batch_opt_address")
-    with c2: payway = st.selectbox("付款方式", ["信用卡", "ATM", "儲值金"], key="batch_opt_payway")
-    with c3: person = st.number_input("服務人數", 1, 10, 2, 1, key="batch_opt_person")
-    region = order_query_service.get_region(address, ACCOUNTS) or "台北"
-    clean_type_id = "1"
-    st.caption(f"地址判斷區域：{region}｜目前環境：{'正式機 prod' if env == 'prod' else '測試機 dev'}")
-
-    d1, d2 = st.columns(2); today = date.today()
-    with d1: start = st.date_input("開始日期", today + timedelta(days=1), key="batch_opt_start")
-    with d2: end = st.date_input("結束日期", today + timedelta(days=14), key="batch_opt_end")
-    periods = st.multiselect("候選服務時段（可複選）", PERIODS, default=["09:00-12:00", "14:00-17:00"], key="batch_opt_periods")
-
-    if st.button("檢查日期 × 時段人力", width="stretch", key="batch_opt_check"):
-        if end < start or not periods:
-            st.error("請確認日期範圍並至少選擇一個時段。")
+    if load_clicked:
+        if not sheet_name.strip():
+            st.error("請輸入工作表名稱。")
             return
-        slots = build_grid(start, end, periods)
-        with st.spinner("逐日檢查人力..."):
-            for slot in slots:
+        try:
+            with st.spinner("讀取儲值金訂單並分析同客人／同地址資料..."):
+                candidates = _load_candidates(sheet_name.strip())
+                groups = _build_groups(candidates)
+            st.session_state.batch_opt_candidates = candidates
+            st.session_state.batch_opt_groups = groups
+            st.session_state.pop("batch_opt_selected_options", None)
+            st.session_state.pop("batch_opt_results", None)
+            multi_groups = sum(1 for g in groups if g["date_count"] > 1)
+            st.success(f"載入完成：可處理 {len(candidates)} 列；共 {len(groups)} 組客人／地址，其中 {multi_groups} 組有多個日期。")
+        except Exception as exc:
+            st.session_state.batch_opt_candidates = None
+            st.session_state.batch_opt_groups = None
+            st.error(f"載入失敗：{exc}")
+            return
+
+    groups = st.session_state.get("batch_opt_groups") or []
+    if not groups:
+        return
+
+    label_map = OrderedDict((_group_label(g), g) for g in groups)
+    selected_group_label = st.selectbox(
+        "選擇客人／地址",
+        list(label_map.keys()),
+        key="batch_opt_group_select",
+    )
+    group = label_map[selected_group_label]
+    rows_df = group["rows"].copy()
+
+    region = get_region_by_address(group["address"], ACCOUNTS) or "台北"
+    st.info(
+        f"姓名：{group['name']}｜電話：{group['phone']}｜區域：{region}\n\n"
+        f"地址：{group['address']}"
+    )
+    if group["date_count"] > 1:
+        st.success(f"偵測到同一人同一地址共有 {group['date_count']} 個不同日期，可一次複選多個日期／時段。")
+    else:
+        st.caption("此客人／地址目前只有 1 個待處理日期，仍可使用本功能建單。")
+
+    display_cols = [c for c in ["__sheet_row__", "日期顯示", "時段顯示", "服務人時", "狀態", "購買項目", "備註"] if c in rows_df.columns]
+    preview = rows_df[display_cols].rename(columns={
+        "__sheet_row__": "列號",
+        "日期顯示": "日期",
+        "時段顯示": "時段",
+    })
+    st.dataframe(preview, width="stretch", hide_index=True)
+
+    option_to_row = OrderedDict()
+    for _, row in rows_df.iterrows():
+        label = _option_label(row)
+        option_to_row[label] = int(row["__sheet_row__"])
+
+    selected_options = st.multiselect(
+        "選擇要建立的日期／時段（可複選）",
+        options=list(option_to_row.keys()),
+        key="batch_opt_selected_options",
+        placeholder="可一次勾選同一人同一地址的多個日期／時段",
+    )
+    selected_rows = [option_to_row[x] for x in selected_options]
+    ranges = _contiguous_ranges(selected_rows)
+
+    default_actions = ["建單", "寄確認信", "改 Google 日曆"] if env == "prod" else ["建單"]
+    selected_actions = st.multiselect(
+        "執行項目",
+        ["建單", "寄確認信", "改 Google 日曆"],
+        default=default_actions,
+        key="batch_opt_actions",
+    )
+
+    st.info(
+        f"目前選擇 {len(selected_rows)} 筆日期／時段；"
+        f"程式會合併成 {len(ranges)} 個批次範圍執行。"
+    )
+    if ranges:
+        st.caption("執行列範圍：" + "、".join(str(a) if a == b else f"{a}-{b}" for a, b in ranges))
+
+    confirm = st.checkbox(
+        f"我確認要在{'正式機 prod' if env == 'prod' else '測試機 dev'}執行以上 {len(selected_rows)} 筆儲值金訂單",
+        key="batch_opt_confirm",
+    )
+
+    run_clicked = st.button(
+        "確認批次建立選取訂單",
+        type="primary",
+        width="stretch",
+        disabled=not confirm or not selected_rows or not selected_actions,
+        key="batch_opt_execute",
+    )
+
+    log_box = st.empty()
+    if run_clicked:
+        logs = []
+        total_success = 0
+        total_fail = 0
+        total_processed = 0
+        range_results = []
+
+        def ui_log(msg):
+            logs.append(_format_log(msg))
+            log_box.text("\n\n".join(logs[-120:]))
+
+        with st.spinner("依選取日期／時段批次執行中..."):
+            for start_row, end_row in ranges:
+                ui_log(f"▶ 執行第 {start_row} 列" if start_row == end_row else f"▶ 執行第 {start_row}-{end_row} 列")
                 try:
-                    slot.available, slot.staff = _check_one(lookup, env, payway, address, clean_type_id, slot.service_date, slot.period, person)
-                    slot.selected = slot.available
+                    result = run_process_web(
+                        env_name=env,
+                        region=region,
+                        backend_email=backend_email.strip(),
+                        backend_password=backend_password.strip(),
+                        sheet_name=sheet_name.strip(),
+                        start_row=start_row,
+                        end_row=end_row,
+                        selected_actions=selected_actions,
+                        logger=ui_log,
+                        allow_auto_lemon_shift=False,
+                    )
+                    result = result if isinstance(result, dict) else {}
+                    success = int(result.get("success_count", 0) or 0)
+                    fail = int(result.get("fail_count", 0) or 0)
+                    processed = int(result.get("total_processed", 0) or 0)
+                    total_success += success
+                    total_fail += fail
+                    total_processed += processed
+                    range_results.append({
+                        "列範圍": str(start_row) if start_row == end_row else f"{start_row}-{end_row}",
+                        "處理筆數": processed,
+                        "成功": success,
+                        "失敗": fail,
+                    })
                 except Exception as exc:
-                    slot.available = slot.selected = False; slot.note = str(exc)
-        st.session_state.batch_opt_slots = slots
-        st.session_state.pop("batch_opt_results", None)
+                    total_fail += end_row - start_row + 1
+                    range_results.append({
+                        "列範圍": str(start_row) if start_row == end_row else f"{start_row}-{end_row}",
+                        "處理筆數": 0,
+                        "成功": 0,
+                        "失敗": end_row - start_row + 1,
+                        "錯誤": str(exc),
+                    })
+                    ui_log(f"❌ 執行失敗：{exc}")
 
-    slots = st.session_state.get("batch_opt_slots") or []
-    if not slots: return
-    editor_df = pd.DataFrame(_editor_rows(slots))
-    edited = st.data_editor(editor_df, width="stretch", hide_index=True, disabled=[c for c in editor_df.columns if c != "執行"], column_config={"執行": st.column_config.CheckboxColumn("執行")}, key="batch_opt_editor")
-    selected_slots = [SlotPlan(service_date=str(r["日期"]), period=str(r["時段"]), available=True, selected=True, quantity=1, staff=str(r.get("可用專員") or "")) for r in edited.to_dict("records") if bool(r.get("執行")) and bool(r.get("有人力"))]
-    st.info(f"目前選擇 {len(selected_slots)} 個日期／時段，預計建立 {len(selected_slots)} 張訂單。")
-    confirm = st.checkbox(f"我確認要在{'正式機' if env == 'prod' else '測試機'}建立以上 {len(selected_slots)} 張訂單", key="batch_opt_confirm")
+        st.session_state.batch_opt_results = range_results
+        st.session_state.batch_opt_summary = {
+            "selected": len(selected_rows),
+            "processed": total_processed,
+            "success": total_success,
+            "fail": total_fail,
+        }
+        if total_fail:
+            st.warning(f"執行完成：成功 {total_success}，失敗 {total_fail}。")
+        else:
+            st.success(f"執行完成：成功 {total_success} 筆。")
 
-    if st.button("確認批次建立訂單", type="primary", width="stretch", disabled=not confirm or not selected_slots, key="batch_opt_execute"):
-        def precheck(slot):
-            available, staff = _check_one(lookup, env, payway, address, clean_type_id, slot.service_date, slot.period, person)
-            return {"available": available, "staff": staff, "message": "執行前重查已無人力，跳過" if not available else ""}
-        def executor(slot, _sequence):
-            result = booking_service.create_order(env_name=env, payway=payway, region=region, lookup_result=lookup, address=address, clean_type_id=clean_type_id, date_s=slot.service_date, period_s=slot.period, hour=str(PERIOD_HOUR_MAP[slot.period]), person=str(person), allow_auto_lemon_shift=False)
-            return {"success": True, "order_no": result.get("order_no", ""), "staff": result.get("staff", slot.staff), "message": "成功"}
-        with st.spinner("逐張重新確認人力並建立訂單..."):
-            summary = execute_batch(selected_slots, precheck=precheck, executor=executor, continue_after_error=True)
-        st.session_state.batch_opt_results = [{"日期": r.get("service_date", ""), "時段": r.get("period", ""), "成功": bool(r.get("success")), "訂單編號": r.get("order_no", ""), "專員": r.get("staff", ""), "訊息": r.get("message", "")} for r in summary["results"]]
-        st.success(f"完成：成功 {summary['success_count']} / {summary['target_count']} 張。") if not summary["fail_count"] else st.warning(f"完成：成功 {summary['success_count']}，失敗 {summary['fail_count']}。")
+        # 重新讀取一次 Sheet，讓已成功回填訂單編號的列自動從清單消失。
+        try:
+            candidates = _load_candidates(sheet_name.strip())
+            st.session_state.batch_opt_candidates = candidates
+            st.session_state.batch_opt_groups = _build_groups(candidates)
+        except Exception as exc:
+            st.warning(f"建單已完成，但重新整理工作表清單失敗：{exc}")
+
+    summary = st.session_state.get("batch_opt_summary") or {}
+    if summary:
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("選取", summary.get("selected", 0))
+        c2.metric("實際處理", summary.get("processed", 0))
+        c3.metric("成功", summary.get("success", 0))
+        c4.metric("失敗", summary.get("fail", 0))
     results = st.session_state.get("batch_opt_results") or []
-    if results: st.dataframe(pd.DataFrame(results), width="stretch", hide_index=True)
+    if results:
+        st.dataframe(pd.DataFrame(results), width="stretch", hide_index=True)
