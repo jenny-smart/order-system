@@ -1,24 +1,18 @@
+# ============================================================
+# 檔名：vip_calendar_test_app.py
+# 功能：VIP 訂單／Google Calendar 同步測試入口；正式整併完成後刪除。
+# 更新時間：2026-08-19
+# ============================================================
 # -*- coding: utf-8 -*-
 from datetime import date, timedelta
 import calendar
 
 import streamlit as st
 import function.vip_calendar_sync as vcs
-import function.vip_calendar_patch as vcp
-from function.vip_calendar_patch import apply_patch
-from function.vip_calendar_patch2 import apply_patch as apply_patch2
-from function.vip_calendar_patch3 import apply_patch as apply_patch3
-from function.vip_calendar_patch4 import apply_patch as apply_patch4
-from function.vip_calendar_patch5 import apply_patch as apply_patch5
+from function.vip_calendar_patch_bundle import apply_all
 
-# Patch order matters. Patch 4 replaces the visible workflow with the compact,
-# manual-selection UI. Patch 5 aligns the left order fields with the right
-# calendar fields so date and period can be compared horizontally.
-apply_patch(vcs)
-apply_patch2(vcs, vcp)
-apply_patch3(vcs, vcp)
-apply_patch4(vcs, vcp)
-apply_patch5(vcs, vcp)
+# 過渡期統一由單一入口套用 patch 1~5；最終會收斂進 vip_calendar_sync.py。
+apply_all(vcs)
 
 st.set_page_config(page_title="VIP 訂單／Google 日曆同步測試", layout="wide")
 st.title("VIP 訂單／Google 日曆同步測試")
