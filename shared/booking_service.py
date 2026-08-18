@@ -1,15 +1,15 @@
+# ============================================================
+# 檔名：shared/booking_service.py
+# 功能：建單領域統一 Facade；串接會員查詢、班表可用性、訂單建立等拆分服務。
+# 更新時間：2026-08-19
+# ============================================================
 # -*- coding: utf-8 -*-
+
 """Stable booking-service boundary used by modular order-system features.
 
-Why this exists
----------------
-quick_order.py is still a large legacy compatibility engine. New feature modules
-should not import it directly. They import this module instead. Today these
-functions delegate to quick_order.py; later each implementation can be moved into
-smaller shared modules without changing every UI/function caller again.
-
-This is a strangler-style migration boundary: behavior stays the same first,
-implementation moves behind the boundary gradually.
+新功能只依賴本 Facade，不直接依賴巨大 quick_order.py。
+已拆出的功能改由 member_service / availability_service / order_creator 提供；
+尚未拆出的環境與共用常數暫時由 legacy quick_order 相容提供。
 """
 
 from __future__ import annotations
@@ -17,22 +17,13 @@ from __future__ import annotations
 from typing import Any
 
 import quick_order as _legacy
+from shared import availability_service, member_service, order_creator
 
-
-PERIOD_HOUR_MAP = {
-    "08:30-12:30": 4,
-    "09:00-11:00": 2,
-    "09:00-12:00": 3,
-    "14:00-16:00": 2,
-    "14:00-17:00": 3,
-    "14:00-18:00": 4,
-    "09:00-16:00": 6,
-    "09:00-18:00": 8,
-}
+PERIOD_HOUR_MAP = availability_service.PERIOD_HOUR_MAP
 
 
 def lookup_member(env_name: str, backend_email: str, backend_password: str, phone: str, clean_type_id: str = "1") -> dict:
-    return _legacy.quick_lookup_member(
+    return member_service.lookup_member(
         env_name, backend_email, backend_password, phone, clean_type_id=clean_type_id
     )
 
@@ -50,7 +41,7 @@ def check_available_slots(
     periods,
     period_hours=None,
 ):
-    return _legacy.quick_check_available_slots(
+    return availability_service.check_available_slots(
         env_name,
         payway,
         lookup_result,
@@ -65,11 +56,11 @@ def check_available_slots(
 
 
 def create_order(**kwargs) -> dict:
-    return _legacy.quick_create_order(**kwargs)
+    return order_creator.create_order(**kwargs)
 
 
 def update_order_note(session, base_url: str, order_no: str, note: str):
-    return _legacy._update_order_note(session, base_url, order_no, note)
+    return order_creator.update_order_note(session, base_url, order_no, note)
 
 
 def configure_environment(env_name: str) -> str:
@@ -81,10 +72,5 @@ def request_headers() -> dict:
 
 
 def legacy_attr(name: str, default: Any = None) -> Any:
-    """Temporary escape hatch while remaining quick_order functions are migrated.
-
-    New code should prefer explicit wrappers above. This function prevents new
-    feature modules from importing quick_order.py directly while migration is in
-    progress.
-    """
+    """Temporary escape hatch while remaining quick_order functions are migrated."""
     return getattr(_legacy, name, default)
