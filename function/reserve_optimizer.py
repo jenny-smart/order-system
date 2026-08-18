@@ -13,7 +13,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from bs4 import BeautifulSoup
 
-import quick_order as qo
+from shared import booking_service as booking
 from function import cancel_order as co
 
 RESERVE_PHONE_DEFAULT = "0939592628"
@@ -94,7 +94,7 @@ def calculate_reserve_target(unassigned_people, reserve_rate):
 
 def login_reserve_member(env_name, backend_email, backend_password, phone=RESERVE_PHONE_DEFAULT):
     _assert_supported_env(env_name)
-    result = qo.quick_lookup_member(env_name, backend_email, backend_password, phone, clean_type_id="1")
+    result = booking.lookup_member(env_name, backend_email, backend_password, phone, clean_type_id="1")
     if not result.get("member_payload"):
         raise RuntimeError(f"保留單手機 {phone} 查無會員。")
     return result
@@ -119,7 +119,7 @@ def member_addresses(lookup_result):
 def fetch_schedule_html(lookup_result, service_date):
     resp = lookup_result["session"].get(
         f"{lookup_result['base_url']}/schedule", params={"date": service_date, "staffId": ""},
-        headers=getattr(qo, "HEADERS", {}), allow_redirects=True, timeout=20,
+        headers=booking.request_headers(), allow_redirects=True, timeout=20,
     )
     if resp.status_code != 200:
         raise RuntimeError(f"讀取班表失敗：{service_date} HTTP {resp.status_code}")
@@ -210,16 +210,16 @@ def create_reserve_orders_for_plan(*, env_name, lookup_result, region, address, 
                 if people < 2:
                     flat.append({"success": False, "service_date": date_s, "period": period, "message": f"即時未配班只剩 {people} 人，停止此時段"})
                     break
-                result = qo.quick_create_order(
+                result = booking.create_order(
                     env_name=env_name, payway=payway, region=region, lookup_result=lookup_result,
                     address=address, clean_type_id=clean_type_id, date_s=date_s, period_s=period,
                     hour=str(PERIOD_HOURS[period]), person="2", allow_auto_lemon_shift=False,
                     extra_fields={"notice": CUSTOMER_SERVICE_NOTE},
                 )
-                base_url = lookup_result.get("base_url") or qo._configure_environment(env_name)
+                base_url = lookup_result.get("base_url") or booking.configure_environment(env_name)
                 memo_ok, memo_msg = _mark_customer_memo(result["session"], base_url, result.get("order_no"))
                 try:
-                    note_ok, note_msg = qo._update_order_note(result["session"], base_url, result.get("order_no"), CUSTOMER_SERVICE_NOTE)
+                    note_ok, note_msg = booking.update_order_note(result["session"], base_url, result.get("order_no"), CUSTOMER_SERVICE_NOTE)
                 except Exception as exc:
                     note_ok, note_msg = False, str(exc)
                 flat.append({
