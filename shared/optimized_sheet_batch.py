@@ -1,21 +1,25 @@
 # ============================================================
 # 檔名：shared/optimized_sheet_batch.py
-# 功能：新版 Google Sheet 批次建單引擎；共用單一 session，並每 10 列 checkpoint 批次回寫。
+# 功能：新版 Google Sheet 批次建單引擎；單一 session，每 10 列 checkpoint 回寫。
 # 更新時間：2026-08-19
 # ============================================================
 # -*- coding: utf-8 -*-
 from __future__ import annotations
-
 import time
 from collections import defaultdict
 from typing import Iterable, Sequence
 import pandas as pd
-import requests
 import orders
 from accounts import ACCOUNTS
 from shared.batch_writeback import BatchWritebackBuffer, DEFAULT_CHECKPOINT_SIZE
 from shared.env_config import apply_env
-from shared import calendar_service, order_query_service, order_status_service
+from shared import (
+    backend_session_service,
+    calendar_service,
+    order_group_service,
+    order_query_service,
+    order_status_service,
+)
 
 REQUIRED_COLUMNS = ["服務人時", "備註", "姓名", "電話", "地址", "日期", "開始時間", "結束時間", "狀態", "購買項目", "訂單編號"]
 
@@ -38,7 +42,7 @@ def run_optimized_sheet_batch(*, env_name: str, region: str, backend_email: str,
         if col not in df.columns:
             raise Exception(f"工作表缺少必要欄位: {col}")
     df = df[df["__sheet_row__"].isin(set(rows_requested))]
-    df = df[df.apply(orders.should_process_row, axis=1)]
+    df = df[df.apply(order_group_service.should_process_row, axis=1)]
     filtered = [r for _, r in df.iterrows() if order_query_service.get_region(str(r["地址"]), ACCOUNTS) == region]
     if not filtered:
         return {"success": True, "message": "沒有符合條件的資料", "total_processed": 0, "writeback": {"checkpoint_size": checkpoint_size, "flush_count": 0}}
@@ -51,17 +55,14 @@ def run_optimized_sheet_batch(*, env_name: str, region: str, backend_email: str,
         except Exception as exc:
             logger(f"Google Calendar 初始化失敗：{exc}")
 
-    session = requests.Session()
-    if not orders.login(session, backend_email, backend_password):
-        raise Exception("後台登入失敗，請確認帳號密碼")
-
+    session = backend_session_service.create_logged_in_session(backend_email, backend_password)
     groups, existing = defaultdict(list), []
     for _, row in df.iterrows():
         row_num = int(row["__sheet_row__"])
-        if not orders.has_action(selected_actions, "建單") or not orders.should_create_order(row):
+        if not order_group_service.has_action(selected_actions, "建單") or not order_group_service.should_create_order(row):
             existing.append((row_num, row))
         else:
-            groups[orders.build_group_key(row)].append((row_num, row))
+            groups[order_group_service.build_group_key(row)].append((row_num, row))
 
     buffer = BatchWritebackBuffer(ws, checkpoint_size=checkpoint_size, logger=logger)
     results, failed = {}, []
@@ -83,8 +84,8 @@ def run_optimized_sheet_batch(*, env_name: str, region: str, backend_email: str,
     used_order_nos = set()
     for _, rows_with_idx in groups.items():
         try:
-            token = orders.get_csrf_token(session)
-            row_results = orders.process_one_group(session, rows_with_idx, token, gcal, region, None, selected_actions, allow_auto_lemon_shift=allow_auto_lemon_shift, used_order_nos=used_order_nos)
+            token = backend_session_service.get_csrf_token(session)
+            row_results = order_group_service.process_group(session, rows_with_idx, token, gcal, region, None, selected_actions, allow_auto_lemon_shift=allow_auto_lemon_shift, used_order_nos=used_order_nos)
             for row_num, _ in rows_with_idx:
                 stage(row_num, row_results.get(row_num, {}))
         except Exception as exc:
