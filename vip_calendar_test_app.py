@@ -11,8 +11,10 @@ import streamlit as st
 import function.vip_calendar_sync as vcs
 from function.vip_calendar_patch_bundle import apply_all
 
-# 過渡期統一由單一入口套用 patch 1~5；最終會收斂進 vip_calendar_sync.py。
-apply_all(vcs)
+# Streamlit 會重跑腳本；同一程序只套一次 patch。
+if not getattr(vcs, "_vip_patches_applied", False):
+    apply_all(vcs)
+    vcs._vip_patches_applied = True
 
 st.set_page_config(page_title="VIP 訂單／Google 日曆同步測試", layout="wide")
 st.title("VIP 訂單／Google 日曆同步測試")
