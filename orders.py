@@ -354,11 +354,8 @@ def build_group_key(row):
     return (
         str(row["姓名"]).strip(),
         normalize_phone(row["電話"]),
-        str(row["地址"]).strip(),
-        str(row["購買項目"]).strip(),
-        normalize_period_text(row["開始時間"], row["結束時間"]),
+        normalize_addr_for_match(row["地址"]),
         normalized_human_hour,
-        str(row["備註"]).strip(),
     )
 
 
@@ -1551,7 +1548,7 @@ def process_existing_order_only(row, gcal_service, region, session, selected_act
     return result
 
 
-def process_one_group(session, rows_with_idx, token, gcal_service, region, backend_user_id=None, selected_actions=None, allow_auto_lemon_shift=False, used_order_nos=None):
+def process_one_group(session, rows_with_idx, token, gcal_service, region, backend_user_id=None, selected_actions=None, allow_auto_lemon_shift=False, used_order_nos=None, logger=print):
     _, row0 = rows_with_idx[0]
 
     purchase_item = str(row0["購買項目"]).strip()
@@ -1741,7 +1738,7 @@ def process_one_group(session, rows_with_idx, token, gcal_service, region, backe
             customer_note = f"服務時間：{mapped['original_slot']}"
         return sms_time, customer_note
 
-    def build_priced_payload_for_date(date_s):
+    def build_priced_payload_for_date(date_s, row_system_period):
         calc_data = base_data.copy()
 
         # 重要：完全模擬手動「計算時數」流程。
@@ -1750,6 +1747,7 @@ def process_one_group(session, rows_with_idx, token, gcal_service, region, backe
         # 查詢班表/計算時數前，先把人數與時數改成 Google Sheet/A欄規則後的值。
         # 不採用後台自動推回來的 hour 來決定班表。
         calc_data["date_s"] = date_s
+        calc_data["period_s"] = row_system_period
         calc_data["hour"] = str(base_data.get("hour") or "")
         calc_data["person"] = str(base_data.get("person") or "")
         calc_data["price"] = ""
@@ -1775,6 +1773,7 @@ def process_one_group(session, rows_with_idx, token, gcal_service, region, backe
 
         payload = base_data.copy()
         payload["date_s"] = date_s
+        payload["period_s"] = row_system_period
         payload["hour"] = str(base_data.get("hour") or calc_fields.get("hour") or "")
         payload["person"] = str(base_data.get("person") or payload.get("person") or "")
         payload["price"] = str(calc_fields.get("price") or "0")
@@ -1800,14 +1799,20 @@ def process_one_group(session, rows_with_idx, token, gcal_service, region, backe
     row_details = []
     for row_num, row in rows_with_idx:
         date_s = get_date_str(row["日期"])
-        priced_payload = build_priced_payload_for_date(date_s)
+        row_mapped = map_to_system_slot(row["開始時間"], row["結束時間"], row["服務人時"])
+        row_system_period = row_mapped["system_slot"]
+        row_display_period = display_period_text(
+            row_system_period.split("-")[0], row_system_period.split("-")[1]
+        )
+        priced_payload = build_priced_payload_for_date(date_s, row_system_period)
 
         row_details.append({
             "row_num": row_num,
             "date": date_s,
-            "slot": f"{date_s}_{system_period}",
+            "slot": f"{date_s}_{row_system_period}",
+            "system_period": row_system_period,
             "price": int(float(priced_payload.get("price") or 0)),  # 只拿服務費比對儲值金
-            "display_period": system_display_period,
+            "display_period": row_display_period,
             "row": row,
             "payload": priced_payload,
         })
@@ -1815,8 +1820,8 @@ def process_one_group(session, rows_with_idx, token, gcal_service, region, backe
         print("[DEBUG] row slot =", {
             "row_num": row_num,
             "sheet_time": normalize_period_text(row["開始時間"], row["結束時間"]),
-            "system_period": system_period,
-            "slot": f"{date_s}_{system_period}",
+            "system_period": row_system_period,
+            "slot": f"{date_s}_{row_system_period}",
             "price": priced_payload.get("price"),
             "fare": priced_payload.get("fare"),
         })
@@ -1825,8 +1830,8 @@ def process_one_group(session, rows_with_idx, token, gcal_service, region, backe
                 st.write("🧭 row slot =", {
                     "row_num": row_num,
                     "sheet_time": normalize_period_text(row["開始時間"], row["結束時間"]),
-                    "system_period": system_period,
-                    "slot": f"{date_s}_{system_period}",
+                    "system_period": row_system_period,
+                    "slot": f"{date_s}_{row_system_period}",
                     "price": priced_payload.get("price"),
                     "fare": priced_payload.get("fare"),
                 })
@@ -1888,7 +1893,7 @@ def process_one_group(session, rows_with_idx, token, gcal_service, region, backe
             try:
                 ensure_lemon_cleaner_shifts(
                     session=session, base_url=BASE_URL,
-                    service_date=detail["date"], period_s=system_period,
+                    service_date=detail["date"], period_s=detail["system_period"],
                     person_count=str(people),
                 )
                 time.sleep(2)
@@ -1996,91 +2001,130 @@ def process_one_group(session, rows_with_idx, token, gcal_service, region, backe
     if used_order_nos is None:
         used_order_nos = set()
 
-    # 每筆單獨送出，避免日期互相污染
+    # 先排除送單前已存在的訂單，避免部分日期因餘額或後台規則未成單時，
+    # 誤把同電話、同日期與時段的舊訂單當成本次新單。
+    try:
+        before_response = session.get(PURCHASE_URL, headers=HEADERS, allow_redirects=True)
+        if before_response.status_code == 200:
+            used_order_nos.update(
+                block.get("order_no")
+                for block in extract_order_cards_from_purchase_html(before_response.text)
+                if block.get("order_no")
+            )
+    except Exception:
+        pass
+
+    # 真正群組送單：同一人、同地址、相同人數與時數的日期／時段，
+    # 不因週末、車馬費或各日期計價不同而拆批。只有相同 slot 重複時才拆開，
+    # 因為後台同一個 checkbox 值無法在一次 request 中代表兩張訂單。
+    payload_batches = []
     for detail in send_details:
-        payload = detail["payload"].copy()
-        slots = [detail["slot"]]
+        target_batch = next(
+            (
+                batch for batch in payload_batches
+                if detail["slot"] not in batch["slots"]
+            ),
+            None,
+        )
+        if target_batch is None:
+            target_batch = {"slots": set(), "details": []}
+            payload_batches.append(target_batch)
+        target_batch["slots"].add(detail["slot"])
+        target_batch["details"].append(detail)
 
-        print("[DEBUG] booking payload =",
-              {
-                  "date": detail["date"],
-                  "slot": detail["slot"],
-                  "price": payload.get("price"),
-                  "fare": payload.get("fare"),
-                  "addressId": payload.get("addressId"),
-                  "area_id": payload.get("area_id"),
-                  "company_id": payload.get("company_id"),
-                  "notice_len": len(str(payload.get("notice") or "")),
-              })
+    logger(
+        f"真正批次送單：{len(send_details)} 筆分成 {len(payload_batches)} 次後台提交"
+    )
 
-        session.post(
+    for batch_no, batch in enumerate(payload_batches, 1):
+        batch_details = batch["details"]
+        payload = batch_details[0]["payload"].copy()
+        slots = [detail["slot"] for detail in batch_details]
+        batch_rows = "、".join(str(detail["row_num"]) for detail in batch_details)
+
+        logger(
+            f"送出第 {batch_no} 批：共 {len(batch_details)} 筆"
+            f"（列號 {batch_rows}；date_list[] 共 {len(slots)} 個時段）"
+        )
+        print("[DEBUG] grouped booking payload =", {
+            "rows": batch_rows,
+            "slots": slots,
+            "price": payload.get("price"),
+            "fare": payload.get("fare"),
+            "addressId": payload.get("addressId"),
+            "area_id": payload.get("area_id"),
+            "company_id": payload.get("company_id"),
+            "notice_len": len(str(payload.get("notice") or "")),
+        })
+
+        response = session.post(
             BOOKING_URL,
             data={**payload, "_token": token, "date_list[]": slots},
             headers=HEADERS,
             allow_redirects=True,
         )
+        response.raise_for_status()
 
+        # 後台在同一 request 內建立整批訂單；只等待一次，再逐日期配對訂單編號。
         time.sleep(1)
 
-        # v2026-07：比對時同時帶入電話 + 已排除本次用過的訂單編號，避免
-        # 只用日期+時段配對到別人的訂單，造成同一個訂單編號被誤寫進兩列
-        # Google Sheet（M欄重複、實際上只有一列真的成單）。
-        order_no = fetch_order_no_by_date_and_period(
-            session, detail["date"], detail["display_period"],
-            phone=phone, exclude_order_nos=used_order_nos,
-        )
-        if order_no:
-            used_order_nos.add(order_no)
-        sms_time, customer_note = build_time_fields()
-        service_notice = str(payload.get("notice") or "")
+        for detail in batch_details:
+            order_no = fetch_order_no_by_date_and_period(
+                session, detail["date"], detail["display_period"],
+                phone=phone, exclude_order_nos=used_order_nos,
+            )
+            if order_no:
+                used_order_nos.add(order_no)
+            sms_time, customer_note = build_time_fields()
+            service_notice = str(detail["payload"].get("notice") or "")
 
-        if not order_no:
-            row_results[detail["row_num"]] = build_row_result(
-                result="已送出",
-                reason="抓不到訂單編號",
+            if not order_no:
+                row_results[detail["row_num"]] = build_row_result(
+                    result="失敗",
+                    reason="未查到新訂單編號（可能缺人力、餘額不足或後台未成單）",
+                    sms_time=sms_time,
+                    customer_note=customer_note,
+                    service_notice=service_notice,
+                    status_value="",
+                    staff=detail.get("section_staff") or "無人力",
+                    service_status="未處理",
+                    fare=str(detail["payload"].get("fare") or "0"),
+                )
+                continue
+
+            meta = fetch_order_meta_by_order_no(session, order_no)
+            staff_value = meta.get("服務人員", "")
+            if not staff_value or staff_value == "無人力":
+                staff_value = detail.get("section_staff") or "無人力"
+
+            stage_result = build_row_result(
+                order_no=order_no,
+                result="成功",
+                reason="",
                 sms_time=sms_time,
                 customer_note=customer_note,
                 service_notice=service_notice,
                 status_value="",
-                staff=detail.get("section_staff") or "無人力",
-                service_status="未處理",
-                fare=str(detail["payload"].get("fare") or "0"),
+                staff=staff_value,
+                service_status=meta.get("服務狀態", "未處理"),
+                fare=meta.get("車馬費", "0") or str(detail["payload"].get("fare") or "0"),
             )
-            continue
 
-        meta = fetch_order_meta_by_order_no(session, order_no)
+            confirm_info = {}
+            calendar_info = {}
 
-        staff_value = meta.get("服務人員", "")
-        if not staff_value or staff_value == "無人力":
-            staff_value = detail.get("section_staff") or "無人力"
+            if has_action(selected_actions, "寄確認信"):
+                confirm_info = stage_send_confirmation(order_no, session)
+                stage_result.update(confirm_info)
 
-        stage_result = build_row_result(
-            order_no=order_no,
-            result="成功",
-            reason="",
-            sms_time=sms_time,
-            customer_note=customer_note,
-            service_notice=service_notice,
-            status_value="",
-            staff=staff_value,
-            service_status=meta.get("服務狀態", "未處理"),
-            fare=meta.get("車馬費", "0") or str(detail["payload"].get("fare") or "0"),
-        )
+            if has_action(selected_actions, "改 Google 日曆"):
+                calendar_info = stage_calendar_color(detail["row"], gcal_service, region)
+                stage_result.update(calendar_info)
 
-        confirm_info = {}
-        calendar_info = {}
-
-        if has_action(selected_actions, "寄確認信"):
-            confirm_info = stage_send_confirmation(order_no, session)
-            stage_result.update(confirm_info)
-
-        if has_action(selected_actions, "改 Google 日曆"):
-            calendar_info = stage_calendar_color(detail["row"], gcal_service, region)
-            stage_result.update(calendar_info)
-
-        stage_result.update(stage_update_status(order_no, confirm_info, calendar_info, stage_result))
-
-        row_results[detail["row_num"]] = stage_result
+            stage_result.update(
+                stage_update_status(order_no, confirm_info, calendar_info, stage_result)
+            )
+            row_results[detail["row_num"]] = stage_result
 
     return row_results
 
@@ -2179,6 +2223,8 @@ def run_process_web(env_name, region, backend_email, backend_password, sheet_nam
 
         grouped_orders[build_group_key(row)].append((row_num, row))
 
+    logger(f"群組完成：{len(df)} 筆資料依姓名、電話、地址與服務條件分成 {len(grouped_orders)} 組")
+
     all_row_results = {}
     failed_records = []
 
@@ -2212,7 +2258,8 @@ def run_process_web(env_name, region, backend_email, backend_password, sheet_nam
 
     for group_no, (_, rows_with_idx) in enumerate(grouped_orders.items(), start=1):
         _, first_row = rows_with_idx[0]
-        logger(f"處理第 {group_no} 組：{first_row['姓名']}，共 {len(rows_with_idx)} 筆")
+        group_row_numbers = "、".join(str(row_num) for row_num, _ in rows_with_idx)
+        logger(f"處理第 {group_no} 組：{first_row['姓名']}，共 {len(rows_with_idx)} 筆（列號 {group_row_numbers}）")
 
         try:
             token = get_csrf_token(session)
@@ -2220,6 +2267,7 @@ def run_process_web(env_name, region, backend_email, backend_password, sheet_nam
                 session, rows_with_idx, token, gcal_service, region, None, selected_actions,
                 allow_auto_lemon_shift=allow_auto_lemon_shift,
                 used_order_nos=used_order_nos_this_run,
+                logger=logger,
             )
             all_row_results.update(row_results)
 
@@ -3281,4 +3329,3 @@ def run_backend_calendar_consistency_check(env_name, backend_email, backend_pass
             })
 
     return result
-
