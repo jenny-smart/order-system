@@ -1497,7 +1497,7 @@ def sync_one_to_purchase_edit(item: dict, session: requests.Session, ui_logger=N
     return True
 
 
-def mark_sheet_row_done(region: str, sheet_row: int, kind: str, ui_logger=None):
+def mark_sheet_row_done(region: str, sheet_row: int, status: str, ui_logger=None):
     """回填成功後只標記處理時間，不改 B 欄狀態。"""
     def log(msg):
         if ui_logger:
@@ -1505,7 +1505,7 @@ def mark_sheet_row_done(region: str, sheet_row: int, kind: str, ui_logger=None):
 
     ws = get_worksheet(region)
     ws.update_acell(f"AD{sheet_row}", datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d %H:%M:%S"))
-    ws.update_acell(f"AE{sheet_row}", "更新系統")
+    ws.update_acell(f"AE{sheet_row}", f"更新系統（B欄：{status}）")
     log(f"✅ Sheet 第 {sheet_row} 列已標記系統回填時間與更新狀態（B 欄狀態不變）")
 
 
@@ -1528,7 +1528,7 @@ def sync_pending_rows(region: str, selected_rows: list, session: requests.Sessio
         result["processed"] += 1
         try:
             sync_one_to_purchase_edit(item, session=session, ui_logger=ui_logger)
-            mark_sheet_row_done(region, item["sheet_row"], item["kind"], ui_logger=ui_logger)
+            mark_sheet_row_done(region, item["sheet_row"], item["status"], ui_logger=ui_logger)
             result["success"] += 1
         except Exception as e:
             result["failed"] += 1
@@ -1776,7 +1776,7 @@ def render_change_order_stage_a(email, env_option):
 
 def render_change_order_stage_b(email, env_option):
     step("3", "讀取清潔異動工作表待處理列")
-    st.markdown('<div class="info-strip"><b>掃描條件</b><ul><li>B 欄為待收款、待退款、已收款、已退款，或專員服務時間異動、車馬費發票、VIP待退券/VIP已退券、待扣/已扣/待返/已返儲值金</li><li>收退款列需有對應金額；備註型列需有 K 欄備註</li></ul><b>列號篩選（選填）</b><ul><li>不填 → 掃描整個工作表全部符合條件的列</li><li>填寫 → 只掃描指定列號，例如 <code>19</code>、<code>19,21</code>、<code>19-22</code></li></ul><b>回填結果</b><ul><li>依 Sheet 狀態寫回後台加收/退款/備註欄位</li><li>AD 欄寫入系統回填時間，AE 欄寫入更新狀態</li><li>不會自動修改 B 欄狀態</li></ul></div>', unsafe_allow_html=True)
+    st.markdown('<div class="info-strip"><b>掃描條件</b><ul><li>B 欄為待收款、待退款、已收款、已退款，或專員服務時間異動、車馬費發票、VIP待退券/VIP已退券、待扣/已扣/待返/已返儲值金</li><li>收退款列需有對應金額；備註型列需有 K 欄備註</li></ul><b>列號篩選（選填）</b><ul><li>不填 → 掃描整個工作表全部符合條件的列</li><li>填寫 → 只掃描指定列號，例如 <code>19</code>、<code>19,21</code>、<code>19-22</code></li></ul><b>回填結果</b><ul><li>依 Sheet 狀態寫回後台加收/退款/備註欄位</li><li>AD 欄寫入台北時區系統回填時間</li><li>AE 欄寫入「更新系統（B欄：實際狀態）」</li><li>B 欄原值不會修改</li></ul></div>', unsafe_allow_html=True)
     c_region, c_rows = st.columns([1, 3])
     with c_region:
         region = st.selectbox("地區", ["台北", "台中", "桃園", "新竹", "高雄"], key="co_region_b")
