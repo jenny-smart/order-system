@@ -1,10 +1,16 @@
 # ============================================================
 # 檔名：orders.py
-# 版本：v2026.08.14-2
+# 版本：v2026.08.19-1
 # 模組：批次建單核心引擎（Google Sheet → 後台訂單，供 ordersapp.py 呼叫）
-# 最後更新：2026-08-14
+# 最後更新：2026-08-19
 #
 # Change Log
+# v2026.08.19-1
+# - 批次建單先依姓名、電話、地址、人數與時數分組。
+# - 直接以後台建單頁實際 date_list[] checkbox 判斷可勾選日期與時段。
+# - 同組不同日期／時段一次勾選送出；相同日期／時段重複時才分輪執行。
+# - 送出後只以後台新產生的訂單編號判定成功並回填 Google Sheet。
+# - 修正服務時段空格格式不同造成已成單卻無法配對單號。
 # v2026.08.14-2
 # - 修正「後台／Google 日曆雙向比對」的兩個誤判漏洞（真實訂單 LC00213191、
 #   LC00212665 驗證過）：
@@ -266,6 +272,9 @@ from env import (
     ORDER_PREFIX_DEV,
     ORDER_PREFIX_PROD,
 )
+
+ORDERS_VERSION = "v2026.08.19-1"
+ORDERS_UPDATED_AT = "2026-08-19"
 
 try:
     import streamlit as st
@@ -2165,6 +2174,7 @@ def run_process_web(env_name, region, backend_email, backend_password, sheet_nam
         GET_SECTION_URL, MAIL_SUCCESS_URL,
     ) = compute_env_url_tuple(env_name)
 
+    logger(f"程式版本：{ORDERS_VERSION}（更新日期：{ORDERS_UPDATED_AT}）")
     logger(f"目前環境：{env_name}")
     logger(f"BASE_URL：{BASE_URL}")
     logger(f"執行區域：{region}")
