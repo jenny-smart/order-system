@@ -496,7 +496,7 @@ def login(session, email, password):
     return resp.status_code == 200 and "login" not in resp.url.lower()
 
 
-def get_csrf_token(session):
+def get_booking_form_state(session):
     resp = session.get(BOOKING_URL, headers=HEADERS, allow_redirects=True)
     if resp.status_code != 200:
         raise Exception(f"取得儲值金訂單頁失敗: {resp.status_code}")
@@ -510,6 +510,17 @@ def get_csrf_token(session):
     if not token:
         raise Exception("_token 為空")
 
+    available_slots = {
+        str(input_tag.get("value") or "").strip()
+        for input_tag in soup.find_all("input", attrs={"name": "date_list[]"})
+        if str(input_tag.get("value") or "").strip()
+        and not input_tag.has_attr("disabled")
+    }
+    return token, available_slots
+
+
+def get_csrf_token(session):
+    token, _ = get_booking_form_state(session)
     return token
 
 
@@ -1554,6 +1565,9 @@ def process_existing_order_only(row, gcal_service, region, session, selected_act
 def process_one_group(session, rows_with_idx, token, gcal_service, region, backend_user_id=None, selected_actions=None, allow_auto_lemon_shift=False, used_order_nos=None, logger=print):
     _, row0 = rows_with_idx[0]
 
+    # 以後台建單頁實際存在的 date_list[] checkbox 為唯一可勾選依據。
+    token, booking_available_slots = get_booking_form_state(session)
+
     purchase_item = str(row0["購買項目"]).strip()
     clean_type_id = CLEAN_TYPE_MAP.get(purchase_item)
     if not clean_type_id:
@@ -1884,70 +1898,21 @@ def process_one_group(session, rows_with_idx, token, gcal_service, region, backe
 
     no_slot_dates = []
     valid_details = []
-
-    # 模擬後台頁面一次勾選全部日期＋時段：整組只查一次班表，
-    # 再從同一份系統回應判斷每個 checkbox 是否存在。
-    group_slots = [detail["slot"] for detail in row_details]
-    logger(f"一次查詢本組 {len(group_slots)} 個日期時段的系統勾選項目…")
-    group_section_raw = get_section_raw(
-        session, row_details[0]["payload"], token, group_slots
-    )
-
     for detail in row_details:
-        raw = group_section_raw
-        slot_ok = slot_exists_in_section_response(raw, detail["slot"])
-        cleaners = extract_cleaners_from_section_response(raw, detail["slot"])
-
-        # 若有勾選安全補檸檬人，才在無班表時嘗試補班。補班底層會跳過
-        # 當日已有任何班別的專員，不會動到其他客人已配班人員。
-        if not slot_ok and allow_auto_lemon_shift:
-            try:
-                ensure_lemon_cleaner_shifts(
-                    session=session, base_url=BASE_URL,
-                    service_date=detail["date"], period_s=detail["system_period"],
-                    person_count=str(people),
-                )
-                time.sleep(2)
-                raw = get_section_raw(session, detail["payload"], token, detail["slot"])
-                slot_ok = slot_exists_in_section_response(raw, detail["slot"])
-                cleaners = extract_cleaners_from_section_response(raw, detail["slot"])
-            except Exception as _e_lemon:
-                print(f"[DEBUG] 安全自動補檸檬人失敗：{_e_lemon}")
-
-        detail["section_cleaners"] = cleaners
-        detail["section_staff"] = format_staff_from_cleaners(cleaners, people=people)
-
-        logger(
-            f"班表檢查：第 {detail['row_num']} 列｜{detail['date']} "
-            f"{detail['display_period']}｜"
-            + (
-                "系統回應可勾選，加入本次送單"
-                if slot_ok
-                else "系統未回傳該日期時段選項，不送出"
-            )
-        )
-
-        print("[DEBUG] section match =", {
-            "slot": detail["slot"],
-            "matched": slot_ok,
-            "staff": detail.get("section_staff"),
-            "raw_preview": str(raw)[:500],
-        })
-        try:
-            if st is not None:
-                st.write("🧩 section match =", {
-                    "slot": detail["slot"],
-                    "matched": slot_ok,
-                    "staff": detail.get("section_staff"),
-                    "raw_preview": str(raw)[:500],
-                })
-        except Exception:
-            pass
-
-        if slot_ok:
+        detail["section_cleaners"] = []
+        detail["section_staff"] = ""
+        if detail["slot"] in booking_available_slots:
             valid_details.append(detail)
+            logger(
+                f"班表確認：第 {detail['row_num']} 列｜{detail['date']} "
+                f"{detail['display_period']}｜後台 checkbox 存在，加入本次送單"
+            )
         else:
             no_slot_dates.append(detail["date"])
+            logger(
+                f"班表確認：第 {detail['row_num']} 列｜{detail['date']} "
+                f"{detail['display_period']}｜後台 checkbox 不存在，不送出"
+            )
 
     if not valid_details:
         for detail in row_details:
@@ -2045,17 +2010,17 @@ def process_one_group(session, rows_with_idx, token, gcal_service, region, backe
     for batch_no, batch in enumerate(payload_batches, 1):
         batch_details = batch["details"]
         payload = batch_details[0]["payload"].copy()
+        payload["date_s"] = ""
         slots = [detail["slot"] for detail in batch_details]
 
         # 相同日期時段的下一筆必須重新走後台表單流程：取得新 token、
         # 重新查詢 checkbox；系統仍回傳可勾選才送出下一輪。
         if batch_no > 1:
             logger(f"第 {batch_no} 輪重新取得系統表單及班表勾選項目…")
-            token = get_csrf_token(session)
-            recheck_raw = get_section_raw(session, payload, token, slots)
+            token, refreshed_slots = get_booking_form_state(session)
             available_details = []
             for detail in batch_details:
-                if slot_exists_in_section_response(recheck_raw, detail["slot"]):
+                if detail["slot"] in refreshed_slots:
                     available_details.append(detail)
                     continue
                 sms_time, customer_note = build_time_fields()
@@ -2074,6 +2039,7 @@ def process_one_group(session, rows_with_idx, token, gcal_service, region, backe
             if not batch_details:
                 continue
             payload = batch_details[0]["payload"].copy()
+            payload["date_s"] = ""
             slots = [detail["slot"] for detail in batch_details]
 
         batch_rows = "、".join(str(detail["row_num"]) for detail in batch_details)
