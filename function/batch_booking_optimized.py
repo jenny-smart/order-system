@@ -63,7 +63,12 @@ def _ensure_sheet_row(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _load_candidates(sheet_name: str) -> pd.DataFrame:
-    _, df = load_worksheet(sheet_name)
+    try:
+        _, df = load_worksheet(sheet_name)
+    except Exception as exc:
+        if type(exc).__name__ == "WorksheetNotFound":
+            raise ValueError(f"找不到工作表分頁「{sheet_name}」，請確認輸入的是分頁名稱，例如：台北202609。") from exc
+        raise
     df = _ensure_sheet_row(df)
     missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
     if missing:
@@ -251,13 +256,16 @@ def render(backend_email: str, backend_password: str, env: str) -> None:
         return
 
     logs = []
+    run_status = st.status("已收到執行指令，正在讀取工作表…", expanded=True)
 
     def ui_log(msg):
         logs.append(_format_log(msg))
         log_box.text("\n\n".join(logs[-120:]))
 
     try:
+        run_status.write(f"讀取工作表分頁：{sheet_name.strip()}")
         candidates = _load_candidates(sheet_name.strip())
+        run_status.write("工作表讀取完成，正在檢查指定列號與地址地區…")
         candidate_map = {int(row["__sheet_row__"]): row for _, row in candidates.iterrows()}
         invalid_rows = [row for row in requested_rows if row not in candidate_map]
         if invalid_rows:
@@ -286,6 +294,7 @@ def render(backend_email: str, backend_password: str, env: str) -> None:
                 start_row, end_row = min(row_numbers), max(row_numbers)
                 row_label = "、".join(map(str, row_numbers))
                 ui_log(f"▶ {region}：執行指定列 {row_label}")
+                run_status.write(f"正在執行 {region}：第 {row_label} 列")
                 try:
                     result = run_process_web(
                         env_name=env,
@@ -335,11 +344,18 @@ def render(backend_email: str, backend_password: str, env: str) -> None:
             "fail": total_fail,
         }
         if total_fail:
+            run_status.update(label=f"執行完成：成功 {total_success}，失敗 {total_fail}", state="error", expanded=True)
             st.warning(f"執行完成：成功 {total_success}，失敗 {total_fail}。")
         else:
+            run_status.update(label=f"執行完成：成功 {total_success} 筆", state="complete", expanded=False)
             st.success(f"執行完成：成功 {total_success} 筆。")
     except Exception as exc:
-        st.error(str(exc))
+        message = str(exc).strip() or f"{type(exc).__name__}: {exc!r}"
+        if isinstance(exc, KeyError):
+            message = f"找不到設定或欄位「{exc.args[0]}」（KeyError），請確認工作表名稱、欄位與地區設定。"
+        run_status.update(label="執行失敗", state="error", expanded=True)
+        run_status.write(message)
+        st.error(f"執行失敗：{message}")
         return
 
     summary = st.session_state.get("batch_opt_summary") or {}

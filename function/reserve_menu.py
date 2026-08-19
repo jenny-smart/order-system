@@ -73,11 +73,18 @@ def render_create(email, password, env):
     with r1: am_rate = st.slider("AM 保留率", 0, 100, 70, 5, key="reserve_am_rate") / 100
     with r2: pm_rate = st.slider("PM 保留率", 0, 100, 70, 5, key="reserve_pm_rate") / 100
     if st.button("統計班表並產生保留計畫", width="stretch", key="reserve_build_plan"):
+        analysis_status = st.status("已收到分析指令，正在讀取班表…", expanded=True)
         try:
+            analysis_status.write(f"分析期間：{start}～{end}；時段：{'、'.join(periods) or '未選擇'}")
             st.session_state.reserve_plan_rows = [p.__dict__ for p in build_period_plan(lookup, start, end, [ReserveRule(start, end, am_rate, pm_rate)], periods)]
             st.session_state.pop("reserve_create_editor_rows", None)
             st.session_state.reserve_create_editor_revision = st.session_state.get("reserve_create_editor_revision", 0) + 1
-        except Exception as exc: st.error(str(exc))
+            analysis_status.update(label=f"分析完成：共 {len(st.session_state.reserve_plan_rows)} 個日期／時段", state="complete", expanded=False)
+        except Exception as exc:
+            message = str(exc).strip() or f"{type(exc).__name__}: {exc!r}"
+            analysis_status.update(label="分析失敗", state="error", expanded=True)
+            analysis_status.write(message)
+            st.error(f"分析失敗：{message}")
     rows = st.session_state.get("reserve_plan_rows") or []
     if not rows: return
     editor_rows = st.session_state.get("reserve_create_editor_rows")
@@ -111,10 +118,18 @@ def render_create(email, password, env):
     st.info(f"目前選擇 {len(selected)} 個日期／時段，預計建立 {total} 張保留單。")
     confirm = st.checkbox(f"我確認要在{_env_label(env)}建立以上 {total} 張保留單", key="reserve_create_confirm")
     if st.button("確認建立檸檬保留單", type="primary", width="stretch", disabled=not confirm or total <= 0, key="reserve_create_execute"):
+        execution_status = st.status(f"已收到建立指令，準備建立 {total} 張保留單…", expanded=True)
         try:
+            execution_status.write("正在逐日期／時段重新確認即時班表並建立訂單…")
             with st.spinner("逐張重新確認班表並建立保留單..."): result = create_reserve_orders_for_plan(env_name=env, lookup_result=lookup, region=region, address=address, plan_rows=selected, payway=payway)
-            st.session_state.reserve_last_create = result; st.success(f"完成：成功 {result['success_count']} / {result['target_orders']} 張")
-        except Exception as exc: st.error(str(exc))
+            st.session_state.reserve_last_create = result
+            execution_status.update(label=f"建立完成：成功 {result['success_count']} / {result['target_orders']} 張", state="complete", expanded=False)
+            st.success(f"完成：成功 {result['success_count']} / {result['target_orders']} 張")
+        except Exception as exc:
+            message = str(exc).strip() or f"{type(exc).__name__}: {exc!r}"
+            execution_status.update(label="建立失敗", state="error", expanded=True)
+            execution_status.write(message)
+            st.error(f"建立失敗：{message}")
     result = st.session_state.get("reserve_last_create")
     if result and result.get("results"): st.dataframe(pd.DataFrame(result["results"]), width="stretch", hide_index=True)
 
@@ -129,10 +144,18 @@ def render_cancel(email, password, env):
     periods = st.multiselect("取消查詢時段（可複選；不選代表全部）", list(PERIOD_HOURS), key="reserve_cancel_periods")
     memo_filter = st.selectbox("客人備註篩選", ["僅系統保留單", "系統保留單或空白", "僅空白", "全部（僅供查看）"], key="reserve_cancel_filter")
     if st.button("查詢可取消保留單", width="stretch", key="reserve_cancel_search"):
+        search_status = st.status("已收到查詢指令，正在搜尋保留單…", expanded=True)
         try:
+            search_status.write("正在讀取訂單並逐筆確認最新客人備註…")
             with st.spinner("查詢並確認客人備註..."): rows, debug = find_reserve_orders(env, email.strip(), password.strip(), phone.strip(), start.isoformat(), end.isoformat(), memo_filter=memo_filter, periods=periods, return_debug=True)
-            st.session_state.reserve_cancel_rows, st.session_state.reserve_cancel_debug = rows, debug; st.success(f"查詢完成：{len(rows)} 張。")
-        except Exception as exc: st.error(str(exc))
+            st.session_state.reserve_cancel_rows, st.session_state.reserve_cancel_debug = rows, debug
+            search_status.update(label=f"查詢完成：找到 {len(rows)} 張", state="complete", expanded=False)
+            st.success(f"查詢完成：{len(rows)} 張。")
+        except Exception as exc:
+            message = str(exc).strip() or f"{type(exc).__name__}: {exc!r}"
+            search_status.update(label="查詢失敗", state="error", expanded=True)
+            search_status.write(message)
+            st.error(f"查詢失敗：{message}")
     rows = st.session_state.get("reserve_cancel_rows") or []
     if not rows: return
     editor = [{"取消": False, "日期": r.get("service_date"), "時段": r.get("period"), "訂單編號": r.get("order_no"), "客人備註": r.get("customer_memo", ""), "安全可取消": bool(r.get("cancel_eligible"))} for r in rows]
@@ -143,9 +166,17 @@ def render_cancel(email, password, env):
     if memo_filter == "全部（僅供查看）": st.warning("全部模式僅供查看，不開放取消。"); return
     confirm = st.checkbox(f"我確認要取消以上 {len(selected)} 張保留單", key="reserve_cancel_confirm")
     if st.button("確認取消選取保留單", type="primary", width="stretch", disabled=not confirm or not selected, key="reserve_cancel_execute"):
+        cancel_status = st.status(f"已收到取消指令，準備處理 {len(selected)} 張保留單…", expanded=True)
         try:
+            cancel_status.write("正在逐張重新確認最新客人備註並取消…")
             with st.spinner("取消前重新確認最新客人備註..."): result = cancel_selected_reserve_orders(env, email.strip(), password.strip(), selected)
-            st.session_state.reserve_cancel_result = result; st.success("取消流程完成。")
-        except Exception as exc: st.error(str(exc))
+            st.session_state.reserve_cancel_result = result
+            cancel_status.update(label=f"取消流程完成：處理 {len(result)} 張", state="complete", expanded=False)
+            st.success("取消流程完成。")
+        except Exception as exc:
+            message = str(exc).strip() or f"{type(exc).__name__}: {exc!r}"
+            cancel_status.update(label="取消失敗", state="error", expanded=True)
+            cancel_status.write(message)
+            st.error(f"取消失敗：{message}")
     result = st.session_state.get("reserve_cancel_result") or []
     if result: st.dataframe(pd.DataFrame(result), width="stretch", hide_index=True)
