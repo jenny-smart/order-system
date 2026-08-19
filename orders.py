@@ -925,7 +925,11 @@ def match_order_from_purchase_page(html, target_date, target_period, phone="", e
         if not order_no_candidate or order_no_candidate in exclude_order_nos:
             continue
         joined = "\n".join(block["lines"])
-        if target_date not in joined or target_period not in joined:
+        # 後台不同頁面可能顯示為「09:00-12:00」或「09:00 - 12:00」；
+        # 比對前移除空白，避免實際已成單卻抓不到新單號。
+        joined_no_space = re.sub(r"\s", "", joined)
+        target_period_no_space = re.sub(r"\s", "", str(target_period))
+        if target_date not in joined_no_space or target_period_no_space not in joined_no_space:
             continue
         if not target_phone_norm:
             return order_no_candidate
@@ -1906,24 +1910,13 @@ def process_one_group(session, rows_with_idx, token, gcal_service, region, backe
         detail["section_cleaners"] = cleaners
         detail["section_staff"] = format_staff_from_cleaners(cleaners, people=people)
 
-        # v2026.07.09：光是「時段存在」還不夠，人數要真的足夠才能送出建單。
-        # 之前只檢查 slot_ok（時段存不存在），沒檢查人數，導致時段有排班、
-        # 但排的人數不夠這張單需要的人數時，還是照樣送出建單，等於人力不足
-        # 的訂單也會成單，不符合「人數不夠一律不能成單」的規則。
-        try:
-            _people_needed = int(people)
-        except Exception:
-            _people_needed = 0
-        if slot_ok and _people_needed and len(cleaners) < _people_needed:
-            slot_ok = False
-
         logger(
             f"班表檢查：第 {detail['row_num']} 列｜{detail['date']} "
             f"{detail['display_period']}｜"
             + (
-                f"可勾選（需要 {_people_needed} 人，可用 {len(cleaners)} 人）"
+                "系統回應可勾選，加入本次送單"
                 if slot_ok
-                else f"無班表／人力不足（需要 {_people_needed} 人，可用 {len(cleaners)} 人）"
+                else "系統未回傳該日期時段選項，不送出"
             )
         )
 
@@ -2067,31 +2060,53 @@ def process_one_group(session, rows_with_idx, token, gcal_service, region, backe
             "notice_len": len(str(payload.get("notice") or "")),
         })
 
+        # 明確使用瀏覽器多個 checkbox 的表單格式：同名的 date_list[] 重複出現。
+        # 雖然 requests 通常也會展開 dict 裡的 list，但後台批次建單以此格式最穩定。
+        post_data = [(key, value) for key, value in payload.items()]
+        post_data.append(("_token", token))
+        post_data.extend(("date_list[]", slot) for slot in slots)
         response = session.post(
             BOOKING_URL,
-            data={**payload, "_token": token, "date_list[]": slots},
+            data=post_data,
             headers=HEADERS,
             allow_redirects=True,
         )
         response.raise_for_status()
 
-        # 後台在同一 request 內建立整批訂單；只等待一次，再逐日期配對訂單編號。
-        time.sleep(1)
+        # 後台整批建立訂單後可能需要數秒才出現在訂單列表；整批輪詢，
+        # 不要讓每列只查一次就被誤判為「未成單」。
+        pending_details = list(batch_details)
+        order_no_by_row = {}
+        for lookup_attempt in range(1, 6):
+            purchase_response = session.get(PURCHASE_URL, headers=HEADERS, allow_redirects=True)
+            if purchase_response.status_code == 200:
+                for pending_detail in list(pending_details):
+                    order_no = match_order_from_purchase_page(
+                        purchase_response.text,
+                        pending_detail["date"],
+                        pending_detail["display_period"],
+                        phone=phone,
+                        exclude_order_nos=used_order_nos,
+                    )
+                    if order_no:
+                        used_order_nos.add(order_no)
+                        order_no_by_row[pending_detail["row_num"]] = order_no
+                        pending_details.remove(pending_detail)
+            if not pending_details:
+                break
+            if lookup_attempt < 5:
+                logger(f"等待後台產生其餘 {len(pending_details)} 筆新單號…（第 {lookup_attempt}/5 次查詢）")
+                time.sleep(1)
 
         for detail in batch_details:
-            order_no = fetch_order_no_by_date_and_period(
-                session, detail["date"], detail["display_period"],
-                phone=phone, exclude_order_nos=used_order_nos,
-            )
-            if order_no:
-                used_order_nos.add(order_no)
+            order_no = order_no_by_row.get(detail["row_num"])
             sms_time, customer_note = build_time_fields()
             service_notice = str(detail["payload"].get("notice") or "")
 
             if not order_no:
                 row_results[detail["row_num"]] = build_row_result(
                     result="失敗",
-                    reason="未查到新訂單編號（可能缺人力、餘額不足或後台未成單）",
+                    reason="系統未產生新訂單編號",
                     sms_time=sms_time,
                     customer_note=customer_note,
                     service_notice=service_notice,
