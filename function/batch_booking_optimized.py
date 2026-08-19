@@ -14,12 +14,12 @@ import streamlit as st
 
 from accounts import ACCOUNTS
 from function.ui_common import step, info_panel
-from orders import get_region_by_address, load_worksheet, run_process_web
+from orders import build_group_key, get_region_by_address, load_worksheet, run_process_web
 
 STORED_VALUE_SHEET_ID = "1de41gNvBZCGdfy0qNouRNEaQD7R019VAvz2cfq88ZrE"
 STORED_VALUE_SHEET_TITLE = "儲值金訂單"
 
-REQUIRED_COLUMNS = ["姓名", "電話", "地址", "日期", "開始時間", "結束時間", "狀態", "訂單編號"]
+REQUIRED_COLUMNS = ["服務人時", "備註", "姓名", "電話", "地址", "日期", "開始時間", "結束時間", "狀態", "購買項目", "訂單編號"]
 
 
 def _text(value) -> str:
@@ -183,8 +183,9 @@ def render(backend_email: str, backend_password: str, env: str) -> None:
     info_panel("操作方式", [
         "輸入工作表名稱及列號即可批次執行，不需先載入或逐筆勾選。",
         "列號支援單列、逗號及區間，例如：241、241,242、241-245、241,243-245。",
-        "系統會依地址自動判斷地區，同一人、同一地址及相同服務條件會集中執行。",
-        "同地址若服務人數、時數、時段、購買項目或備註不同，會自動拆成不同組。",
+        "系統會依地址自動判斷地區；同一人、同一地址、相同人數與時數會集中批次送單。",
+        "不同日期、時段、週末計價或車馬費不拆批；同日期與同時段重複幾次，就會分開送幾次。",
+        "批次後逐列回查，只有取得實際新訂單編號才視為成功。",
         "只處理訂單編號空白且必要資料完整的列；已有訂單編號的列不會重複建單。",
     ])
 
@@ -283,6 +284,17 @@ def render(backend_email: str, backend_password: str, env: str) -> None:
             rows_by_region.setdefault(region, []).append(row_no)
 
         jobs = [(region, sorted(row_numbers)) for region, row_numbers in rows_by_region.items()]
+        grouped_rows = {}
+        for region, row_numbers in jobs:
+            for row_no in row_numbers:
+                grouped_rows.setdefault((region, build_group_key(candidate_map[row_no])), []).append(row_no)
+        run_status.write(f"群組完成：{len(requested_rows)} 筆資料分成 {len(grouped_rows)} 組。")
+        for group_no, ((region, _), row_numbers) in enumerate(grouped_rows.items(), 1):
+            first = candidate_map[row_numbers[0]]
+            run_status.write(
+                f"第 {group_no} 組｜{region}｜{_text(first.get('姓名'))}｜"
+                f"列號 {'、'.join(map(str, row_numbers))}"
+            )
 
         total_success = 0
         total_fail = 0
@@ -293,7 +305,7 @@ def render(backend_email: str, backend_password: str, env: str) -> None:
             for region, row_numbers in jobs:
                 start_row, end_row = min(row_numbers), max(row_numbers)
                 row_label = "、".join(map(str, row_numbers))
-                ui_log(f"▶ {region}：執行指定列 {row_label}")
+                ui_log(f"▶ {region}：一次送入指定列 {row_label}，由核心依服務條件分組執行")
                 run_status.write(f"正在執行 {region}：第 {row_label} 列")
                 try:
                     result = run_process_web(
