@@ -1,10 +1,13 @@
 # ============================================================
 # 檔名：orders.py
-# 版本：v2026.08.19-1
+# 版本：v2026.08.19-2
 # 模組：批次建單核心引擎（Google Sheet → 後台訂單，供 ordersapp.py 呼叫）
 # 最後更新：2026-08-19
 #
 # Change Log
+# v2026.08.19-2
+# - 依後台「取得班表」實際流程送出完整表單，查詢時不預帶 date_list[]。
+# - 解析後台動態產生的全部日期／時段 checkbox，再一次勾選同組可用時段送出。
 # v2026.08.19-1
 # - 批次建單先依姓名、電話、地址、人數與時數分組。
 # - 直接以後台建單頁實際 date_list[] checkbox 判斷可勾選日期與時段。
@@ -273,7 +276,7 @@ from env import (
     ORDER_PREFIX_PROD,
 )
 
-ORDERS_VERSION = "v2026.08.19-1"
+ORDERS_VERSION = "v2026.08.19-2"
 ORDERS_UPDATED_AT = "2026-08-19"
 
 try:
@@ -505,7 +508,7 @@ def login(session, email, password):
     return resp.status_code == 200 and "login" not in resp.url.lower()
 
 
-def get_booking_form_state(session):
+def get_csrf_token(session):
     resp = session.get(BOOKING_URL, headers=HEADERS, allow_redirects=True)
     if resp.status_code != 200:
         raise Exception(f"取得儲值金訂單頁失敗: {resp.status_code}")
@@ -519,18 +522,17 @@ def get_booking_form_state(session):
     if not token:
         raise Exception("_token 為空")
 
-    available_slots = {
-        str(input_tag.get("value") or "").strip()
-        for input_tag in soup.find_all("input", attrs={"name": "date_list[]"})
-        if str(input_tag.get("value") or "").strip()
-        and not input_tag.has_attr("disabled")
-    }
-    return token, available_slots
-
-
-def get_csrf_token(session):
-    token, _ = get_booking_form_state(session)
     return token
+
+
+def get_all_sections_raw(session, order_data, token):
+    """依後台 get_section 按鈕流程，未勾日期前送出完整表單取得所有 checkbox。"""
+    data = order_data.copy()
+    data["_token"] = token
+    data["date_s"] = ""
+    data.pop("date_list[]", None)
+    resp = session.post(GET_SECTION_URL, data=data, headers=HEADERS, allow_redirects=True)
+    return resp.text if resp.status_code == 200 else ""
 
 
 def get_member(session, phone, token, clean_type_id):
@@ -1574,9 +1576,6 @@ def process_existing_order_only(row, gcal_service, region, session, selected_act
 def process_one_group(session, rows_with_idx, token, gcal_service, region, backend_user_id=None, selected_actions=None, allow_auto_lemon_shift=False, used_order_nos=None, logger=print):
     _, row0 = rows_with_idx[0]
 
-    # 以後台建單頁實際存在的 date_list[] checkbox 為唯一可勾選依據。
-    token, booking_available_slots = get_booking_form_state(session)
-
     purchase_item = str(row0["購買項目"]).strip()
     clean_type_id = CLEAN_TYPE_MAP.get(purchase_item)
     if not clean_type_id:
@@ -1907,10 +1906,15 @@ def process_one_group(session, rows_with_idx, token, gcal_service, region, backe
 
     no_slot_dates = []
     valid_details = []
+    section_payload = row_details[0]["payload"].copy()
+    section_raw = get_all_sections_raw(session, section_payload, token)
     for detail in row_details:
         detail["section_cleaners"] = []
         detail["section_staff"] = ""
-        if detail["slot"] in booking_available_slots:
+        if slot_exists_in_section_response(section_raw, detail["slot"]):
+            cleaners = extract_cleaners_from_section_response(section_raw, detail["slot"])
+            detail["section_cleaners"] = cleaners
+            detail["section_staff"] = format_staff_from_cleaners(cleaners, people=people)
             valid_details.append(detail)
             logger(
                 f"班表確認：第 {detail['row_num']} 列｜{detail['date']} "
@@ -2026,10 +2030,11 @@ def process_one_group(session, rows_with_idx, token, gcal_service, region, backe
         # 重新查詢 checkbox；系統仍回傳可勾選才送出下一輪。
         if batch_no > 1:
             logger(f"第 {batch_no} 輪重新取得系統表單及班表勾選項目…")
-            token, refreshed_slots = get_booking_form_state(session)
+            token = get_csrf_token(session)
+            refreshed_raw = get_all_sections_raw(session, payload, token)
             available_details = []
             for detail in batch_details:
-                if detail["slot"] in refreshed_slots:
+                if slot_exists_in_section_response(refreshed_raw, detail["slot"]):
                     available_details.append(detail)
                     continue
                 sms_time, customer_note = build_time_fields()
