@@ -346,16 +346,15 @@ from shared.text_parsing import (
 
 
 def build_group_key(row):
-    normalized_human_hour = normalize_hours_text(
-        row["服務人時"],
-        row["開始時間"],
-        row["結束時間"],
+    people, hours = parse_service_human_hour(
+        row["服務人時"], row["開始時間"], row["結束時間"]
     )
     return (
-        str(row["姓名"]).strip(),
+        normalize_text_for_parse(row["姓名"]),
         normalize_phone(row["電話"]),
         normalize_addr_for_match(row["地址"]),
-        normalized_human_hour,
+        str(people),
+        str(hours),
     )
 
 
@@ -1886,8 +1885,16 @@ def process_one_group(session, rows_with_idx, token, gcal_service, region, backe
     no_slot_dates = []
     valid_details = []
 
+    # 模擬後台頁面一次勾選全部日期＋時段：整組只查一次班表，
+    # 再從同一份系統回應判斷每個 checkbox 是否存在。
+    group_slots = [detail["slot"] for detail in row_details]
+    logger(f"一次查詢本組 {len(group_slots)} 個日期時段的系統勾選項目…")
+    group_section_raw = get_section_raw(
+        session, row_details[0]["payload"], token, group_slots
+    )
+
     for detail in row_details:
-        raw = get_section_raw(session, detail["payload"], token, detail["slot"])
+        raw = group_section_raw
         slot_ok = slot_exists_in_section_response(raw, detail["slot"])
         cleaners = extract_cleaners_from_section_response(raw, detail["slot"])
 
@@ -2017,32 +2024,58 @@ def process_one_group(session, rows_with_idx, token, gcal_service, region, backe
     except Exception:
         pass
 
-    # 真正群組送單：同一人、同地址、相同人數與時數的日期／時段，
-    # 不因週末、車馬費或各日期計價不同而拆批。只有相同 slot 重複時才拆開，
-    # 因為後台同一個 checkbox 值無法在一次 request 中代表兩張訂單。
+    # 每次提交可同時勾選多個不同日期／時段，但相同 checkbox 一次只能建立一筆。
+    # 因此重複 slot 分到下一輪；每一輪仍盡量合併所有其他不同 slot。
     payload_batches = []
     for detail in send_details:
         target_batch = next(
-            (
-                batch for batch in payload_batches
-                if detail["slot"] not in batch["slots"]
-            ),
+            (batch for batch in payload_batches if detail["slot"] not in batch["slots"]),
             None,
         )
         if target_batch is None:
-            target_batch = {"slots": set(), "details": []}
+            target_batch = {"slots": [], "details": []}
             payload_batches.append(target_batch)
-        target_batch["slots"].add(detail["slot"])
+        target_batch["slots"].append(detail["slot"])
         target_batch["details"].append(detail)
-
     logger(
-        f"真正批次送單：{len(send_details)} 筆分成 {len(payload_batches)} 次後台提交"
+        f"真正批次送單：{len(send_details)} 筆依重複日期時段分成 "
+        f"{len(payload_batches)} 次後台提交"
     )
 
     for batch_no, batch in enumerate(payload_batches, 1):
         batch_details = batch["details"]
         payload = batch_details[0]["payload"].copy()
         slots = [detail["slot"] for detail in batch_details]
+
+        # 相同日期時段的下一筆必須重新走後台表單流程：取得新 token、
+        # 重新查詢 checkbox；系統仍回傳可勾選才送出下一輪。
+        if batch_no > 1:
+            logger(f"第 {batch_no} 輪重新取得系統表單及班表勾選項目…")
+            token = get_csrf_token(session)
+            recheck_raw = get_section_raw(session, payload, token, slots)
+            available_details = []
+            for detail in batch_details:
+                if slot_exists_in_section_response(recheck_raw, detail["slot"]):
+                    available_details.append(detail)
+                    continue
+                sms_time, customer_note = build_time_fields()
+                row_results[detail["row_num"]] = build_row_result(
+                    result="失敗",
+                    reason="系統重新查詢後未回傳該日期時段選項",
+                    sms_time=sms_time,
+                    customer_note=customer_note,
+                    service_notice=str(detail["payload"].get("notice") or ""),
+                    status_value="",
+                    staff="無人力",
+                    service_status="未處理",
+                    fare="0",
+                )
+            batch_details = available_details
+            if not batch_details:
+                continue
+            payload = batch_details[0]["payload"].copy()
+            slots = [detail["slot"] for detail in batch_details]
+
         batch_rows = "、".join(str(detail["row_num"]) for detail in batch_details)
 
         logger(
