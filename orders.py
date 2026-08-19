@@ -1917,6 +1917,16 @@ def process_one_group(session, rows_with_idx, token, gcal_service, region, backe
         if slot_ok and _people_needed and len(cleaners) < _people_needed:
             slot_ok = False
 
+        logger(
+            f"班表檢查：第 {detail['row_num']} 列｜{detail['date']} "
+            f"{detail['display_period']}｜"
+            + (
+                f"可勾選（需要 {_people_needed} 人，可用 {len(cleaners)} 人）"
+                if slot_ok
+                else f"無班表／人力不足（需要 {_people_needed} 人，可用 {len(cleaners)} 人）"
+            )
+        )
+
         print("[DEBUG] section match =", {
             "slot": detail["slot"],
             "matched": slot_ok,
@@ -2223,7 +2233,7 @@ def run_process_web(env_name, region, backend_email, backend_password, sheet_nam
 
         grouped_orders[build_group_key(row)].append((row_num, row))
 
-    logger(f"群組完成：{len(df)} 筆資料依姓名、電話、地址與服務條件分成 {len(grouped_orders)} 組")
+    logger(f"群組完成：{len(df)} 筆資料依同一人、同一地址、相同人數與時數分成 {len(grouped_orders)} 組")
 
     all_row_results = {}
     failed_records = []
