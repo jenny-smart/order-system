@@ -36,6 +36,24 @@ def _header(env, email, password):
     except Exception as exc:
         st.error(f"讀取保留會員失敗：{exc}"); return phone, None
 
+def _parse_plan_row_spec(value, max_row):
+    text = str(value or "").strip().replace("，", ",")
+    if not text: raise ValueError("請輸入分析列號。")
+    selected = set()
+    for part in text.split(","):
+        part = part.strip()
+        if "-" in part:
+            bounds = [x.strip() for x in part.split("-", 1)]
+            if len(bounds) != 2 or not all(x.isdigit() for x in bounds): raise ValueError(f"列號格式錯誤：{part}")
+            start, end = map(int, bounds)
+            if start < 1 or end < start: raise ValueError(f"列號範圍錯誤：{part}")
+            selected.update(range(start, end + 1))
+        elif part.isdigit() and int(part) > 0: selected.add(int(part))
+        else: raise ValueError(f"列號格式錯誤：{part}")
+    invalid = sorted(x for x in selected if x > max_row)
+    if invalid: raise ValueError("超出分析結果列號：" + "、".join(map(str, invalid)))
+    return selected
+
 def render_create(email, password, env):
     step("3", "檸檬保留單建單")
     info_panel("功能說明", ["先分析指定期間每個日期／時段的未配班真人，再依 AM／PM 保留率計算建議保留張數。", "可跨日期、跨時段複選並修改實際建立張數。", "每張保留單固定 2 位專員，建立前重新讀取即時班表。", f"系統建立訂單的客人備註寫『{SYSTEM_RESERVE_MEMO}』供安全取消辨識。", "支援正式機 prod 與測試機 dev。"])
@@ -55,14 +73,39 @@ def render_create(email, password, env):
     with r1: am_rate = st.slider("AM 保留率", 0, 100, 70, 5, key="reserve_am_rate") / 100
     with r2: pm_rate = st.slider("PM 保留率", 0, 100, 70, 5, key="reserve_pm_rate") / 100
     if st.button("統計班表並產生保留計畫", width="stretch", key="reserve_build_plan"):
-        try: st.session_state.reserve_plan_rows = [p.__dict__ for p in build_period_plan(lookup, start, end, [ReserveRule(start, end, am_rate, pm_rate)], periods)]
+        try:
+            st.session_state.reserve_plan_rows = [p.__dict__ for p in build_period_plan(lookup, start, end, [ReserveRule(start, end, am_rate, pm_rate)], periods)]
+            st.session_state.pop("reserve_create_editor_rows", None)
+            st.session_state.reserve_create_editor_revision = st.session_state.get("reserve_create_editor_revision", 0) + 1
         except Exception as exc: st.error(str(exc))
     rows = st.session_state.get("reserve_plan_rows") or []
     if not rows: return
-    editor_rows = [{"執行": False, "日期": r["service_date"], "時段": r["period"], "未配班人數": r["unassigned_people"], "保留率": f"{int(r['reserve_rate']*100)}%", "建議保留張數": r["reserve_order_target"], "建立張數": r["reserve_order_target"], "預計留給市場": r["market_people_target"]} for r in rows]
+    editor_rows = st.session_state.get("reserve_create_editor_rows")
+    if not editor_rows or len(editor_rows) != len(rows):
+        editor_rows = [{"執行": False, "列號": i, "日期": r["service_date"], "時段": r["period"], "未配班人數": r["unassigned_people"], "保留率": f"{int(r['reserve_rate']*100)}%", "建議保留張數": r["reserve_order_target"], "建立張數": r["reserve_order_target"], "預計留給市場": r["market_people_target"]} for i, r in enumerate(rows, 1)]
+        st.session_state.reserve_create_editor_rows = editor_rows
     st.markdown("#### 選擇日期 × 時段與建立張數")
-    st.caption("可任意跨日期、跨上午／下午複選；『建立張數』可低於建議值。")
-    edited = st.data_editor(pd.DataFrame(editor_rows), width="stretch", hide_index=True, disabled=["日期", "時段", "未配班人數", "保留率", "建議保留張數", "預計留給市場"], column_config={"執行": st.column_config.CheckboxColumn("執行"), "建立張數": st.column_config.NumberColumn("建立張數", min_value=0, step=1)}, key="reserve_create_editor")
+    st.caption("可逐列勾選、輸入分析列號，或使用全選／全不選；『建立張數』可低於建議值。")
+    row_input = st.text_input("執行分析列號（選填）", placeholder="例如：1,2 或 1-5", key="reserve_create_row_spec")
+    b1, b2, b3 = st.columns(3)
+    action = None
+    with b1:
+        if st.button("套用列號", width="stretch", key="reserve_create_apply_rows"): action = "rows"
+    with b2:
+        if st.button("全選", width="stretch", key="reserve_create_select_all"): action = "all"
+    with b3:
+        if st.button("全不選", width="stretch", key="reserve_create_clear_all"): action = "none"
+    if action:
+        try:
+            picked = _parse_plan_row_spec(row_input, len(editor_rows)) if action == "rows" else (set(range(1, len(editor_rows) + 1)) if action == "all" else set())
+            for item in editor_rows: item["執行"] = item["列號"] in picked
+            st.session_state.reserve_create_editor_rows = editor_rows
+            st.session_state.reserve_create_editor_revision = st.session_state.get("reserve_create_editor_revision", 0) + 1
+            st.rerun()
+        except ValueError as exc: st.error(str(exc))
+    revision = st.session_state.get("reserve_create_editor_revision", 0)
+    edited = st.data_editor(pd.DataFrame(editor_rows), width="stretch", hide_index=True, disabled=["列號", "日期", "時段", "未配班人數", "保留率", "建議保留張數", "預計留給市場"], column_config={"執行": st.column_config.CheckboxColumn("執行"), "建立張數": st.column_config.NumberColumn("建立張數", min_value=0, step=1)}, key=f"reserve_create_editor_{revision}")
+    st.session_state.reserve_create_editor_rows = edited.to_dict("records")
     selected = [{"service_date": x["日期"], "period": x["時段"], "reserve_order_target": int(x["建立張數"])} for x in edited.to_dict("records") if x.get("執行") and int(x.get("建立張數") or 0) > 0]
     total = sum(x["reserve_order_target"] for x in selected)
     st.info(f"目前選擇 {len(selected)} 個日期／時段，預計建立 {total} 張保留單。")
