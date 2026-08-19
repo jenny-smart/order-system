@@ -2088,7 +2088,7 @@ def process_one_group(session, rows_with_idx, token, gcal_service, region, backe
 # =========================
 # 主執行
 # =========================
-def run_process_web(env_name, region, backend_email, backend_password, sheet_name, start_row, end_row, selected_actions=None, logger=print, allow_auto_lemon_shift=False):
+def run_process_web(env_name, region, backend_email, backend_password, sheet_name, start_row, end_row, selected_actions=None, logger=print, allow_auto_lemon_shift=False, selected_rows=None):
     global BASE_URL, ORDER_PREFIX, LOGIN_URL, BOOKING_URL, PURCHASE_URL
     global GET_MEMBER_URL, CHECK_CONTAIN_URL, CALCULATE_HOUR_URL, GET_SECTION_URL, MAIL_SUCCESS_URL
     (
@@ -2125,7 +2125,12 @@ def run_process_web(env_name, region, backend_email, backend_password, sheet_nam
         if col not in df.columns:
             raise Exception(f"工作表缺少必要欄位: {col}")
 
-    df = df[(df["__sheet_row__"] >= start_row) & (df["__sheet_row__"] <= end_row)]
+    if selected_rows is None:
+        df = df[(df["__sheet_row__"] >= start_row) & (df["__sheet_row__"] <= end_row)]
+    else:
+        selected_row_set = {int(row) for row in selected_rows}
+        df = df[df["__sheet_row__"].isin(selected_row_set)]
+        logger("指定列號：" + "、".join(map(str, sorted(selected_row_set))))
     df = df[df.apply(should_process_row, axis=1)]
 
     if df.empty:
@@ -3276,5 +3281,4 @@ def run_backend_calendar_consistency_check(env_name, backend_email, backend_pass
             })
 
     return result
-
 
