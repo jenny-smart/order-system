@@ -210,23 +210,24 @@ def render_batch(backend_email, backend_password, env):
         total_fail = 0
         total_processed = 0
         with st.spinner("執行中，請稍候…"):
-            for row_no in target_rows:
-                ui_log(f"▶ 開始執行第 {row_no} 列…")
-                try:
-                    result = run_process_web(
-                        env_name=env, region=region,
-                        backend_email=backend_email.strip(), backend_password=backend_password.strip(),
-                        sheet_name=sheet_name.strip(), start_row=row_no, end_row=row_no,
-                        selected_actions=selected_actions, logger=ui_log,
-                        allow_auto_lemon_shift=batch_allow_auto_lemon,
-                    )
-                    if isinstance(result, dict):
-                        total_success += result.get("success_count", 0)
-                        total_fail += result.get("fail_count", 0)
-                        total_processed += result.get("total_processed", 0)
-                except Exception as e:
-                    total_fail += 1
-                    ui_log(f"❌ 第 {row_no} 列失敗：{e}")
+            row_label = "、".join(map(str, target_rows))
+            ui_log(f"▶ 一次送入指定列 {row_label}，先依姓名／電話／地址／人數時數分組…")
+            try:
+                result = run_process_web(
+                    env_name=env, region=region,
+                    backend_email=backend_email.strip(), backend_password=backend_password.strip(),
+                    sheet_name=sheet_name.strip(), start_row=min(target_rows), end_row=max(target_rows),
+                    selected_actions=selected_actions, logger=ui_log,
+                    allow_auto_lemon_shift=batch_allow_auto_lemon,
+                    selected_rows=target_rows,
+                )
+                if isinstance(result, dict):
+                    total_success += result.get("success_count", 0)
+                    total_fail += result.get("fail_count", 0)
+                    total_processed += result.get("total_processed", 0)
+            except Exception as e:
+                total_fail += len(target_rows)
+                ui_log(f"❌ 批次執行失敗：{e}")
         ui_log("===== 建單流程執行完成 =====")
         ui_log("===== 全部執行完成 =====")
 
