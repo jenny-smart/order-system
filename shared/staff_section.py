@@ -152,18 +152,31 @@ def format_staff_from_cleaners(cleaners, people=None):
 
 
 def slot_exists_in_section_response(raw_text, date_slot):
-    """
-    get_section 回傳可能是 HTML、JSON 包 HTML、escaped HTML。
-    這裡不要只做單一 regex，改成多種格式都可比對。
-    """
+    """只認指定日期／時段的完整 checkbox，不做跨項目的模糊比對。"""
     if not raw_text:
         return False
 
     date_part, period_part = date_slot.split("_", 1)
-    start_part, end_part = period_part.split("-", 1)
-
     raw = str(raw_text)
     unescaped = html.unescape(raw)
+
+    def _matches_item(item):
+        if not isinstance(item, dict):
+            return False
+        item_date = str(item.get("date", "")).strip()
+        item_section = str(item.get("section", "")).strip().replace(" ", "")
+        return item_date == date_part and item_section == period_part.replace(" ", "")
+
+    def _contains_exact_checkbox(markup):
+        try:
+            soup = BeautifulSoup(html.unescape(str(markup or "")), "html.parser")
+            return any(
+                str(node.get("value", "")).strip().replace(" ", "")
+                == date_slot.replace(" ", "")
+                for node in soup.select('input[name="date_list[]"]')
+            )
+        except Exception:
+            return False
 
     try:
         data = json.loads(raw)
@@ -171,59 +184,9 @@ def slot_exists_in_section_response(raw_text, date_slot):
             data = data.get("data") or data.get("result") or data.get("sections") or []
         if isinstance(data, list):
             for item in data:
-                if not isinstance(item, dict):
-                    continue
-                item_date = str(item.get("date", "")).strip()
-                item_section = str(item.get("section", "")).strip().replace(" ", "")
-                if item_date == date_part and item_section == period_part.replace(" ", ""):
+                if _matches_item(item) or _contains_exact_checkbox(item):
                     return True
     except Exception:
         pass
 
-    try:
-        soup_text = BeautifulSoup(unescaped, "html.parser").get_text(" ", strip=True)
-    except Exception:
-        soup_text = unescaped
-
-    candidates = [raw, unescaped, soup_text]
-
-    date_variants = list(dict.fromkeys([
-        date_part,
-        date_part.replace("-", "/"),
-        date_part.replace("-", ""),
-    ]))
-
-    period_variants = list(dict.fromkeys([
-        period_part,
-        period_part.replace(" ", ""),
-        f"{start_part} - {end_part}",
-        f"{start_part}~{end_part}",
-        f"{start_part}～{end_part}",
-    ]))
-
-    for text in candidates:
-        compact = re.sub(r"\s+", "", text)
-
-        for d in date_variants:
-            for p in period_variants:
-                dp = re.sub(r"\s+", "", d)
-                pp = re.sub(r"\s+", "", p)
-                if dp in compact and pp in compact:
-                    date_idx = compact.find(dp)
-                    period_idx = compact.find(pp)
-                    if date_idx >= 0 and period_idx >= 0 and abs(period_idx - date_idx) < 500:
-                        return True
-
-        for d in date_variants:
-            d_re = re.escape(d)
-            s_re = re.escape(start_part)
-            e_re = re.escape(end_part)
-            patterns = [
-                rf"{d_re}.{{0,500}}{s_re}\s*[-~～]\s*{e_re}",
-                rf"{d_re}.{{0,500}}{re.escape(period_part)}",
-            ]
-            for pat in patterns:
-                if re.search(pat, text, flags=re.S):
-                    return True
-
-    return False
+    return _contains_exact_checkbox(unescaped)
