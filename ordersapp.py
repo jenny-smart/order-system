@@ -1,9 +1,13 @@
 # ============================================================
 # 檔名：ordersapp.py
-# 版本：v8.77
+# 版本：v8.78
 # 模組：服務訂單系統主畫面／統一功能選單
 # 最後更新：2026-08-19
 #
+# v8.78
+# - 新增「檸檬人換正式專員」通用入口，適用所有含檸檬人占位的訂單。
+# - 功能選單增加 mode 唯一化保護，避免同一功能因後續合併意外重複顯示。
+# - 保留「批次建單優化」「檸檬保留單建單／取消」各一個正式入口。
 # v8.77
 # - 新增「批次建單優化」：日期區間 × 複數時段批次查班及建單，不影響舊批次建單。
 # - 新增「檸檬保留單建單」「檸檬保留單取消」正式選單入口。
@@ -11,7 +15,7 @@
 # - VIP Calendar patch 改由單一 patch bundle 套用。
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.77"
+__version__ = "8.78"
 
 import streamlit as st
 from datetime import date, timedelta
@@ -32,6 +36,7 @@ from function import next_service_time_updater as _next_service_time_page
 from function import member_preferences as _member_preferences_page
 from function import batch_booking_optimized as _batch_booking_optimized_page
 from function import reserve_menu as _reserve_menu_page
+from function import lemon_staff_replacement as _lemon_staff_replacement_page
 from function.memo_router import render as _render_memo
 
 try:
@@ -99,7 +104,7 @@ step("2", "功能選單")
 FUNCTION_OPTIONS = [
     # ---------- A. 建單／成單流程 ----------
     ("批次建單：從 Google Sheet 逐列建立訂單、寄確認信、同步日曆。", "orders", "批次建單（Google Sheet）"),
-    ("批次建單優化：會員一次選日期區間與多個時段，集中查班後批次建立訂單。", "orders", "批次建單優化"),
+    ("批次建單優化：儲值金訂單依同一人＋同一地址分組，可一次複選多個日期／時段建單。", "orders", "批次建單優化"),
     ("檸檬保留單建單：依日期區間、時段與保留率分析班表並批次成立保留單。", "orders", "檸檬保留單建單"),
     ("建立舊客訂單：電話查會員、帶入歷史資料建單；需求搜尋整合在此流程內。", "orders", "建立舊客訂單"),
     ("建立新客訂單：貼上制式文字拆成欄位，供客服修改後建立訂單。", "orders", "建立新客訂單"),
@@ -109,6 +114,7 @@ FUNCTION_OPTIONS = [
     # ---------- B. 訂單附屬功能 ----------
     ("取消訂單：依電話、服務月份／日期區間與付款狀態搜尋訂單，處理退款與備註。", "orders", "取消訂單"),
     ("檸檬保留單取消：依期間、複選時段與客人備註安全篩選並批次取消保留單。", "orders", "檸檬保留單取消"),
+    ("檸檬人換正式專員：搜尋含檸檬人占位的訂單，依交通與配班規範推薦正式專員。", "orders", "檸檬人換正式專員"),
     ("VIP 訂單／Google 日曆同步：同時查詢後台訂單與 Google 日曆，支援異動、取消、暫停與日曆更新。", "orders", "VIP 訂單／Google 日曆同步"),
     ("訂單客服備註：舊客回購備註回填、新成單提醒建立、客服備忘錄整理。", "memo", "訂單客服備註"),
     ("儲值獎金備註：搜尋儲值金訂單，依姓名把獎金專員名字加進客服備註。", "orders", "儲值獎金備註"),
@@ -132,6 +138,16 @@ FUNCTION_OPTIONS = [
     ("服務異動：車馬費／異動費、服務前後加減時、退款與客訴退款等分階段處理。", "memo", "服務異動"),
 ]
 
+# 防呆：同一 mode 最多只保留一個選單項目，避免合併分支後重複顯示。
+_unique_options = []
+_seen_modes = set()
+for _option in FUNCTION_OPTIONS:
+    if _option[2] in _seen_modes:
+        continue
+    _seen_modes.add(_option[2])
+    _unique_options.append(_option)
+FUNCTION_OPTIONS = _unique_options
+
 _MEMO_SECTION_MAP = {
     "訂單客服備註": "📋 客服作業",
     "排班管理": "📅 排班管理",
@@ -144,10 +160,10 @@ _MEMO_SECTION_MAP = {
 _CATEGORY_HEADERS_BY_INDEX = {
     0: "A. 建單／成單流程",
     8: "B. 訂單附屬功能",
-    15: "C. 稽核比對工具",
-    18: "D. LINE 通知／提醒",
-    21: "E. 會員／客戶管理",
-    24: "F. 財務功能",
+    16: "C. 稽核比對工具",
+    19: "D. LINE 通知／提醒",
+    22: "E. 會員／客戶管理",
+    25: "F. 財務功能",
 }
 _menu_display_options = []
 _menu_option_targets = []
@@ -186,6 +202,10 @@ if mode == "檸檬保留單建單":
 
 if mode == "檸檬保留單取消":
     _reserve_menu_page.render_cancel(backend_email, backend_password, env)
+    st.stop()
+
+if mode == "檸檬人換正式專員":
+    _lemon_staff_replacement_page.render(backend_email, backend_password, env)
     st.stop()
 
 if mode == "取消訂單":
