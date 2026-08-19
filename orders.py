@@ -1,10 +1,12 @@
 # ============================================================
 # 檔名：orders.py
-# 版本：v2026.08.19-3
+# 版本：v2026.08.19-4
 # 模組：批次建單核心引擎（Google Sheet → 後台訂單，供 ordersapp.py 呼叫）
 # 最後更新：2026-08-19
 #
 # Change Log
+# v2026.08.19-4
+# - 批次執行訊息改為每組摘要，只顯示 checkbox 結果及有／無單號結果。
 # v2026.08.19-3
 # - checkbox 判斷改為完整比對 value="日期_時段"，移除跨日期／時段模糊配對。
 # v2026.08.19-2
@@ -278,7 +280,7 @@ from env import (
     ORDER_PREFIX_PROD,
 )
 
-ORDERS_VERSION = "v2026.08.19-3"
+ORDERS_VERSION = "v2026.08.19-4"
 ORDERS_UPDATED_AT = "2026-08-19"
 
 try:
@@ -1575,8 +1577,9 @@ def process_existing_order_only(row, gcal_service, region, session, selected_act
     return result
 
 
-def process_one_group(session, rows_with_idx, token, gcal_service, region, backend_user_id=None, selected_actions=None, allow_auto_lemon_shift=False, used_order_nos=None, logger=print):
+def process_one_group(session, rows_with_idx, token, gcal_service, region, backend_user_id=None, selected_actions=None, allow_auto_lemon_shift=False, used_order_nos=None, logger=print, group_no=None):
     _, row0 = rows_with_idx[0]
+    group_label = f"第 {group_no} 組" if group_no is not None else "本組"
 
     purchase_item = str(row0["購買項目"]).strip()
     clean_type_id = CLEAN_TYPE_MAP.get(purchase_item)
@@ -1918,16 +1921,15 @@ def process_one_group(session, rows_with_idx, token, gcal_service, region, backe
             detail["section_cleaners"] = cleaners
             detail["section_staff"] = format_staff_from_cleaners(cleaners, people=people)
             valid_details.append(detail)
-            logger(
-                f"班表確認：第 {detail['row_num']} 列｜{detail['date']} "
-                f"{detail['display_period']}｜後台 checkbox 存在，加入本次送單"
-            )
         else:
             no_slot_dates.append(detail["date"])
-            logger(
-                f"班表確認：第 {detail['row_num']} 列｜{detail['date']} "
-                f"{detail['display_period']}｜後台 checkbox 不存在，不送出"
-            )
+
+    def format_slots(details):
+        return "、".join(f"{item['date']} {item['display_period']}" for item in details) or "無"
+
+    invalid_details = [detail for detail in row_details if detail not in valid_details]
+    logger(f"{group_label} checkbox 存在：{format_slots(valid_details)}")
+    logger(f"{group_label} checkbox 不存在：{format_slots(invalid_details)}")
 
     if not valid_details:
         for detail in row_details:
@@ -2017,10 +2019,8 @@ def process_one_group(session, rows_with_idx, token, gcal_service, region, backe
             payload_batches.append(target_batch)
         target_batch["slots"].append(detail["slot"])
         target_batch["details"].append(detail)
-    logger(
-        f"真正批次送單：{len(send_details)} 筆依重複日期時段分成 "
-        f"{len(payload_batches)} 次後台提交"
-    )
+    sent_with_order = []
+    sent_without_order = []
 
     for batch_no, batch in enumerate(payload_batches, 1):
         batch_details = batch["details"]
@@ -2031,7 +2031,6 @@ def process_one_group(session, rows_with_idx, token, gcal_service, region, backe
         # 相同日期時段的下一筆必須重新走後台表單流程：取得新 token、
         # 重新查詢 checkbox；系統仍回傳可勾選才送出下一輪。
         if batch_no > 1:
-            logger(f"第 {batch_no} 輪重新取得系統表單及班表勾選項目…")
             token = get_csrf_token(session)
             refreshed_raw = get_all_sections_raw(session, payload, token)
             available_details = []
@@ -2060,10 +2059,7 @@ def process_one_group(session, rows_with_idx, token, gcal_service, region, backe
 
         batch_rows = "、".join(str(detail["row_num"]) for detail in batch_details)
 
-        logger(
-            f"送出第 {batch_no} 批：共 {len(batch_details)} 筆"
-            f"（列號 {batch_rows}；date_list[] 共 {len(slots)} 個時段）"
-        )
+        logger(f"{group_label}送出：{format_slots(batch_details)}")
         print("[DEBUG] grouped booking payload =", {
             "rows": batch_rows,
             "slots": slots,
@@ -2110,7 +2106,6 @@ def process_one_group(session, rows_with_idx, token, gcal_service, region, backe
             if not pending_details:
                 break
             if lookup_attempt < 5:
-                logger(f"等待後台產生其餘 {len(pending_details)} 筆新單號…（第 {lookup_attempt}/5 次查詢）")
                 time.sleep(1)
 
         for detail in batch_details:
@@ -2119,6 +2114,7 @@ def process_one_group(session, rows_with_idx, token, gcal_service, region, backe
             service_notice = str(detail["payload"].get("notice") or "")
 
             if not order_no:
+                sent_without_order.append(detail)
                 row_results[detail["row_num"]] = build_row_result(
                     result="失敗",
                     reason="系統未產生新訂單編號",
@@ -2131,6 +2127,8 @@ def process_one_group(session, rows_with_idx, token, gcal_service, region, backe
                     fare=str(detail["payload"].get("fare") or "0"),
                 )
                 continue
+
+            sent_with_order.append((detail, order_no))
 
             meta = fetch_order_meta_by_order_no(session, order_no)
             staff_value = meta.get("服務人員", "")
@@ -2165,6 +2163,13 @@ def process_one_group(session, rows_with_idx, token, gcal_service, region, backe
                 stage_update_status(order_no, confirm_info, calendar_info, stage_result)
             )
             row_results[detail["row_num"]] = stage_result
+
+    success_text = "、".join(
+        f"{detail['date']} {detail['display_period']} → {order_no}"
+        for detail, order_no in sent_with_order
+    ) or "無"
+    logger(f"{group_label}送出有單號：{success_text}")
+    logger(f"{group_label}送出無單號：{format_slots(sent_without_order)}")
 
     return row_results
 
@@ -2309,6 +2314,7 @@ def run_process_web(env_name, region, backend_email, backend_password, sheet_nam
                 allow_auto_lemon_shift=allow_auto_lemon_shift,
                 used_order_nos=used_order_nos_this_run,
                 logger=logger,
+                group_no=group_no,
             )
             all_row_results.update(row_results)
 
