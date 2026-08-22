@@ -1115,6 +1115,8 @@ def paste_atm_unpaid_list(region: str, rows: List[Dict], ui_logger=None) -> Dict
 
 from function.ui_common import step
 from function.memo_shared import get_session, DEFAULT_RESULT, normalize_result
+from shared.execution_log_service import log_execution
+import traceback as _atm_traceback
 
 
 def default_region_from_email(email_value):
@@ -1201,9 +1203,20 @@ def render_atm_list_mode(email, env_option):
                         paste_result = paste_atm_unpaid_list(region=region, rows=rows, ui_logger=atm_list_ui_log)
                     st.session_state.atm_list_paste_result = paste_result
                     atm_list_ui_log("===== 貼上完成 =====")
+                    log_execution(
+                        function_name="ATM 待付款清單貼上工作表",
+                        status="失敗" if paste_result.get("errors") else "成功",
+                        area=region, date=date_until.strftime("%Y-%m-%d"),
+                        message=f"貼上 {paste_result.get('pasted', 0)} 筆，從第 {paste_result.get('start_row')} 列開始",
+                    )
                     st.rerun()
                 except Exception as e:
                     atm_list_ui_log(f"❌ 貼上失敗：{e}"); st.error(str(e))
+                    log_execution(
+                        function_name="ATM 待付款清單貼上工作表", status="失敗",
+                        area=region, date=date_until.strftime("%Y-%m-%d"),
+                        message=str(e), traceback_text=_atm_traceback.format_exc(),
+                    )
 
     if st.session_state.get("atm_list_paste_result") is not None:
         st.markdown("---"); step("5", "貼上結果")
@@ -1251,10 +1264,20 @@ def render_atm_auto_match_mode(email, env_option):
             atm_match_ui_log("===== 配對銀行明細完成 =====")
             st.session_state.atm_match_result = result
             render_atm_result(result, result_container_local)
+            log_execution(
+                function_name="ATM 配對銀行明細",
+                status="失敗" if result.get("errors") or result.get("failed") else "成功",
+                area=region, target=row_spec.strip(),
+                message=f"成功 {result.get('success', result.get('matched', 0))}，失敗 {result.get('failed', 0)}",
+            )
         except Exception as e:
             atm_match_ui_log(f"❌ 自動配對失敗：{e}")
             st.session_state.atm_match_result = {**DEFAULT_RESULT, "failed": 1, "errors": [str(e)]}
             render_atm_result(st.session_state.atm_match_result, result_container_local)
+            log_execution(
+                function_name="ATM 配對銀行明細", status="失敗", area=region,
+                target=row_spec.strip(), message=str(e), traceback_text=_atm_traceback.format_exc(),
+            )
 
 
 def render_atm_reconcile_mode(email, env_option):
@@ -1294,10 +1317,23 @@ def render_atm_reconcile_mode(email, env_option):
             atm_ui_log("===== 執行完成 =====")
             st.session_state.atm_result = result
             render_atm_result(result, atm_result_container)
+            log_execution(
+                function_name="ATM 更新系統對帳",
+                status="失敗" if result.get("errors") or result.get("failed") else "成功",
+                area=region, target=row_spec,
+                message=(
+                    f"按已付款:{do_mark_paid}／開發票:{do_issue_invoice}／發確認信:{do_send_mail}；"
+                    f"成功 {result.get('success', 0)}，失敗 {result.get('failed', 0)}"
+                ),
+            )
         except Exception as e:
             atm_ui_log(f"❌ 執行錯誤：{e}")
             st.session_state.atm_result = {**DEFAULT_RESULT, "failed": 1, "errors": [str(e)]}
             render_atm_result(st.session_state.atm_result, atm_result_container)
+            log_execution(
+                function_name="ATM 更新系統對帳", status="失敗", area=region,
+                target=row_spec, message=str(e), traceback_text=_atm_traceback.format_exc(),
+            )
 
 
 def render(backend_email, backend_password, env):

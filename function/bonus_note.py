@@ -2,12 +2,14 @@
 """儲值獎金備註。"""
 
 import re
+import traceback
 from datetime import datetime
 
 import streamlit as st
 
 from orders import find_pending_stored_value_orders, apply_bonus_notes
 from function.ui_common import step, info_panel
+from shared.execution_log_service import log_execution
 
 
 def render(backend_email, backend_password, env):
@@ -159,8 +161,20 @@ def render(backend_email, backend_password, env):
                 try:
                     with st.spinner("寫入客服備註中…"):
                         apply_results = apply_bonus_notes(env, backend_email.strip(), backend_password.strip(), mapping)
+                    _bn_fail = sum(1 for r in apply_results if not r.get("ok"))
+                    log_execution(
+                        function_name="套用儲值獎金客服備註",
+                        status="失敗" if _bn_fail else "成功",
+                        target="、".join(m["order_no"] for m in mapping),
+                        message=f"套用 {len(mapping)} 筆，失敗 {_bn_fail} 筆",
+                    )
                 except Exception as e:
                     st.error(f"套用失敗：{e}")
+                    log_execution(
+                        function_name="套用儲值獎金客服備註", status="失敗",
+                        target="、".join(m["order_no"] for m in mapping),
+                        message=str(e), traceback_text=traceback.format_exc(),
+                    )
             st.session_state.bn_apply_results = apply_results
             st.session_state.bn_parse_errors = parse_errors
 

@@ -4,11 +4,13 @@
 # 更新時間：2026-08-19
 # ============================================================
 # -*- coding: utf-8 -*-
+import traceback
 from datetime import date
 import pandas as pd
 import streamlit as st
 from accounts import ACCOUNTS
 from shared import order_query_service
+from shared.execution_log_service import log_execution
 from function.ui_common import step, info_panel
 from function.reserve_cancel import SYSTEM_RESERVE_MEMO, cancel_selected_reserve_orders, find_reserve_orders
 from function.reserve_optimizer import (
@@ -125,11 +127,21 @@ def render_create(email, password, env):
             st.session_state.reserve_last_create = result
             execution_status.update(label=f"建立完成：成功 {result['success_count']} / {result['target_orders']} 張", state="complete", expanded=False)
             st.success(f"完成：成功 {result['success_count']} / {result['target_orders']} 張")
+            log_execution(
+                function_name="建立檸檬保留單", status="失敗" if result['success_count'] < result['target_orders'] else "成功",
+                area=region, date=f"{start}~{end}", target=address,
+                message=f"成功 {result['success_count']} / {result['target_orders']} 張",
+            )
         except Exception as exc:
             message = str(exc).strip() or f"{type(exc).__name__}: {exc!r}"
             execution_status.update(label="建立失敗", state="error", expanded=True)
             execution_status.write(message)
             st.error(f"建立失敗：{message}")
+            log_execution(
+                function_name="建立檸檬保留單", status="失敗", area=region,
+                date=f"{start}~{end}", target=address,
+                message=message, traceback_text=traceback.format_exc(),
+            )
     result = st.session_state.get("reserve_last_create")
     if result and result.get("results"): st.dataframe(pd.DataFrame(result["results"]), width="stretch", hide_index=True)
 
@@ -173,10 +185,21 @@ def render_cancel(email, password, env):
             st.session_state.reserve_cancel_result = result
             cancel_status.update(label=f"取消流程完成：處理 {len(result)} 張", state="complete", expanded=False)
             st.success("取消流程完成。")
+            _cancel_fail = sum(1 for r in result if not r.get("ok", True))
+            log_execution(
+                function_name="取消檸檬保留單", status="失敗" if _cancel_fail else "成功",
+                date=f"{start}~{end}", target=phone.strip(),
+                message=f"處理 {len(result)} 張，失敗 {_cancel_fail} 張",
+            )
         except Exception as exc:
             message = str(exc).strip() or f"{type(exc).__name__}: {exc!r}"
             cancel_status.update(label="取消失敗", state="error", expanded=True)
             cancel_status.write(message)
             st.error(f"取消失敗：{message}")
+            log_execution(
+                function_name="取消檸檬保留單", status="失敗",
+                date=f"{start}~{end}", target=phone.strip(),
+                message=message, traceback_text=traceback.format_exc(),
+            )
     result = st.session_state.get("reserve_cancel_result") or []
     if result: st.dataframe(pd.DataFrame(result), width="stretch", hide_index=True)

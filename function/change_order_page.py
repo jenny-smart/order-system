@@ -1542,6 +1542,8 @@ def sync_pending_rows(region: str, selected_rows: list, session: requests.Sessio
 
 from function.ui_common import step
 from function.memo_shared import get_session
+from shared.execution_log_service import log_execution
+import traceback as _co_traceback
 
 
 SCENARIO_OPTIONS = [
@@ -1765,15 +1767,29 @@ def render_change_order_stage_a(email, env_option):
                 co_log("===== 開始寫入 Sheet =====")
                 with st.spinner("寫入中，請稍候…"):
                     result = append_rows_to_sheet(region, rows_to_write, ui_logger=co_log)
-                if result["errors"]: st.error("；".join(result["errors"]))
+                _order_nos = "、".join(str(r.get("G", "")) for r in rows_to_write)
+                if result["errors"]:
+                    st.error("；".join(result["errors"]))
+                    log_execution(
+                        function_name="服務異動：寫入清潔異動工作表", status="失敗", area=region,
+                        target=_order_nos, message="；".join(result["errors"]),
+                    )
                 else:
                     st.success(f"✅ 已寫入 {result['written']} 筆，從第 {result['start_row']} 列開始")
+                    log_execution(
+                        function_name="服務異動：寫入清潔異動工作表", status="成功", area=region,
+                        target=_order_nos, message=f"寫入 {result['written']} 筆，從第 {result['start_row']} 列開始",
+                    )
                     st.session_state.co_calc_rows = []; st.session_state.co_phone_orders = []
                     for key in [k for k in st.session_state.keys() if str(k).startswith("co_j_edit_")]:
                         del st.session_state[key]
             except Exception as e:
                 error_message = str(e).strip() or f"{type(e).__name__}: {e!r}"
                 co_log(f"❌ 寫入失敗：{error_message}"); st.error(error_message)
+                log_execution(
+                    function_name="服務異動：寫入清潔異動工作表", status="失敗", area=region,
+                    message=error_message, traceback_text=_co_traceback.format_exc(),
+                )
 
 
 def render_change_order_stage_b(email, env_option):
@@ -1828,12 +1844,22 @@ def render_change_order_stage_b(email, env_option):
                 co_log("===== 回填完成 ====="); st.session_state.co_pending_rows = []
                 c1, c2, c3 = st.columns(3)
                 c1.metric("執行筆數", result["processed"]); c2.metric("成功", result["success"]); c3.metric("失敗", result["failed"])
+                _sb_target = "、".join(str(it.get("order_no", "")) for it in selected)
                 if result["errors"]:
                     with st.expander(f"⚠️ 錯誤明細（{len(result['errors'])} 筆）", expanded=True):
                         for i, err in enumerate(result["errors"], 1): st.markdown(f"**{i}.** {err}")
                 else: st.success("✅ 全部回填完成")
+                log_execution(
+                    function_name="服務異動：回填系統", status="失敗" if result["failed"] else "成功",
+                    area=region, target=_sb_target,
+                    message=f"處理{result['processed']}筆，成功{result['success']}筆，失敗{result['failed']}筆",
+                )
             except Exception as e:
                 co_log(f"❌ 回填失敗：{e}"); st.error(str(e))
+                log_execution(
+                    function_name="服務異動：回填系統", status="失敗", area=region,
+                    message=str(e), traceback_text=_co_traceback.format_exc(),
+                )
 
 
 def render(backend_email, backend_password, env):
