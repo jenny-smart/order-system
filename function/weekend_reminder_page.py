@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """週末服務 LINE 提醒。"""
 
+import traceback
+
 import streamlit as st
 
 from function.weekend_reminders import (
@@ -10,6 +12,7 @@ from function.weekend_reminders import (
     NOTICE_STATUSES, REPLY_STATUSES,
 )
 from function.ui_common import step, info_panel, copy_button
+from shared.execution_log_service import log_execution
 
 
 def render(backend_email, backend_password, env):
@@ -146,15 +149,35 @@ def render(backend_email, backend_password, env):
                             f"已儲存 {len(_selected)} 筆：新增 {_new_count} 筆、"
                             f"更新 {_updated_count} 筆；同訂單編號不會重複。"
                         )
+                        log_execution(
+                            function_name="週末服務提醒：儲存勾選名單", status="成功",
+                            date=f"{wr_date_s}~{wr_date_e}",
+                            target="、".join(str(o) for o in _selected_order_nos),
+                            message=f"新增 {_new_count} 筆、更新 {_updated_count} 筆",
+                        )
                     except Exception as e:
                         st.error(f"儲存失敗：{e}")
+                        log_execution(
+                            function_name="週末服務提醒：儲存勾選名單", status="失敗",
+                            date=f"{wr_date_s}~{wr_date_e}",
+                            message=str(e), traceback_text=traceback.format_exc(),
+                        )
 
             if st.button("💾 儲存通知／回覆狀態", use_container_width=True, key="wr_save"):
                 try:
                     count = save_tracking_rows(_edited_records)
                     st.success(f"已保存 {count} 筆追蹤狀態。")
+                    log_execution(
+                        function_name="週末服務提醒：儲存通知／回覆狀態", status="成功",
+                        date=f"{wr_date_s}~{wr_date_e}", message=f"保存 {count} 筆",
+                    )
                 except Exception as e:
                     st.error(f"儲存失敗：{e}")
+                    log_execution(
+                        function_name="週末服務提醒：儲存通知／回覆狀態", status="失敗",
+                        date=f"{wr_date_s}~{wr_date_e}",
+                        message=str(e), traceback_text=traceback.format_exc(),
+                    )
 
             copy_button(
                 "複製追蹤紀錄（貼到 Google Sheets 會自動分欄）",

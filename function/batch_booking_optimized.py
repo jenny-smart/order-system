@@ -6,6 +6,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import traceback
 from collections import OrderedDict
 from datetime import datetime
 
@@ -15,6 +16,7 @@ import streamlit as st
 from accounts import ACCOUNTS
 from function.ui_common import step, info_panel
 from orders import build_group_key, get_region_by_address, load_worksheet, run_process_web
+from shared.execution_log_service import log_execution
 
 STORED_VALUE_SHEET_ID = "1de41gNvBZCGdfy0qNouRNEaQD7R019VAvz2cfq88ZrE"
 STORED_VALUE_SHEET_TITLE = "儲值金訂單"
@@ -335,6 +337,11 @@ def render(backend_email: str, backend_password: str, env: str) -> None:
                         "成功": success,
                         "失敗": fail,
                     })
+                    log_execution(
+                        function_name="批次建單優化", status="失敗" if fail else "成功",
+                        area=region, date=sheet_name.strip(), target=row_label,
+                        message=f"處理{processed}筆，成功{success}筆，失敗{fail}筆",
+                    )
                 except Exception as exc:
                     failed = len(row_numbers)
                     total_fail += failed
@@ -347,6 +354,11 @@ def render(backend_email: str, backend_password: str, env: str) -> None:
                         "錯誤": str(exc),
                     })
                     ui_log(f"❌ 執行失敗：{exc}")
+                    log_execution(
+                        function_name="批次建單優化", status="失敗", area=region,
+                        date=sheet_name.strip(), target=row_label,
+                        message=str(exc), traceback_text=traceback.format_exc(),
+                    )
 
         st.session_state.batch_opt_results = range_results
         st.session_state.batch_opt_summary = {
@@ -368,6 +380,11 @@ def render(backend_email: str, backend_password: str, env: str) -> None:
         run_status.update(label="執行失敗", state="error", expanded=True)
         run_status.write(message)
         st.error(f"執行失敗：{message}")
+        log_execution(
+            function_name="批次建單優化", status="失敗",
+            date=sheet_name.strip(), target=row_spec.strip(),
+            message=message, traceback_text=traceback.format_exc(),
+        )
         return
 
     summary = st.session_state.get("batch_opt_summary") or {}

@@ -408,6 +408,8 @@ def match_bank_rows(region: str, ui_logger=None) -> Dict:
 
 from function.ui_common import step
 from function.memo_shared import get_session
+from shared.execution_log_service import log_execution
+import traceback as _pm_traceback
 
 
 def render(backend_email, backend_password, env):
@@ -456,13 +458,31 @@ def render(backend_email, backend_password, env):
                 try:
                     result = paste_orders(region, rows, ui_logger=payment_log)
                     st.success(f"已從第 {result['start_row']} 列貼上 {result['pasted']} 筆。")
+                    log_execution(
+                        function_name="付款比對：貼到待比對區", status="成功", area=region,
+                        date=f"{paid_start}~{paid_end}",
+                        message=f"貼上 {result['pasted']} 筆，從第 {result['start_row']} 列開始",
+                    )
                 except Exception as exc:
                     st.error(f"貼上失敗：{exc}")
+                    log_execution(
+                        function_name="付款比對：貼到待比對區", status="失敗", area=region,
+                        date=f"{paid_start}~{paid_end}",
+                        message=str(exc), traceback_text=_pm_traceback.format_exc(),
+                    )
 
     if st.button("🔗 比對銀行 B:H 與訂單 K:S", use_container_width=True, key="payment_match_run"):
         try:
             result = match_bank_rows(region, ui_logger=payment_log)
             st.success(f"完成：配對 {result['matched_orders']} 筆訂單；待人工確認 {result['review']} 列。")
+            log_execution(
+                function_name="付款比對：比對銀行明細", status="成功", area=region,
+                message=f"配對 {result['matched_orders']} 筆訂單；待人工確認 {result['review']} 列",
+            )
         except Exception as exc:
             st.error(f"比對失敗：{exc}")
+            log_execution(
+                function_name="付款比對：比對銀行明細", status="失敗", area=region,
+                message=str(exc), traceback_text=_pm_traceback.format_exc(),
+            )
 

@@ -6,6 +6,7 @@ memo_system/shift.py 已刪除。
 """
 
 import re
+import traceback
 from datetime import date, timedelta
 from typing import Dict, List, Optional, Callable, Tuple
 
@@ -14,6 +15,7 @@ from bs4 import BeautifulSoup
 import streamlit as st
 
 from shared import memo_backend as memo
+from shared.execution_log_service import log_execution
 
 # -----------------------------------------------------------------------------
 # 類型對照表
@@ -906,9 +908,19 @@ def render_shift_import_section(email, env_option):
             shift_ui_log("===== 儲存完成 =====")
             st.success(f"✅ 完成，共儲存 {result.get('saved', 0)} 個人/月份")
             if result.get("errors"): st.error("\n".join(result["errors"][:20]))
+            log_execution(
+                function_name="排班匯入：正式儲存", status="失敗" if result.get("errors") else "成功",
+                target=uploaded_file.name if uploaded_file else "",
+                message=f"儲存 {result.get('saved', 0)} 個人/月份",
+            )
             st.session_state.shift_dry_run_result = None
         except Exception as e:
             shift_ui_log(f"❌ 儲存失敗：{e}"); st.error(str(e))
+            log_execution(
+                function_name="排班匯入：正式儲存", status="失敗",
+                target=uploaded_file.name if uploaded_file else "",
+                message=str(e), traceback_text=traceback.format_exc(),
+            )
 
 
 def render_lemon_assign_section(email, env_option):
@@ -985,10 +997,22 @@ def render_lemon_assign_section(email, env_option):
                 )
             st.session_state.lemon_assign_result = result
             lemon_assign_log("===== 檸檬人勾班完成 =====")
+            log_execution(
+                function_name="檸檬人勾班", status="失敗" if result.get("errors") else "成功",
+                date=f"{assign_start.strftime('%Y-%m-%d')}~{assign_end.strftime('%Y-%m-%d')}",
+                target="、".join(lemon_names),
+                message=f"班別：{'、'.join(assign_types)}；儲存 {result.get('saved', 0)} 次",
+            )
             st.rerun()
         except Exception as e:
             lemon_assign_log(f"❌ 勾班失敗：{e}")
             st.error(str(e))
+            log_execution(
+                function_name="檸檬人勾班", status="失敗",
+                date=f"{assign_start.strftime('%Y-%m-%d')}~{assign_end.strftime('%Y-%m-%d')}",
+                target="、".join(lemon_names),
+                message=str(e), traceback_text=traceback.format_exc(),
+            )
 
     result = st.session_state.get("lemon_assign_result")
     if result is not None:
@@ -1063,9 +1087,22 @@ def render_clear_shift_section(email, env_option):
                         results.append(clear_person_shift_range(session=session, name=n, date_start=range_start.strftime("%Y-%m-%d"), date_end=range_end.strftime("%Y-%m-%d"), ui_logger=clear_ui_log))
                 clear_ui_log("===== 執行完成 =====")
                 st.session_state.clear_person_result = results
+                _clear_errs = any(r.get("errors") for r in results)
+                log_execution(
+                    function_name="手動清空排班", status="失敗" if _clear_errs else "成功",
+                    date=f"{range_start.strftime('%Y-%m-%d')}~{range_end.strftime('%Y-%m-%d')}",
+                    target="、".join(target_names),
+                    message=f"清到 {sum(len(r.get('cleared_dates', [])) for r in results)} 天資料",
+                )
                 st.rerun()
             except Exception as e:
                 clear_ui_log(f"❌ 執行錯誤：{e}"); st.error(str(e))
+                log_execution(
+                    function_name="手動清空排班", status="失敗",
+                    date=f"{range_start.strftime('%Y-%m-%d')}~{range_end.strftime('%Y-%m-%d')}",
+                    target="、".join(target_names),
+                    message=str(e), traceback_text=traceback.format_exc(),
+                )
 
     else:
         step("3", "設定要掃描並清空的日期區間")
@@ -1104,9 +1141,24 @@ def render_clear_shift_section(email, env_option):
                     else:
                         st.session_state.lemon_clear_results = []
                         clear_ui_log("===== 掃描完成，沒有需要清空的檸檬人 =====")
+                if st.session_state.lemon_clear_results:
+                    _lc_results = st.session_state.lemon_clear_results
+                    _lc_errs = any(r.get("errors") for r in _lc_results)
+                    log_execution(
+                        function_name="自動清除候補檸檬人（未配班清單）",
+                        status="失敗" if _lc_errs else "成功",
+                        date=f"{scan_start.strftime('%Y-%m-%d')}~{scan_end.strftime('%Y-%m-%d')}",
+                        target="、".join(r.get("name", "") for r in _lc_results),
+                        message=f"清空 {len(_lc_results)} 人",
+                    )
                 st.rerun()
             except Exception as e:
                 clear_ui_log(f"❌ 掃描/清空失敗：{e}"); st.error(str(e))
+                log_execution(
+                    function_name="自動清除候補檸檬人（未配班清單）", status="失敗",
+                    date=f"{scan_start.strftime('%Y-%m-%d')}~{scan_end.strftime('%Y-%m-%d')}",
+                    message=str(e), traceback_text=traceback.format_exc(),
+                )
 
         entries = st.session_state.lemon_scan_entries
         if entries is not None:

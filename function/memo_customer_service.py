@@ -26,6 +26,8 @@ from shared.memo_text import (
 )
 from function.ui_common import step
 from function.memo_shared import get_session, DEFAULT_RESULT, normalize_result
+from shared.execution_log_service import log_execution
+import traceback as _memo_traceback
 
 
 # 新成單（地址完全沒有歷史訂單）時，自動帶入的固定提醒文字
@@ -1618,9 +1620,19 @@ def render(backend_email, backend_password, env):
             ui_log("===== 執行完成 =====")
             st.session_state.result = result
             render_result(result)
+            _r = normalize_result(result)
+            log_execution(
+                function_name="客服備註自動回填", status="失敗" if _r["failed"] else "成功",
+                run_type=mode, target=row_spec if mode == "By Google Sheet" else phone_text.strip(),
+                message=f"處理{_r['processed']}筆，成功{_r['success']}筆，失敗{_r['failed']}筆，回寫{_r['updated_orders']}筆",
+            )
         except Exception as e:
             ui_log(f"❌ 執行錯誤：{e}")
             st.session_state.result = {**DEFAULT_RESULT, "failed": 1, "errors": [str(e)]}
             render_result(st.session_state.result)
+            log_execution(
+                function_name="客服備註自動回填", status="失敗", run_type=mode,
+                message=str(e), traceback_text=_memo_traceback.format_exc(),
+            )
         finally:
             st.session_state.is_running = False
