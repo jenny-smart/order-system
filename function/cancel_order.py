@@ -13,6 +13,7 @@ import calendar
 import html
 import json
 import re
+import traceback
 from datetime import date
 
 import requests
@@ -21,6 +22,7 @@ from bs4 import BeautifulSoup
 
 import orders
 from shared.env_config import apply_env
+from shared.execution_log_service import log_execution
 
 
 PURCHASE_FILTER_PARAMS_TEMPLATE = {
@@ -720,9 +722,23 @@ def render_cancel_order(backend_email: str, backend_password: str, env_name: str
                     st.session_state.cancel_order_dialog_open = False
                     st.session_state.cancel_order_results = []
                     st.session_state.cancel_order_pending = []
+                    for item in result:
+                        log_execution(
+                            function_name="取消訂單", status="成功" if item.get("ok") else "失敗",
+                            date=item.get("service_date", ""),
+                            target=item.get("order_no") or item.get("purchase_id", ""),
+                            message=f"處理方式：{status}；{item.get('message', '')}",
+                        )
                     st.rerun()
                 except Exception as exc:
                     st.error(str(exc))
+                    for item in pending:
+                        log_execution(
+                            function_name="取消訂單", status="失敗",
+                            date=item.get("service_date", ""),
+                            target=item.get("order_no") or item.get("purchase_id", ""),
+                            message=str(exc), traceback_text=traceback.format_exc(),
+                        )
 
     if hasattr(st, "dialog"):
         @st.dialog("確定要取消訂單？", width="large")

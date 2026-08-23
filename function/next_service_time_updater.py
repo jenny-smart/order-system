@@ -1,10 +1,13 @@
 # -*- coding: utf-8 -*-
 """更新建議下次服務時間。"""
 
+import traceback
+
 import streamlit as st
 
 import function.next_service_dates as nsd
 from function.ui_common import step, info_panel
+from shared.execution_log_service import log_execution
 
 
 def render(backend_email, backend_password, env):
@@ -46,5 +49,13 @@ def render(backend_email, backend_password, env):
                             _session, _spreadsheet_id, _gid, logger=_nsd_ui_log,
                         )
                 st.success(f"✅ 完成，共更新 {total_updated} 列。")
+                log_execution(
+                    function_name="更新建議下次服務時間", status="成功",
+                    target=nsd_sheet_choice, message=f"更新 {total_updated} 列",
+                )
             except Exception as e:
                 st.error(f"執行失敗：{e}")
+                log_execution(
+                    function_name="更新建議下次服務時間", status="失敗",
+                    target=nsd_sheet_choice, message=str(e), traceback_text=traceback.format_exc(),
+                )

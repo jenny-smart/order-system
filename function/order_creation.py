@@ -6,6 +6,7 @@ function/ui_common.py），因此合併在同一個檔案維護。
 """
 
 import re
+import traceback
 from datetime import date, timedelta
 
 import streamlit as st
@@ -17,6 +18,7 @@ from function.ui_common import (
     NJ_MEMO, h, nonzero_money, payment_invoice_display, booking_route_display,
     person_hour_display, last_summary_card_html,
 )
+from shared.execution_log_service import log_execution
 
 import quick_order as qo
 
@@ -228,6 +230,17 @@ def render_batch(backend_email, backend_password, env):
             except Exception as e:
                 total_fail += len(target_rows)
                 ui_log(f"❌ 批次執行失敗：{e}")
+                log_execution(
+                    function_name="批次建單", status="失敗", area=region,
+                    date=sheet_name.strip(), target=row_label,
+                    message=str(e), traceback_text=traceback.format_exc(),
+                )
+            else:
+                log_execution(
+                    function_name="批次建單", status="失敗" if total_fail else "成功",
+                    area=region, date=sheet_name.strip(), target=row_label,
+                    message=f"處理{total_processed}筆，成功{total_success}筆，失敗{total_fail}筆",
+                )
         ui_log("===== 建單流程執行完成 =====")
         ui_log("===== 全部執行完成 =====")
 
@@ -348,10 +361,25 @@ def render_old_customer(backend_email, backend_password, env):
                         st.session_state.q_order_result = nc_result
                         if nc_result.get("lemon_assignment_ok") is False:
                             st.error(nc_result.get("lemon_assignment_warning") or "訂單已建立，但樸檬人置換失敗，請先處理班表。")
+                            log_execution(
+                                function_name="建立新客訂單", status="失敗",
+                                date=nc_date.strftime("%Y-%m-%d"), target=nc_result.get("order_no", ""),
+                                message=nc_result.get("lemon_assignment_warning") or "樸檬人置換失敗",
+                            )
                         else:
                             st.success(f"✅ 訂單建立成功：{nc_result['order_no']}")
+                            log_execution(
+                                function_name="建立新客訂單", status="成功",
+                                date=nc_date.strftime("%Y-%m-%d"), target=nc_result.get("order_no", ""),
+                                message=f"姓名：{nc_name.strip()}",
+                            )
                     except Exception as e:
                         st.error(f"建單失敗：{e}")
+                        log_execution(
+                            function_name="建立新客訂單", status="失敗",
+                            date=nc_date.strftime("%Y-%m-%d"), target=nc_name.strip(),
+                            message=str(e), traceback_text=traceback.format_exc(),
+                        )
         else:
             member = member_payload.get("member", {})
             addr_list = member_payload.get("member", {}).get("memberAddressList", [])
@@ -546,8 +574,18 @@ def render_old_customer(backend_email, backend_password, env):
                                     except Exception:
                                         result["line_message"] = ""
                                 _multi_results.append({"ok": True, "result": result})
+                                log_execution(
+                                    function_name="建立舊客訂單", status="成功", area=q_region,
+                                    date=entry["date"].strftime("%Y-%m-%d"), target=result.get("order_no", ""),
+                                    message=f"地址：{q_address}",
+                                )
                             except Exception as e:
                                 _multi_results.append({"ok": False, "error": str(e), "date": entry["date"].strftime("%Y-%m-%d"), "period": entry["period"]})
+                                log_execution(
+                                    function_name="建立舊客訂單", status="失敗", area=q_region,
+                                    date=entry["date"].strftime("%Y-%m-%d"), target=q_address,
+                                    message=str(e), traceback_text=traceback.format_exc(),
+                                )
                         st.session_state.old_results_multi = _multi_results
                         if len(_multi_results) == 1 and _multi_results[0]["ok"]:
                             # 只有 1 筆時，沿用原本單筆的詳細結果卡呈現方式
@@ -632,11 +670,24 @@ def render_old_customer(backend_email, backend_password, env):
                         order_result["mail_sent"] = True
                         st.session_state.q_order_result = order_result
                         st.success("✅ 確認信已發送")
+                        log_execution(
+                            function_name="發送確認信", status="成功",
+                            target=order_result.get("order_no", ""), message="舊客建單確認信",
+                        )
                         st.rerun()
                     else:
                         st.error(f"確認信發送失敗：{msg_m}")
+                        log_execution(
+                            function_name="發送確認信", status="失敗",
+                            target=order_result.get("order_no", ""), message=str(msg_m),
+                        )
                 except Exception as e:
                     st.error(f"確認信發送失敗：{e}")
+                    log_execution(
+                        function_name="發送確認信", status="失敗",
+                        target=order_result.get("order_no", ""), message=str(e),
+                        traceback_text=traceback.format_exc(),
+                    )
         else:
             st.success("✅ 確認信已發送")
         line_message = build_line_message(order_result)
@@ -898,8 +949,18 @@ def render_new_customer(backend_email, backend_password, env):
                                     except Exception:
                                         nc_result["line_message"] = ""
                                     _nc_multi_results.append({"ok": True, "result": nc_result})
+                                    log_execution(
+                                        function_name="建立新客訂單", status="成功",
+                                        date=_entry["date"].strftime("%Y-%m-%d"), target=nc_result.get("order_no", ""),
+                                        message=f"姓名：{_nc_name}　地址：{_nc_address}",
+                                    )
                                 except Exception as _e_entry:
                                     _nc_multi_results.append({"ok": False, "error": str(_e_entry), "date": _entry["date"].strftime("%Y-%m-%d"), "period": _entry["period"]})
+                                    log_execution(
+                                        function_name="建立新客訂單", status="失敗",
+                                        date=_entry["date"].strftime("%Y-%m-%d"), target=_nc_name,
+                                        message=str(_e_entry), traceback_text=traceback.format_exc(),
+                                    )
                         st.session_state.nc_results_multi = _nc_multi_results
                         if len(_nc_multi_results) == 1 and _nc_multi_results[0]["ok"]:
                             # 只有 1 筆時，沿用原本單筆的詳細結果卡呈現方式
@@ -907,6 +968,11 @@ def render_new_customer(backend_email, backend_password, env):
                         st.rerun()
                     except Exception as e:
                         st.error(f"建單失敗：{e}")
+                        log_execution(
+                            function_name="建立新客訂單", status="失敗",
+                            date=nc_date.strftime("%Y-%m-%d"), target=_nc_name,
+                            message=str(e), traceback_text=traceback.format_exc(),
+                        )
 
     # v2026.07.07：查到既有會員時，顯示在「建立新客訂單」按鈕下方，
     # 提供一個按鈕直接改用舊客身份、帶著已收集的電話/地址/人時/付款/
@@ -948,9 +1014,19 @@ def render_new_customer(backend_email, backend_password, env):
                         old_result["line_message"] = ""
                 st.session_state.nc_result = old_result
                 st.session_state.nc_pending_old = None
+                log_execution(
+                    function_name="建立舊客訂單", status="成功", area=_region_pending,
+                    date=_nc_pending["date_s"], target=old_result.get("order_no", ""),
+                    message=f"地址：{_nc_pending['address']}",
+                )
                 st.rerun()
             except Exception as e:
                 st.error(f"以舊客身份建單失敗：{e}")
+                log_execution(
+                    function_name="建立舊客訂單", status="失敗",
+                    date=_nc_pending.get("date_s", ""), target=_nc_pending.get("address", ""),
+                    message=str(e), traceback_text=traceback.format_exc(),
+                )
 
     # v2026.07.07：多筆訂單結果顯示（建立筆數 > 1，或有任何一筆失敗時）
     _nc_multi = st.session_state.get("nc_results_multi") or []
@@ -1005,11 +1081,24 @@ def render_new_customer(backend_email, backend_password, env):
                         _r["mail_sent"] = True
                         st.session_state.nc_result = _r
                         st.success("✅ 確認信已發送")
+                        log_execution(
+                            function_name="發送確認信", status="成功",
+                            target=_r.get("order_no", ""), message="新客建單確認信",
+                        )
                         st.rerun()
                     else:
                         st.error(f"確認信發送失敗：{msg_m2}")
+                        log_execution(
+                            function_name="發送確認信", status="失敗",
+                            target=_r.get("order_no", ""), message=str(msg_m2),
+                        )
                 except Exception as e:
                     st.error(f"確認信發送失敗：{e}")
+                    log_execution(
+                        function_name="發送確認信", status="失敗",
+                        target=_r.get("order_no", ""), message=str(e),
+                        traceback_text=traceback.format_exc(),
+                    )
         else:
             st.success("✅ 確認信已發送")
         if _r.get("line_message"):
@@ -1070,9 +1159,19 @@ def render_order_conversion(backend_email, backend_password, env):
                     )
                 st.session_state.conv_stage1 = stage1
                 st.session_state.conv_stage2 = {}
+                log_execution(
+                    function_name="訂單轉換（第一段：改日期換檸檬人）", status="成功",
+                    date=conv_target_date.strftime("%Y-%m-%d"), target=conv_order_no_a.strip(),
+                    message="原訂單A改日期並全部換成檸檬人",
+                )
             except Exception as e:
                 st.session_state.conv_stage1 = {}
                 st.error(f"第一段執行失敗：{e}")
+                log_execution(
+                    function_name="訂單轉換（第一段：改日期換檸檬人）", status="失敗",
+                    date=conv_target_date.strftime("%Y-%m-%d"), target=conv_order_no_a.strip(),
+                    message=str(e), traceback_text=traceback.format_exc(),
+                )
 
     conv_stage1 = st.session_state.get("conv_stage1")
     if conv_stage1:
@@ -1150,9 +1249,20 @@ def render_order_conversion(backend_email, backend_password, env):
                 with st.spinner("第二段執行中：建折價券 → 建新訂單 → 標記已付款 → 標註發票…"):
                     stage2 = convert_order_stage2_create_new_orders(conv_stage1, new_orders_input)
                 st.session_state.conv_stage2 = stage2
+                _conv_ok_nos = [r.get("order_no", "") for r in stage2.get("new_order_results", []) if r.get("order_no")]
+                log_execution(
+                    function_name="訂單轉換（第二段：建新訂單折抵）", status="成功",
+                    target=conv_order_no_a.strip(),
+                    message=f"新訂單：{'、'.join(_conv_ok_nos) or '（無）'}",
+                )
             except Exception as e:
                 st.session_state.conv_stage2 = {}
                 st.error(f"第二段執行失敗：{e}")
+                log_execution(
+                    function_name="訂單轉換（第二段：建新訂單折抵）", status="失敗",
+                    target=conv_order_no_a.strip(),
+                    message=str(e), traceback_text=traceback.format_exc(),
+                )
 
     conv_stage2 = st.session_state.get("conv_stage2")
     if conv_stage2:
@@ -1307,8 +1417,19 @@ def render_topup_diff(backend_email, backend_password, env):
                     )
                 st.session_state.sv_stored_stage = stored_stage
                 st.session_state.sv_paid_stage = {}
+                log_execution(
+                    function_name="儲值金補價差（第一段：建儲值金清零單）", status="成功",
+                    date=sv_svc_date.strftime("%Y-%m-%d"),
+                    target=stored_stage.get("stored_order", {}).get("order_no", ""),
+                    message=f"手機：{sv_phone.strip()}",
+                )
             except Exception as e:
                 st.error(f"第一段建立失敗：{e}")
+                log_execution(
+                    function_name="儲值金補價差（第一段：建儲值金清零單）", status="失敗",
+                    date=sv_svc_date.strftime("%Y-%m-%d"), target=sv_phone.strip(),
+                    message=str(e), traceback_text=traceback.format_exc(),
+                )
     stored_stage = st.session_state.get("sv_stored_stage")
     if stored_stage:
         plan = stored_stage["plan"]
@@ -1358,8 +1479,18 @@ def render_topup_diff(backend_email, backend_password, env):
                         allow_auto_lemon_shift=sv_allow_auto_lemon,
                     )
                 st.session_state.sv_paid_stage = paid_stage
+                log_execution(
+                    function_name="儲值金補價差（第二段：建客付補價差單）", status="成功",
+                    target=paid_stage.get("paid_order", {}).get("order_no", ""),
+                    message=f"手機：{sv_phone.strip()}",
+                )
             except Exception as e:
                 st.error(f"第二段建立失敗：{e}")
+                log_execution(
+                    function_name="儲值金補價差（第二段：建客付補價差單）", status="失敗",
+                    target=sv_phone.strip(),
+                    message=str(e), traceback_text=traceback.format_exc(),
+                )
     paid_stage = st.session_state.get("sv_paid_stage")
     if paid_stage:
         po = paid_stage["paid_order"]
@@ -1441,8 +1572,18 @@ def render_stored_value_order(backend_email, backend_password, env):
                         notice=sv2_notice.strip(),
                     )
                 st.session_state.sv2_result = sv2_result
+                log_execution(
+                    function_name="建立儲值金購買訂單",
+                    status="失敗" if sv2_result.get("need_manual_confirm") or sv2_result.get("success") is False else "成功",
+                    area=sv2_region, target=sv2_result.get("order_no", sv2_phone.strip()),
+                    message=sv2_result.get("message", f"金額：{sv2_amount}"),
+                )
             except Exception as e:
                 st.error(f"建立失敗：{e}")
+                log_execution(
+                    function_name="建立儲值金購買訂單", status="失敗", area=sv2_region,
+                    target=sv2_phone.strip(), message=str(e), traceback_text=traceback.format_exc(),
+                )
 
     sv2_result = st.session_state.get("sv2_result") or {}
     if sv2_result:
@@ -1500,11 +1641,24 @@ def render_stored_value_order(backend_email, backend_password, env):
                                 sv2_result["mail_sent"] = True
                                 st.session_state.sv2_result = sv2_result
                                 st.success("✅ 確認信已發送")
+                                log_execution(
+                                    function_name="發送確認信", status="成功",
+                                    target=sv2_result.get("order_no", ""), message="儲值金購買確認信",
+                                )
                                 st.rerun()
                             else:
                                 st.error(f"確認信發送失敗：{msg_m}")
+                                log_execution(
+                                    function_name="發送確認信", status="失敗",
+                                    target=sv2_result.get("order_no", ""), message=str(msg_m),
+                                )
                         except Exception as e:
                             st.error(f"確認信發送失敗：{e}")
+                            log_execution(
+                                function_name="發送確認信", status="失敗",
+                                target=sv2_result.get("order_no", ""), message=str(e),
+                                traceback_text=traceback.format_exc(),
+                            )
                 else:
                     st.success("✅ 確認信已發送")
             else:

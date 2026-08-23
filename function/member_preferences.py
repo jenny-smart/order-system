@@ -1,11 +1,14 @@
 # -*- coding: utf-8 -*-
 """會員喜好設定。"""
 
+import traceback
+
 import streamlit as st
 
 import quick_order as qo
 from orders import fetch_member_edit_page, submit_member_preferences, fetch_recent_service_records
 from function.ui_common import step, info_panel
+from shared.execution_log_service import log_execution
 
 
 def render(backend_email, backend_password, env):
@@ -122,6 +125,16 @@ def render(backend_email, backend_password, env):
                             liked_ids=liked_ids, disliked_ids=disliked_ids,
                         )
                     st.success("✅ 已更新會員喜好設定。")
+                    log_execution(
+                        function_name="更新會員喜好設定", status="成功",
+                        target=mp_data["member_name"],
+                        message=f"手機：{mp_phone.strip()}；性別偏好：{mp_gender_choice}",
+                    )
                     st.session_state.mp_data = None
                 except Exception as e:
                     st.error(f"更新失敗：{e}")
+                    log_execution(
+                        function_name="更新會員喜好設定", status="失敗",
+                        target=mp_data["member_name"],
+                        message=str(e), traceback_text=traceback.format_exc(),
+                    )
