@@ -8,6 +8,7 @@ memo_system/change_order.py 已刪除。清潔異動模組：車馬費 / 異動�
 purchase/edit，更新 Sheet 狀態。
 """
 
+import json
 import re
 import math
 import os
@@ -1057,6 +1058,21 @@ def _control_context(el) -> str:
     return " ".join(dict.fromkeys(parts))
 
 
+def _extract_purchase_state(soup: BeautifulSoup) -> dict:
+    """從 Vue data() 的 purchase JSON 讀取後台真實值。"""
+    html = str(soup)
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\bpurchase\s*:\s*", html):
+        start = match.end()
+        try:
+            value, _ = decoder.raw_decode(html[start:])
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
 def _read_form_state(soup: BeautifulSoup) -> tuple[dict, dict]:
     """
     讀取後台表單現值。checkbox/radio 只有原本 checked 的才放入 form_data，
@@ -1099,6 +1115,25 @@ def _read_form_state(soup: BeautifulSoup) -> tuple[dict, dict]:
             if control["checked"]:
                 form_data[name] = value or "1"
         else:
+            form_data[name] = value
+
+    # radio 與 Vue 綁定欄位的真值不一定反映在靜態 HTML；用 purchase JSON 覆蓋。
+    purchase_state = _extract_purchase_state(soup)
+    if not purchase_state:
+        raise RuntimeError("無法讀取後台 purchase 真實資料，為避免覆蓋加收／退款另一側，停止回填")
+    json_backed_fields = {
+        "isCharge", "chargeDate", "chargePayment", "chargeInvoiceDate",
+        "chargeAmount", "chargeInvoice", "chargeNote",
+        "isRefund", "refundDate", "refundPayment", "refundPayway",
+        "refundAmount", "refundNumber", "refundInvoiceDate",
+        "refundInvoiceAmount", "refundInvoice", "refundNote", "progress",
+    }
+    for name in json_backed_fields:
+        if name in purchase_state:
+            value = purchase_state.get(name)
+            value = "" if value is None else str(value)
+            if re.fullmatch(r"\s*\{\{\s*[^{}]+\s*\}\}\s*", value):
+                value = ""
             form_data[name] = value
 
     return form_data, controls
@@ -1356,7 +1391,6 @@ def apply_sheet_row_to_form(form_data: dict, controls: dict, item: dict,
 
     if status in STATUS_PENDING_CHARGE_ALIASES:
         _set_radio_value(form_data, controls, "isCharge", "1", ui_logger=ui_logger)
-        _set_radio_value(form_data, controls, "isRefund", "0", ui_logger=ui_logger)
         _set_progress_done(form_data, controls, ui_logger=ui_logger)
         _set_field(form_data, controls, FIELD_CHARGE_DATE, charge_date,
                    keywords=["加收日期", "收款日期", "收款時間"], fallback_name="chargeDate", ui_logger=ui_logger)
@@ -1378,7 +1412,6 @@ def apply_sheet_row_to_form(form_data: dict, controls: dict, item: dict,
         return
 
     if status in STATUS_PENDING_REFUND_ALIASES:
-        _set_radio_value(form_data, controls, "isCharge", "0", ui_logger=ui_logger)
         _set_radio_value(form_data, controls, "isRefund", "1", ui_logger=ui_logger)
         _set_progress_done(form_data, controls, ui_logger=ui_logger)
         _set_field(form_data, controls, FIELD_REFUND_DATE, refund_date,
@@ -1400,7 +1433,6 @@ def apply_sheet_row_to_form(form_data: dict, controls: dict, item: dict,
 
     if status in STATUS_DONE_CHARGE_ALIASES:
         _set_radio_value(form_data, controls, "isCharge", "2", ui_logger=ui_logger)
-        _set_radio_value(form_data, controls, "isRefund", "0", ui_logger=ui_logger)
         _set_progress_done(form_data, controls, ui_logger=ui_logger)
         _set_field(form_data, controls, FIELD_CHARGE_DATE, charge_date,
                    keywords=["加收日期", "收款日期", "收款時間"], fallback_name="chargeDate", ui_logger=ui_logger)
@@ -1422,7 +1454,6 @@ def apply_sheet_row_to_form(form_data: dict, controls: dict, item: dict,
         return
 
     if status in STATUS_DONE_REFUND_ALIASES:
-        _set_radio_value(form_data, controls, "isCharge", "0", ui_logger=ui_logger)
         _set_progress_done(form_data, controls, ui_logger=ui_logger)
 
         refund_amount = _parse_money_value(_sheet_cell(raw, "S"))
