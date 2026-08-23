@@ -1,2 +1,5 @@
 __pycache__/
 *.pyc
+.streamlit/secrets.toml
+google_service_account.json
+.env
