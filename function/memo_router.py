@@ -10,7 +10,7 @@ import streamlit as st
 from shared import memo_backend as memo
 from function import memo_customer_service
 from function import shift_management
-from function import atm_reconciliation
+from function import atm_reconciliation_synced as atm_reconciliation
 from function import payment_match_page
 from function import change_order_page
 from function import assessment_tool
