@@ -1,0 +1,31 @@
+name: Temp sync ATM unpaid logic
+on:
+  push:
+    branches: [sync/atm-unpaid-dedupe-status]
+    paths: [".github/workflows/_temp_sync_atm_unpaid.yml"]
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: sync/atm-unpaid-dedupe-status
+      - name: Sync logic
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('function/atm_reconciliation.py'); s=p.read_text(); a=s.index('def paste_atm_unpaid_list('); b=s.index('\n\nfrom function.ui_common import step',a)
+          new='''def paste_atm_unpaid_list(region: str, rows: List[Dict], ui_logger=None) -> Dict:\n    \"\"\"新增未出現的待付款訂單；J 欄去重範圍為 A 欄最後資料列以下，並回填 P/T。\"\"\"\n    log = make_logger(ui_logger)\n    result = {\"pasted\": 0, \"skipped_duplicates\": 0, \"start_row\": None, \"errors\": []}\n    if not rows:\n        log(\"沒有資料可以貼\"); return result\n    ws = get_atm_worksheet(region); all_values = memo.with_retry(ws.get_all_values)\n    last_a_row = max((idx for idx,row in enumerate(all_values,start=1) if row and str(row[0]).strip()), default=0)\n    existing_order_nos=set(); last_unpaid_row=0\n    for idx,row in enumerate(all_values,start=1):\n        if idx <= last_a_row: continue\n        if any(str(v).strip() for v in (row[8:12] if len(row)>8 else [])): last_unpaid_row=idx\n        order_no=row[9] if len(row)>9 else \"\"\n        if str(order_no).strip(): existing_order_nos.add(str(order_no).strip())\n    pending_rows=[]; seen_order_nos=set(existing_order_nos)\n    for row in rows:\n        order_no=str(row.get(\"order_no\") or \"\").strip()\n        if not order_no: log(\"⚠️ 略過一筆沒有訂單編號的資料\"); continue\n        if order_no in seen_order_nos: result[\"skipped_duplicates\"] += 1; continue\n        seen_order_nos.add(order_no); pending_rows.append(row)\n    if not pending_rows:\n        log(f\"沒有新訂單可新增；已略過 {result['skipped_duplicates']} 筆重複訂單\"); return result\n    start_row=max(last_a_row+5,last_unpaid_row+1); end_row=start_row+len(pending_rows)-1\n    current_row_count=int(getattr(ws,\"row_count\",0) or len(all_values))\n    if end_row>current_row_count: memo.with_retry(ws.add_rows,end_row-current_row_count)\n    updates=[]; pasted_at=_now_text()\n    for offset,row in enumerate(pending_rows):\n        row_num=start_row+offset\n        updates.append({\"range\":f\"I{row_num}:L{row_num}\",\"values\":[[row[\"year_month\"],row[\"order_no\"],row[\"name\"],row[\"net_amount\"]]]})\n        updates.append({\"range\":f\"P{row_num}\",\"values\":[[pasted_at]]}); updates.append({\"range\":f\"T{row_num}\",\"values\":[[\"待對帳\"]]})\n        existing_h=\"\"\n        if row_num<=len(all_values) and len(all_values[row_num-1])>=8: existing_h=str(all_values[row_num-1][7]).strip()\n        if row.get(\"line_url\") and not existing_h: updates.append({\"range\":f\"H{row_num}\",\"values\":[[row[\"line_url\"]]]})\n    memo.with_retry(ws.batch_update,updates,value_input_option=\"RAW\")\n    result[\"pasted\"]=len(pending_rows); result[\"start_row\"]=start_row\n    log(f\"✅ 已新增 {len(pending_rows)} 筆至 I{start_row}:L{end_row}；略過 {result['skipped_duplicates']} 筆重複訂單\")\n    return result\n'''
+          p.write_text(s[:a]+new+s[b:])
+          PY
+          python -m py_compile function/atm_reconciliation.py
+      - name: Commit and cleanup
+        run: |
+          rm .github/workflows/_temp_sync_atm_unpaid.yml
+          git config user.name chatgpt-bot
+          git config user.email actions@users.noreply.github.com
+          git add function/atm_reconciliation.py .github/workflows/_temp_sync_atm_unpaid.yml
+          git commit -m "fix: sync ATM unpaid dedupe and status"
+          git push origin HEAD:sync/atm-unpaid-dedupe-status
