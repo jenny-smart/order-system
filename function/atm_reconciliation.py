@@ -1048,68 +1048,41 @@ def search_atm_unpaid_orders(session, date_until: Optional[str] = None, ui_logge
 
 
 def paste_atm_unpaid_list(region: str, rows: List[Dict], ui_logger=None) -> Dict:
+    """新增未出現的待付款訂單；J 欄去重範圍為 A 欄最後資料列以下，並回填 P/T。"""
     log = make_logger(ui_logger)
-    result = {"pasted": 0, "start_row": None, "errors": []}
-
+    result = {"pasted": 0, "skipped_duplicates": 0, "start_row": None, "errors": []}
     if not rows:
-        log("沒有資料可以貼")
-        return result
-
-    ws = get_atm_worksheet(region)
-    all_values = memo.with_retry(ws.get_all_values)
-
-    last_a_row = 0
-    for idx, row in enumerate(all_values, start=1):
-        a_val = row[0] if row else ""
-        if str(a_val).strip():
-            last_a_row = idx
-
-    start_row = last_a_row + 5
-    insert_count = len(rows)
-
-    # 若定位列超過目前工作表範圍，先補足空白列，再插入本次需要的完整列數。
-    # insertDimension 會把既有整列往下移，因此人工填入的 I:M 或其他欄位都不會被覆蓋。
-    current_row_count = int(getattr(ws, "row_count", 0) or len(all_values))
-    if start_row > current_row_count + 1:
-        memo.with_retry(ws.add_rows, start_row - current_row_count - 1)
-
-    insert_request = {
-        "requests": [{
-            "insertDimension": {
-                "range": {
-                    "sheetId": ws.id,
-                    "dimension": "ROWS",
-                    "startIndex": start_row - 1,
-                    "endIndex": start_row - 1 + insert_count,
-                },
-                "inheritFromBefore": True,
-            }
-        }]
-    }
-    memo.with_retry(ws.spreadsheet.batch_update, insert_request)
-    log(f"已於第 {start_row}:{start_row + insert_count - 1} 列插入 {insert_count} 列")
-
-    updates = []
-    for i, r in enumerate(rows):
-        row_num = start_row + i
-        updates.append({
-            "range": f"I{row_num}:M{row_num}",
-            "values": [[r["year_month"], r["order_no"], r["name"], r["net_amount"], ""]],
-        })
-        # v2026-07-07：LINE 聊天連結網址另外寫進 H 欄（純網址，Google Sheets
-        # 貼上/寫入後會自動變成可點擊連結；不能跟姓名塞在同一格）。
-        if r.get("line_url"):
-            updates.append({
-                "range": f"H{row_num}",
-                "values": [[r["line_url"]]],
-            })
-
-    memo.with_retry(ws.batch_update, updates, value_input_option="RAW")
-
-    result["pasted"] = len(rows)
-    result["start_row"] = start_row
-    log(f"✅ 已從第 {start_row} 列開始，貼上 {len(rows)} 筆資料到 I~M 欄")
-
+        log("沒有資料可以貼"); return result
+    ws = get_atm_worksheet(region); all_values = memo.with_retry(ws.get_all_values)
+    last_a_row = max((idx for idx,row in enumerate(all_values,start=1) if row and str(row[0]).strip()), default=0)
+    existing_order_nos=set(); last_unpaid_row=0
+    for idx,row in enumerate(all_values,start=1):
+        if idx <= last_a_row: continue
+        if any(str(v).strip() for v in (row[8:12] if len(row)>8 else [])): last_unpaid_row=idx
+        order_no=row[9] if len(row)>9 else ""
+        if str(order_no).strip(): existing_order_nos.add(str(order_no).strip())
+    pending_rows=[]; seen_order_nos=set(existing_order_nos)
+    for row in rows:
+        order_no=str(row.get("order_no") or "").strip()
+        if not order_no: log("⚠️ 略過一筆沒有訂單編號的資料"); continue
+        if order_no in seen_order_nos: result["skipped_duplicates"] += 1; continue
+        seen_order_nos.add(order_no); pending_rows.append(row)
+    if not pending_rows:
+        log(f"沒有新訂單可新增；已略過 {result['skipped_duplicates']} 筆重複訂單"); return result
+    start_row=max(last_a_row+5,last_unpaid_row+1); end_row=start_row+len(pending_rows)-1
+    current_row_count=int(getattr(ws,"row_count",0) or len(all_values))
+    if end_row>current_row_count: memo.with_retry(ws.add_rows,end_row-current_row_count)
+    updates=[]; pasted_at=_now_text()
+    for offset,row in enumerate(pending_rows):
+        row_num=start_row+offset
+        updates.append({"range":f"I{row_num}:L{row_num}","values":[[row["year_month"],row["order_no"],row["name"],row["net_amount"]]]})
+        updates.append({"range":f"P{row_num}","values":[[pasted_at]]}); updates.append({"range":f"T{row_num}","values":[["待對帳"]]})
+        existing_h=""
+        if row_num<=len(all_values) and len(all_values[row_num-1])>=8: existing_h=str(all_values[row_num-1][7]).strip()
+        if row.get("line_url") and not existing_h: updates.append({"range":f"H{row_num}","values":[[row["line_url"]]]})
+    memo.with_retry(ws.batch_update,updates,value_input_option="RAW")
+    result["pasted"]=len(pending_rows); result["start_row"]=start_row
+    log(f"✅ 已新增 {len(pending_rows)} 筆至 I{start_row}:L{end_row}；略過 {result['skipped_duplicates']} 筆重複訂單")
     return result
 
 
