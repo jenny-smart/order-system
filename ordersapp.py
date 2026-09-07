@@ -159,7 +159,7 @@ _MEMO_SECTION_MAP = {
 
 _CATEGORY_HEADERS_BY_INDEX = {
     0: "A. 建單／成單流程",
-    8: "B. 訂單附屬功能",
+    9: "B. 訂單附屬功能",
     16: "C. 稽核比對工具",
     19: "D. LINE 通知／提醒",
     22: "E. 會員／客戶管理",
