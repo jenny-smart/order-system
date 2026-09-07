@@ -179,7 +179,7 @@ def _soft_score(ctx: AssignmentContext, staff: Sequence[StaffCandidate]) -> Tupl
         if common:
             score -= 12
             reasons.append("夥伴性質較相近")
-        else:
+        elif any(s.similarity_tags for s in staff):
             score += 10
             reasons.append("夥伴組合較互補")
 
