@@ -536,7 +536,7 @@ def get_all_sections_raw(session, order_data, token):
     data["date_s"] = ""
     data.pop("date_list[]", None)
     resp = session.post(GET_SECTION_URL, data=data, headers=HEADERS, allow_redirects=True)
-    return resp.text if resp.status_code == 200 else ""
+    return _checked_booking_sections_response(resp, data)
 
 
 def get_member(session, phone, token, clean_type_id):
@@ -760,7 +760,7 @@ def pick_best_address_info(member_payload, target_address):
                 "address": item_addr,
                 "lat": item.get("lat", ""),
                 "lng": item.get("lng", ""),
-                "company_id": item.get("companyId", 1),
+                "company_id": item.get("companyId", ""),
                 "purchase": item.get("purchase", {}) if isinstance(item.get("purchase"), dict) else {},
             }
 
@@ -812,27 +812,18 @@ def check_contain(session, member_id, address, lat, lng, token, clean_type_id):
         headers=HEADERS,
         allow_redirects=True,
     )
-    if resp.status_code != 200:
-        return None
-
-    try:
-        return resp.json()
-    except Exception:
-        return None
+    return _booking_backend_response(resp, "地址查詢")
 
 
 def calculate_hour(session, order_data, token):
     data = order_data.copy()
+    # 原生按鈕只取消 hour 選取，其餘欄位照表單傳送。
+    # 使用副本，讓後續查班表仍保留使用者選定的人時。
+    data["hour"] = ""
     data["_token"] = token
 
     resp = session.post(CALCULATE_HOUR_URL, data=data, headers=HEADERS, allow_redirects=True)
-    if resp.status_code != 200:
-        return None
-
-    try:
-        return resp.json()
-    except Exception:
-        return None
+    return _booking_backend_response(resp, "計算時數")
 
 
 def extract_calc_fields(calc_result, fallback_hours="", fallback_fare="0"):
@@ -3376,3 +3367,37 @@ def run_backend_calendar_consistency_check(env_name, backend_email, backend_pass
             })
 
     return result
+
+
+def _booking_backend_response(resp, action):
+    """保留後台拒絕原因，避免將 HTTP／登入錯誤誤報成地址不完整。"""
+    try:
+        result = resp.json()
+    except Exception:
+        result = None
+    message = ""
+    if isinstance(result, dict):
+        message = str(result.get("description") or result.get("message") or result.get("errors") or "")
+    if resp.status_code != 200 or "login" in str(resp.url).lower():
+        raise Exception(f"後台{action}失敗（HTTP {resp.status_code}）：{message or '請確認後台登入狀態或服務狀態'}")
+    if isinstance(result, dict) and result.get("return_code") not in (None, "", "0000"):
+        raise Exception(f"後台{action}回覆：{message or result['return_code']}")
+    if result is None:
+        raise Exception(f"後台{action}回覆格式異常，未取得 JSON 結果")
+    return result
+
+
+def _checked_booking_sections_response(resp, order_data):
+    """缺少服務區域時的空回應不能用來判定人力不足。"""
+    result = _booking_backend_response(resp, "查詢班表")
+    if result == []:
+        missing = [key for key in ("area_id", "company_id")
+                   if str(order_data.get(key) or "").strip() in ("", "0")]
+        if missing:
+            raise Exception(
+                "後台班表回覆 []；本次查詢未帶入服務區域欄位："
+                + "、".join(missing)
+                + "。無法據此判定人數不足，未執行補檸檬人。"
+                + "請先完成後台查詢地區，取得其回傳值後再查班表。"
+            )
+    return resp.text
