@@ -9,3 +9,4 @@ google-api-python-client
 xlrd>=2.0.1
 openpyxl>=3.1.5
 opencv-python-headless>=4.10.0
+playwright>=1.48,<2

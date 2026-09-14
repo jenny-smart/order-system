@@ -21,7 +21,7 @@ def get_section_raw(session, order_data, token, date_slot):
     data["date_list[]"] = date_slot
 
     resp = session.post(orders.GET_SECTION_URL, data=data, headers=orders.HEADERS, allow_redirects=True)
-    return resp.text if resp.status_code == 200 else ""
+    return orders._checked_booking_sections_response(resp, order_data)
 
 
 def extract_cleaners_from_section_response(raw_text, date_slot):

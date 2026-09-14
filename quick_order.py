@@ -693,41 +693,11 @@ def quick_check_available_slots(env_name, payway, lookup_result, address, clean_
     if not member_payload:
         raise Exception("此電話查無會員資料，請先查詢會員")
     member = member_payload.get("member", {})
-    best_addr = pick_best_address_info(member_payload, address)
-    if not best_addr:
-        # v2026.07.06 修正：查可預約時段時，舊客地址不在既有清單裡不再直接擋掉，
-        # 當作新地址處理（跟 quick_create_order 的新地址邏輯一致）。
-        best_addr = {}
-    selected_address = str(best_addr.get("address") or address).strip()
-    address_parts = _split_booking_address(selected_address)
-    _assert_address_region_resolved(address_parts, selected_address, context="查詢可預約地址")
-    selected_address_for_lookup = address_parts["full"]
-    selected_address_for_submit = address_parts["detail"]
-    geo_lat, geo_lng = geocode_address(selected_address_for_lookup)
-    if geo_lat and geo_lng:
-        best_addr["lat"] = geo_lat
-        best_addr["lng"] = geo_lng
-    addr_check = check_contain(session, member.get("member_id", ""), selected_address_for_lookup, best_addr.get("lat", ""), best_addr.get("lng", ""), token, clean_type_id)
-    if not addr_check and lookup_result.get("token") and lookup_result.get("token") != token:
-        addr_check = check_contain(session, member.get("member_id", ""), selected_address_for_lookup, best_addr.get("lat", ""), best_addr.get("lng", ""), lookup_result["token"], clean_type_id)
-    if not addr_check and payway == "儲值金":
-        # v8.5：stored_value_routine 頁面的 token 有時無法用於 check_contain，
-        # 改向 /booking/single 借一個可靠的 token 重試
-        _fallback_token = _fetch_csrf_from_url(session, f"{base_url}/booking/single")
-        if _fallback_token and _fallback_token != token and _fallback_token != lookup_result.get("token"):
-            addr_check = check_contain(session, member.get("member_id", ""), selected_address_for_lookup, best_addr.get("lat", ""), best_addr.get("lng", ""), _fallback_token, clean_type_id)
-            if addr_check:
-                token = _fallback_token
-    if not addr_check:
-        raise Exception(f"查詢地址/地區失敗：{selected_address_for_lookup}")
-    area_info = addr_check.get("area") if isinstance(addr_check.get("area"), dict) else {}
-    if area_info:
-        address_parts = _complete_missing_district(address_parts, area_info, selected_address_for_lookup, context="查詢可預約地址")
-        selected_address_for_lookup = address_parts["full"]
-        selected_address_for_submit = address_parts["detail"]
-        best_addr["area_id"] = area_info.get("area_id", best_addr.get("area_id"))
-        best_addr["company_id"] = area_info.get("company_id", best_addr.get("company_id"))
-        best_addr["country_id"] = address_parts.get("country_id") or area_info.get("country_id", best_addr.get("country_id"))
+    best_addr, address_parts, addr_check = resolve_backend_booking_address(
+        session, member_payload, address, token, clean_type_id,
+    )
+    selected_address_for_lookup = str(address).strip()
+    selected_address_for_submit = str(best_addr.get("address") or address).strip()
     old_purchase = best_addr.get("purchase", {}) if isinstance(best_addr.get("purchase"), dict) else {}
 
     def pick(key, default=""):
@@ -767,8 +737,6 @@ def quick_check_available_slots(env_name, payway, lookup_result, address, clean_
         "lng": str(best_addr.get("lng") or pick("lng", "")),
     }
     rows = []
-    if not str(base_data.get("country_id") or "").strip():
-        raise Exception(f"地址「{selected_address_for_lookup}」無法判斷縣市/區域下拉選單，已停止查詢，不會自動改成大安區。")
     for period in periods or []:
         slot = f"{date_s}_{period}"
         data = base_data.copy()
@@ -806,61 +774,12 @@ def quick_create_order(
     if not member_payload:
         raise Exception("此電話查無會員資料，請先走新客人資訊收集流程建立會員後再建單")
     member = member_payload.get("member", {})
-    best_addr = pick_best_address_info(member_payload, address)
-    is_new_address = not bool(best_addr)
-    if not best_addr:
-        # v2026.07.06 修正：舊客地址不在既有清單裡不再直接擋掉查詢，
-        # 當作新地址處理（跟 quick_create_order 的新地址邏輯一致）。
-        best_addr = {}
-    selected_address = str(best_addr.get("address") or address).strip()
-    address_parts = _split_booking_address(selected_address)
-    _assert_address_region_resolved(address_parts, selected_address, context="舊客地址")
-    address_for_lookup = address_parts["full"]
-    address_for_submit = address_parts["detail"]
-    geo_lat, geo_lng = geocode_address(address_for_lookup)
-    if is_new_address and (not geo_lat or not geo_lng):
-        raise Exception(
-            f"新地址「{address_for_lookup}」無法取得經緯度，已停止成單，"
-            "避免後台用空座標誤判成大安區。請確認地址是否完整到路段/門牌，或改用後台手動建單。"
-        )
-    if geo_lat and geo_lng:
-        best_addr["lat"] = geo_lat
-        best_addr["lng"] = geo_lng
-    # 2026-07-08：避免新單成單時被 check_contain 誤判成大安區。
-    # 若會員既有地址已經有 area_id/company_id，就直接用既有資料，不再重新查詢區域覆蓋。
-    # 只有在既有地址完全沒有 area_id 時，才呼叫後台 check_contain；查不到就擋下，不套預設大安區。
-    addr_check = {}
-    if not str(best_addr.get("area_id") or best_addr.get("areaId") or "").strip():
-        addr_check = check_contain(session, member.get("member_id", ""), address_for_lookup, best_addr.get("lat", ""), best_addr.get("lng", ""), token, clean_type_id)
-        if not addr_check and lookup_result.get("token") and lookup_result.get("token") != token:
-            addr_check = check_contain(session, member.get("member_id", ""), address_for_lookup, best_addr.get("lat", ""), best_addr.get("lng", ""), lookup_result["token"], clean_type_id)
-        if not addr_check and payway == "儲值金":
-            _fallback_token = _fetch_csrf_from_url(session, f"{base_url}/booking/single")
-            if _fallback_token and _fallback_token != token and _fallback_token != lookup_result.get("token"):
-                addr_check = check_contain(session, member.get("member_id", ""), address_for_lookup, best_addr.get("lat", ""), best_addr.get("lng", ""), _fallback_token, clean_type_id)
-                if addr_check:
-                    token = _fallback_token
-        area_info = addr_check.get("area") if isinstance(addr_check.get("area"), dict) else {}
-        if not area_info.get("area_id"):
-            route = BOOKING_ENDPOINT_MAP.get(payway, "/booking/single")
-            raise Exception(f"地址缺少已存區域，且查詢地址/地區失敗（{payway}：{route}）：{address_for_lookup}，請先到會員地址或後台手動確認區域")
-        address_parts = _complete_missing_district(address_parts, area_info, address_for_lookup, context="舊客新地址")
-        address_for_lookup = address_parts["full"]
-        address_for_submit = address_parts["detail"]
-        _validate_area_not_known_bad(address_for_lookup, area_info, context="舊客新地址")
-        best_addr["area_id"] = area_info.get("area_id")
-        best_addr["company_id"] = area_info.get("company_id", best_addr.get("company_id"))
-        best_addr["country_id"] = address_parts.get("country_id") or area_info.get("country_id", best_addr.get("country_id"))
-        if not str(best_addr.get("country_id") or "").strip():
-            raise Exception(f"地址「{address_for_lookup}」無法判斷縣市/區域下拉選單，已停止成單，不會自動改成大安區。")
-    else:
-        if best_addr.get("areaId") and not best_addr.get("area_id"):
-            best_addr["area_id"] = best_addr.get("areaId")
-        if best_addr.get("companyId") and not best_addr.get("company_id"):
-            best_addr["company_id"] = best_addr.get("companyId")
-        if best_addr.get("countryId") and not best_addr.get("country_id"):
-            best_addr["country_id"] = best_addr.get("countryId")
-
+    best_addr, address_parts, addr_check = resolve_backend_booking_address(
+        session, member_payload, address, token, clean_type_id,
+    )
+    address_for_lookup = str(best_addr.get("address") or address).strip()
+    address_for_submit = address_for_lookup
+    selected_address = address_for_lookup
     area_info = addr_check.get("area") if isinstance(addr_check.get("area"), dict) else {}
     purchase_info = addr_check.get("purchase") if isinstance(addr_check.get("purchase"), dict) else {}
     fare_from_check = first_nonzero(
@@ -923,74 +842,20 @@ def quick_create_order(
     if extra_fields:
         base_data.update(extra_fields)
 
-    # 不再用 area_id=25/company_id=1 當預設值；缺少區域就擋下，避免誤成大安區。
-    if not str(base_data.get("country_id") or "").strip():
-        raise Exception(
-            f"地址「{address_for_lookup}」缺少明確縣市/區域下拉選單，已停止成單，"
-            "不會自動改成大安區。"
-        )
-    if not str(base_data.get("area_id") or "").strip() or not str(base_data.get("company_id") or "").strip():
-        raise Exception(
-            f"地址「{address_for_lookup}」缺少明確 area_id/company_id，已停止成單，"
-            "請先在會員地址或後台手動確認區域，避免系統誤判成大安區。"
-        )
-    _validate_address_before_submit(address_for_lookup, base_data.get("area_id"), context="舊客建單")
-
     calc_result = calculate_hour(session, base_data, token)
     if not calc_result:
         raise Exception("計算時數失敗")
     calc_fields = extract_calc_fields(calc_result, fallback_hours=base_data["hour"], fallback_fare=best_addr.get("fare", "0"))
-    day_type = _day_type_from_date(date_s)
-    unit_price = 700 if day_type == "週末" else 600
-    person_hours = int(person) * int(float(hour))
-    formula_price_with_tax = unit_price * person_hours
-    formula_price_no_tax = int(round(formula_price_with_tax / TAX_RATE))
-    base_data["price"] = str(formula_price_no_tax)
+    base_data["price"] = str(calc_fields.get("price") or "0")
     base_data["price_vvip"] = str(calc_fields.get("price_vvip") or "0")
     base_data["fare"] = first_nonzero(calc_fields.get("fare"), best_addr.get("fare"), default="0")
     if base_data["price"] in ("", "0", "0.0") and payway != "儲值金":
         raise Exception("計算時數後金額為 0，請確認坪數/時數設定是否正確")
     slot = f"{date_s}_{period_s}"
-    raw_section = get_section_raw(session, base_data, token, slot)
-    _slot_found = slot_exists_in_section_response(raw_section, slot)
-    _auto_shift_ok = False
-    if (not _slot_found or not extract_cleaners_from_section_response(raw_section, slot)) and allow_auto_lemon_shift:
-        # v8.13：該時段查無班表 → 去勾檸檬人班表，再重查。
-        # 只有在客服明確勾選「查無班表時自動補檸檬人」時才會執行，
-        # 預設不自動執行，避免查不到班表就自動幫忙勾人。
-        _pre = ensure_lemon_cleaner_shifts(
-            session=session,
-            base_url=base_url,
-            service_date=date_s, period_s=period_s, person_count=str(person),
-        )
-        _auto_shift_ok = bool(_pre.get("success"))
-        time.sleep(2)
-        raw_section = get_section_raw(session, base_data, token, slot)
-        _slot_found = slot_exists_in_section_response(raw_section, slot)
-    # v8.30：依規定，查無班表或人數不足時一律擋單，不能成單（不論服務日期
-    # 遠近，不再是「查無班表就標記待配班、照樣送出訂單」）。
-    cleaners = extract_cleaners_from_section_response(raw_section, slot) if _slot_found else []
-    _need = int(person) if str(person).isdigit() else 2
-    _has_explicit_cleaners = bool(cleaners)
-    if _slot_found and _has_explicit_cleaners and len(cleaners) < _need and allow_auto_lemon_shift:
-        _pre2 = ensure_lemon_cleaner_shifts(
-            session=session,
-            base_url=base_url,
-            service_date=date_s, period_s=period_s, person_count=str(_need - len(cleaners)),
-        )
-        _auto_shift_ok = bool(_pre2.get("success"))
-        time.sleep(2)
-        raw_section = get_section_raw(session, base_data, token, slot)
-        _slot_found = slot_exists_in_section_response(raw_section, slot)
-        cleaners = extract_cleaners_from_section_response(raw_section, slot) if _slot_found else []
-        _has_explicit_cleaners = bool(cleaners)
-    if not _slot_found or not _has_explicit_cleaners or len(cleaners) < _need:
-        raise Exception(
-            f"查無班表或人數不足（需要 {_need} 人，目前排班頁只有 {len(cleaners)} 人可指派），"
-            f"依規定人數不足不能成單，請先確認/補足班表後再建單。"
-            f"\n🔧 除錯：area_id={best_addr.get('area_id')}　company_id={best_addr.get('company_id')}"
-            f"\nget_section 原始回應前300字：{str(raw_section)[:300]}"
-        )
+    raw_section, token, auto_shift_result = _query_booking_slot_with_lemon_retry(
+        session, base_url, payway, base_data, token, slot, allow_auto_lemon_shift,
+    )
+    cleaners = extract_cleaners_from_section_response(raw_section, slot)
     # v2026.07.10：修正重大 bug——前面 check_contain 若失敗，可能借用過
     # /booking/single 頁面的 token（見上面 v8.5 的備援邏輯），並把 token
     # 變數永久換成借來的那個。如果送出建單時仍沿用這個借來的 token，會導致
@@ -1015,27 +880,6 @@ def quick_create_order(
         new_order_nos = after_order_nos - before_order_nos
         if new_order_nos:
             break
-
-    def _booking_count_success(resp):
-        try:
-            payload = resp.json()
-        except Exception:
-            return False
-        try:
-            return int(payload.get("count", 0)) > 0
-        except Exception:
-            return False
-
-    def _booking_balance_error(resp):
-        """v8.5：儲值金訂單若餘額不足，後台會回 JSON 帶 stored_value_balance 且 count=0。
-        找到就回傳餘額數字，否則回傳 None（代表不是餘額不足的情況）。"""
-        try:
-            payload = resp.json()
-        except Exception:
-            return None
-        if isinstance(payload, dict) and payload.get("stored_value_balance") is not None and int(payload.get("count", 1)) == 0:
-            return payload.get("stored_value_balance", 0)
-        return None
 
     def _find_matching_order_after_submit():
         blocks = _fetch_purchase_blocks_for_phone(session, phone, name=member_name)
@@ -1062,34 +906,30 @@ def quick_create_order(
             if target_period_compact and target_period_compact not in time_compact and target_display_compact not in time_compact:
                 continue
             matched.append(order_no_candidate)
-        for candidate in matched:
-            if candidate not in before_order_nos:
-                return candidate
-        return matched[0] if matched else None
+        new_matches = set(matched) - before_order_nos
+        return next(iter(new_matches)) if len(new_matches) == 1 else None
 
-    if not new_order_nos:
-        _balance_err = _booking_balance_error(booking_resp) if payway == "儲值金" else None
-        if _balance_err is not None:
-            raise Exception(f"儲值金餘額不足（目前餘額：{_balance_err} 元），無法建立此訂單，請改用信用卡或ATM付款方式。")
-        order_no = _find_matching_order_after_submit() if _booking_count_success(booking_resp) else None
-        if not order_no:
-            debug_snippet = booking_resp.text[:300].replace("\n", " ").strip()
-            extra_hint = "後台回傳 count > 0，但訂單列表回查不到符合條件的新訂單；請檢查訂單管理是否已建立。" if _booking_count_success(booking_resp) else ""
-            raise Exception(f"建單失敗：系統未產生新訂單編號。\n{extra_hint}\n回應狀態：{booking_resp.status_code}，網址：{booking_resp.url}\n片段：{debug_snippet}")
-    elif len(new_order_nos) == 1:
-        order_no = next(iter(new_order_nos))
-    else:
-        order_no = None
-        for candidate in new_order_nos:
-            meta = fetch_order_meta_by_order_no(session, candidate)
-            if meta.get("服務日期") == date_s and display_period.replace(" ", "") in str(meta.get("服務時間", "")).replace(" ", ""):
-                order_no = candidate
-                break
-        if not order_no:
-            order_no = sorted(new_order_nos)[-1]
+    # 一律比對本次新單的地址、日期、時段及付款方式；不拿舊單或任意候選兜底。
+    order_no = _find_matching_order_after_submit()
+    if not order_no:
+        if payway == "儲值金":
+            try:
+                reply = booking_resp.json()
+                failed_count = int(reply["count"])
+            except (ValueError, TypeError, KeyError):
+                failed_count = 0
+            if failed_count > 0:
+                raise Exception(f"後台回覆儲值金／購物金餘額不足，有 {failed_count} 筆無法成立訂單。")
+        raise Exception("送單結果待確認：尚未找到唯一符合本次資料的新訂單。請先查後台訂單，避免重複送單。")
     meta = fetch_order_meta_by_order_no(session, order_no)
     price_no_tax = base_data["price"]
-    price_with_tax = formula_price_with_tax
+    confirmed_block = _fetch_purchase_block_for_order_no(session, order_no)
+    confirmed_text = "\n".join(confirmed_block.get("lines", []))
+    backend_total = _extract_total_amount_line(confirmed_text)
+    backend_fare = _extract_fare_line(confirmed_text)
+    base_data["fare"] = backend_fare if backend_fare not in (None, "") else base_data["fare"]
+    order_total = int(float(backend_total)) if backend_total not in (None, "") else ""
+    price_with_tax = max(order_total - int(float(base_data["fare"] or 0)), 0) if order_total != "" else ""
     # v8.13：建單成功後檢查此訂單編號是否重複對應到多張訂單卡片
     _is_dup, _dup_count = _check_order_no_duplicate(session, order_no)
     _dup_warning = (
@@ -1123,6 +963,7 @@ def quick_create_order(
         "order_no": order_no, "address": selected_address, "date": date_s,
         "period": display_period, "period_s": period_s, "person": str(person),
         "price": price_no_tax, "price_with_tax": price_with_tax, "service_amount": price_with_tax,
+        "order_total": order_total,
         "fare": base_data["fare"], "payway": payway, "region": region,
         "clean_type_id": str(clean_type_id),
         "staff": meta.get("服務人員") or staff_display, "service_status": meta.get("服務狀態", "未處理"),
@@ -1896,26 +1737,6 @@ def convert_order_stage2_create_new_orders(stage1_result, new_orders):
     member_payload = stage1_result["member_payload"]
     service_amount_a_int = stage1_result["service_amount_a_int"]
     person_a = stage1_result["person_a"]
-
-    member = member_payload.get("member", {})
-    best_addr = pick_best_address_info(member_payload, address_a)
-    if not best_addr:
-        raise Exception(f"找不到地址資料：{address_a}")
-    selected_address = str(best_addr.get("address") or address_a).strip()
-    geo_lat, geo_lng = geocode_address(selected_address)
-    if geo_lat and geo_lng:
-        best_addr["lat"] = geo_lat
-        best_addr["lng"] = geo_lng
-    token_for_calc = _get_booking_token_for_payway(session, base_url, payway_a)
-    addr_check = check_contain(
-        session, member.get("member_id", ""), selected_address,
-        best_addr.get("lat", ""), best_addr.get("lng", ""), token_for_calc, clean_type_id,
-    )
-    if addr_check:
-        area_info = addr_check.get("area") if isinstance(addr_check.get("area"), dict) else {}
-        if area_info:
-            best_addr["area_id"] = area_info.get("area_id", best_addr.get("area_id"))
-            best_addr["company_id"] = area_info.get("company_id", best_addr.get("company_id"))
 
     today_str = date.today().strftime("%Y-%m-%d")
     new_order_results = []
@@ -4230,3 +4051,68 @@ def quick_create_new_customer_order(env_name, backend_email, backend_password, c
         "day_type": day_type,
         "session": session,
     }
+
+
+def resolve_backend_booking_address(session, member_payload, address, token, clean_type_id):
+    """新客、舊客、批次及查班表共用後台地址查詢；不自行判定服務區域。"""
+    member = (member_payload or {}).get("member", {}) or {}
+    best_addr = dict(pick_best_address_info(member_payload, address) or {})
+    selected_address = str(best_addr.get("address") or address).strip()
+    address_parts = _split_booking_address(selected_address)
+    # country_id 是後台縣市區下拉值，與服務區域 area_id 不同。
+    best_addr["country_id"] = address_parts.get("country_id") or best_addr.get("country_id", "")
+    if best_addr.get("lat") and best_addr.get("lng"):
+        addr_check = check_contain(
+            session, member.get("member_id", ""), selected_address,
+            best_addr["lat"], best_addr["lng"], token, clean_type_id,
+        )
+    else:
+        from backend_address_form import query_native_address
+        addr_check = query_native_address(
+            session, orders.BASE_URL, member.get("member_id", ""), selected_address, clean_type_id,
+        )
+    addr_check = addr_check if isinstance(addr_check, dict) else {}
+    code = addr_check.get("return_code")
+    if code not in (None, "", "0000"):
+        message = addr_check.get("description") or addr_check.get("message") or str(code)
+        raise Exception(f"後台地址查詢回覆：{message}")
+    area = addr_check.get("area")
+    if isinstance(area, dict):
+        for field in ("area_id", "company_id", "lat", "lng"):
+            if area.get(field) not in (None, "", 0, "0"):
+                best_addr[field] = area[field]
+    # 查詢未提供區域時保留會員既有值，未存的欄位留空交由後台驗證。
+    # 由後台原生按鈕定位及判定區域，不指定預設區域，也不改寫客戶地址。
+    return best_addr, address_parts, addr_check
+
+
+def _query_booking_slot_with_lemon_retry(session, base_url, payway, data, token, slot, allow_auto_lemon_shift):
+    """與批次一致：查完整班表，必要時補班、更新 token 並重新查詢。"""
+    raw = orders.get_all_sections_raw(session, data, token)
+    found = slot_exists_in_section_response(raw, slot)
+    cleaners = extract_cleaners_from_section_response(raw, slot) if found else []
+    need = int(data["person"])
+    pre = {}
+    # checkbox 存在但沒有姓名，不代表無人；批次以後台 checkbox 為準。
+    shortage = not found or (bool(cleaners) and len(cleaners) < need)
+    if shortage and allow_auto_lemon_shift:
+        service_date, period = slot.split("_", 1)
+        pre = ensure_lemon_cleaner_shifts(
+            session=session, base_url=base_url, service_date=service_date,
+            period_s=period, person_count=str(max(1, need - len(cleaners))),
+        ) or {}
+        token = _get_booking_token_for_payway(session, base_url, payway)
+        raw = orders.get_all_sections_raw(session, data, token)
+        found = slot_exists_in_section_response(raw, slot)
+    if not found:
+        details = [str(pre.get("message") or "")]
+        for item in pre.get("skipped", []) or []:
+            if isinstance(item, dict):
+                details.append(f"{item.get('name', '')}：{item.get('reason') or item.get('message') or ''}")
+        shift_message = "；".join(x for x in details if x)
+        raise Exception(
+            f"後台未回傳可預約時段：{slot}。"
+            + (f"補檸檬人結果：{shift_message}。" if shift_message else "")
+            + f"後台班表回覆：{str(raw)[:300]}"
+        )
+    return raw, token, pre
