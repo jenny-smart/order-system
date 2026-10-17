@@ -1,0 +1,7 @@
+{
+  "timezone": "Asia/Taipei",
+  "start": "09:00",
+  "end": "18:00",
+  "interval_minutes": 30,
+  "calendar_file": "taiwan_work_calendar.json"
+}

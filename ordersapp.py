@@ -11,7 +11,7 @@
 # v8.77
 # - 新增「批次建單優化」：日期區間 × 複數時段批次查班及建單，不影響舊批次建單。
 # - 新增「檸檬保留單建單」「檸檬保留單取消」正式選單入口。
-# - memo 功能直接改走 function/memo_router.py。
+# - memo 功能直接改走 function/memo_router.py（內部統一使用 memo_system/，與 orders-system 相同）。
 # - VIP Calendar patch 改由單一 patch bundle 套用。
 # ============================================================
 # -*- coding: utf-8 -*-

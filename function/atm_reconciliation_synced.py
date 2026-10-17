@@ -1,97 +1,18 @@
+# ============================================================
+# 檔名：function/atm_reconciliation_synced.py
+# 功能：相容包裝。財務對帳（ATM 待付款清單去重貼上）的畫面與邏輯已統一改用 memo_system/atm.py
+#       （與 orders-system 相同的單一實作），這裡不再自行實作。
+# 更新時間：2026-10-17
+# ============================================================
 # -*- coding: utf-8 -*-
-"""ATM reconciliation compatibility wrapper for synced unpaid-list behavior."""
-from typing import Dict, List
+from __future__ import annotations
 
-from function import atm_reconciliation as _base
+from memo_system.atm import *  # noqa: F401,F403  舊程式 import 本模組名稱時仍可取用
 
-
-def paste_atm_unpaid_list(region: str, rows: List[Dict], ui_logger=None) -> Dict:
-    """Append only new unpaid orders after existing I:L data without overwriting it."""
-    log = _base.make_logger(ui_logger)
-    result = {"pasted": 0, "skipped_duplicates": 0, "start_row": None, "errors": []}
-
-    if not rows:
-        log("沒有資料可以貼")
-        return result
-
-    ws = _base.get_atm_worksheet(region)
-    all_values = _base.memo.with_retry(ws.get_all_values)
-
-    last_a_row = max(
-        (idx for idx, row in enumerate(all_values, start=1)
-         if row and str(row[0]).strip()),
-        default=0,
-    )
-    last_b_row = max(
-        (idx for idx, row in enumerate(all_values, start=1)
-         if len(row) >= 2 and str(row[1]).strip()),
-        default=1,
-    )
-
-    existing_order_nos = set()
-    last_unpaid_row = 0
-    for idx, row in enumerate(all_values, start=1):
-        if idx <= last_b_row:
-            continue
-        i_to_l = row[8:12] if len(row) > 8 else []
-        if any(str(value).strip() for value in i_to_l):
-            last_unpaid_row = idx
-        order_no = row[9] if len(row) > 9 else ""
-        if str(order_no).strip():
-            existing_order_nos.add(str(order_no).strip())
-
-    pending_rows = []
-    seen_order_nos = set(existing_order_nos)
-    for row in rows:
-        order_no = str(row.get("order_no") or "").strip()
-        if not order_no:
-            log("⚠️ 略過一筆沒有訂單編號的資料")
-            continue
-        if order_no in seen_order_nos:
-            result["skipped_duplicates"] += 1
-            continue
-        seen_order_nos.add(order_no)
-        pending_rows.append(row)
-
-    if not pending_rows:
-        log(f"沒有新訂單可新增；已略過 {result['skipped_duplicates']} 筆重複訂單")
-        return result
-
-    start_row = max(last_a_row + 5, last_unpaid_row + 1)
-    end_row = start_row + len(pending_rows) - 1
-
-    current_row_count = int(getattr(ws, "row_count", 0) or len(all_values))
-    if end_row > current_row_count:
-        _base.memo.with_retry(ws.add_rows, end_row - current_row_count)
-
-    updates = []
-    for offset, row in enumerate(pending_rows):
-        row_num = start_row + offset
-        updates.append({
-            "range": f"I{row_num}:L{row_num}",
-            "values": [[
-                row["year_month"], row["order_no"], row["name"], row["net_amount"],
-            ]],
-        })
-
-        existing_h = ""
-        if row_num <= len(all_values) and len(all_values[row_num - 1]) >= 8:
-            existing_h = str(all_values[row_num - 1][7]).strip()
-        if row.get("line_url") and not existing_h:
-            updates.append({"range": f"H{row_num}", "values": [[row["line_url"]]]})
-
-    _base.memo.with_retry(ws.batch_update, updates, value_input_option="RAW")
-
-    result["pasted"] = len(pending_rows)
-    result["start_row"] = start_row
-    log(
-        f"✅ 已新增 {len(pending_rows)} 筆至 I{start_row}:L{end_row}；"
-        f"略過 {result['skipped_duplicates']} 筆重複訂單"
-    )
-    return result
+SECTION = "💰 財務對帳"
 
 
 def render(backend_email, backend_password, env):
-    # Keep the existing ATM module/UI intact; replace only the unpaid-list writer.
-    _base.paste_atm_unpaid_list = paste_atm_unpaid_list
-    return _base.render(backend_email, backend_password, env)
+    from function.memo_router import render as _render_memo
+
+    _render_memo(SECTION, backend_email, backend_password, env)
