@@ -4,7 +4,8 @@ import streamlit as st
 
 from function.ui_common import step
 from shared.member_phone_lookup import (
-    MemberClient, load_sheet_columns, load_sheet_entries, lookup_entries, parse_pasted, to_tsv,
+    DEFAULT_TAB_TITLE, MemberClient, default_sheet_url, load_sheet_columns, load_sheet_entries,
+    lookup_entries, parse_pasted, to_tsv,
 )
 
 
@@ -26,8 +27,9 @@ def render_member_phone_lookup(env, email, password):
                             placeholder='王小明\n陳小美 https://chat.line.biz/官方帳號/chat/客戶識別碼', key='mpl_text')
         st.caption('只貼 LINE 無法直接反查手機，請同時提供姓名。每次最多 100 筆。')
     else:
-        url = st.text_input('Google Sheet 網址（含 gid）',
-                            value='https://docs.google.com/spreadsheets/d/1bNcJuFuP--jdpNo2zJKOpvuq-5rSHW3LgGE8HEepf44/edit#gid=1582548509', key='mpl_url')
+        if 'mpl_url' not in st.session_state:
+            st.session_state['mpl_url'] = default_sheet_url()
+        url = st.text_input(f'Google Sheet 網址（沒帶 gid 時用「{DEFAULT_TAB_TITLE}」分頁）', key='mpl_url')
         header = int(st.number_input('欄位標題在第幾列', min_value=1, value=1, key='mpl_header'))
         schema_key = (url.strip(), header)
         if st.session_state.get('mpl_schema_key') != schema_key:

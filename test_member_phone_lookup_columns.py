@@ -40,3 +40,26 @@ class SheetColumnTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class OpenSheetTargetTabNameTest(unittest.TestCase):
+    def _open(self, titles, url='https://docs.google.com/spreadsheets/d/abc/edit'):
+        import sys
+        import types
+        from types import SimpleNamespace
+        import shared.member_phone_lookup as mpl
+
+        book = Mock()
+        book.worksheets.return_value = [SimpleNamespace(title=t) for t in titles]
+        book.worksheet.side_effect = lambda title: ('ws', title)
+        book.get_worksheet_by_id.side_effect = lambda gid: ('gid', gid)
+        fake_orders = types.ModuleType('orders')
+        fake_orders.build_gsheet_client = lambda: Mock(open_by_key=lambda key: book)
+        with patch.dict(sys.modules, {'orders': fake_orders}):
+            return mpl.open_sheet_target(url)[1]
+
+    def test_without_gid_uses_named_tab(self):
+        self.assertEqual(self._open(['ATM', '評價預約']), ('ws', '評價預約'))
+        self.assertEqual(self._open(['評價預約'], 'https://docs.google.com/spreadsheets/d/abc/edit#gid=5'), ('gid', 5))
+        with self.assertRaises(ValueError):
+            self._open(['ATM'])

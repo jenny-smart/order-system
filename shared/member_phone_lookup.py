@@ -234,6 +234,9 @@ def column_letter(number):
     return value
 
 
+DEFAULT_TAB_TITLE = '評價預約'
+
+
 def open_sheet_target(url):
     from orders import build_gsheet_client
     parsed = urlparse(url.strip())
@@ -244,8 +247,25 @@ def open_sheet_target(url):
     gid = parse_qs(parsed.fragment).get('gid', parse_qs(parsed.query).get('gid', ['']))[0]
     if gid and not gid.isdigit():
         raise ValueError('分頁 gid 格式錯誤。')
-    ws = book.get_worksheet_by_id(int(gid)) if gid else book.get_worksheet(0)
+    if gid:
+        ws = book.get_worksheet_by_id(int(gid))
+    else:
+        # 網址沒帶 gid 時依名稱找預設分頁（換年 GID 會變）；找不到就報錯，不改用第一個分頁
+        titles = [w.title for w in book.worksheets()]
+        if DEFAULT_TAB_TITLE not in titles:
+            raise ValueError(f'試算表找不到「{DEFAULT_TAB_TITLE}」分頁，請在網址帶上 gid。')
+        ws = book.worksheet(DEFAULT_TAB_TITLE)
     return book, ws
+
+
+def default_sheet_url():
+    """預設名單：今年台北內勤工作表單（依年度根目錄找）的「評價預約」分頁；找不到回傳空字串。"""
+    try:
+        from year_roots import root_file_id
+
+        return f'https://docs.google.com/spreadsheets/d/{root_file_id("內勤工作表單", "台北")}/edit'
+    except Exception:
+        return ''
 
 
 def load_sheet_columns(url, header_row=1):
