@@ -13,7 +13,7 @@ def render(backend_email, backend_password, env):
     step("3", "LINE 通知產生器")
     col_left, col_right = st.columns([3, 1])
     with col_left:
-        info_panel("使用說明", ["輸入已成立訂單編號，每行一個，可一次輸入多筆。", "系統讀取訂單日期、地址、付款方式與金額，區域由地址自動判斷。"])
+        info_panel("使用說明", ["每行一組：要合併的訂單可用半形逗號分隔。", "系統會逐筆核對訂單日期、地址、付款方式與金額；若合併訂單有多個地址，會在每筆服務時間下方顯示對應地址。"])
         line_order_nos_input = st.text_area("訂單編號（每行一個）", value="", height=120, placeholder="LC00211537\nLC00211538", key="line_order_nos")
         if st.button("產生 LINE 訊息", width="stretch", key="make-line-from-order-no"):
             if not backend_email.strip() or not backend_password.strip():

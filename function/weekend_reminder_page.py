@@ -91,12 +91,12 @@ def render(backend_email, backend_password, env):
                     "選取", "資料狀態", "訂單編號", "服務日期", "姓名",
                     "通知狀態", "通知時間",
                     "回覆狀態", "回覆時間", "LINE",
-                    "服務時間", "電話", "地址", "LINE ID",
+                    "服務時間", "電話", "地址",
                     "回覆備註", "發送錯誤", "最後更新",
                 ],
                 disabled=[
                     "訂單編號", "服務日期", "服務時間", "姓名", "電話", "地址",
-                    "LINE", "LINE ID", "資料狀態", "通知時間", "回覆時間",
+                    "LINE", "資料狀態", "通知時間", "回覆時間",
                     "發送錯誤", "最後更新",
                 ],
                 column_config={
@@ -105,7 +105,6 @@ def render(backend_email, backend_password, env):
                         "資料狀態", help="新增＝Google Sheet 尚無此訂單編號；已存在＝將更新原列，不會重複新增。",
                     ),
                     "LINE": st.column_config.LinkColumn("LINE", display_text="開啟聊天"),
-                    "LINE ID": st.column_config.TextColumn("LINE ID", help="由 LINE 聊天網址／客人回覆自動記錄"),
                     "通知狀態": st.column_config.SelectboxColumn("通知狀態", options=NOTICE_STATUSES, required=True),
                     "通知時間": st.column_config.TextColumn(
                         "實際發送時間",

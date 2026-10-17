@@ -177,6 +177,12 @@ def render(backend_email, backend_password, env):
                     )
             st.session_state.bn_apply_results = apply_results
             st.session_state.bn_parse_errors = parse_errors
+            completed = {r["order_no"] for r in apply_results if r["ok"]}
+            if completed:
+                st.session_state.bn_results = [
+                    r for r in bn_results if r["order_no"] not in completed
+                ]
+                st.rerun()
 
     for err in st.session_state.get("bn_parse_errors", []) or []:
         st.error(err)
