@@ -57,6 +57,10 @@ def _clean(text: str) -> str:
     return re.sub(r"[（(].*?[）)]", "", str(text or "")).strip()
 
 
+# 檔名的地區舊稱：找不到時再試（2026 年家電區的財報叫「電器2026財報」，其他年度用「家電」）
+_AREA_OLD_NAMES = {"家電": ("電器",)}
+
+
 def _fill(template: str, year: int, area: str = "") -> str:
     return _clean(template).replace("{YYYY}", str(year)).replace("{地區}", area)
 
@@ -149,9 +153,15 @@ def _child(drive, parent_id: str, name: str, folder: bool) -> Dict:
         if _norm(item.get("name")) != target:
             continue
         mime = item.get("mimeType", "")
-        if mime == SHORTCUT_MIME:
-            continue
+        if mime == SHORTCUT_MIME:  # 捷徑：改用它指向的檔案／資料夾
+            details = item.get("shortcutDetails") or {}
+            if not details.get("targetId"):
+                continue
+            mime = details.get("targetMimeType", "")
+            item = {**item, "id": details["targetId"], "mimeType": mime}
         if folder != (mime == FOLDER_MIME):
+            continue
+        if any(h["id"] == item["id"] for h in hits):  # 原檔與指向它的捷徑只算一個
             continue
         hits.append(item)
     if not hits:
@@ -174,9 +184,23 @@ def resolve(drive, rule: Rule, year: int, area: str = "", file_index: int = 0) -
         name = _fill(template, year, area)
         node = _child(drive, node, name, folder=True)["id"]
         path.append(name)
-    name = _fill(rule.file_names[min(file_index, len(rule.file_names) - 1)], year, area)
+    template = rule.file_names[min(file_index, len(rule.file_names) - 1)]
+    name = _fill(template, year, area)
+    try:
+        found = _child(drive, node, name, folder=False)
+    except FileNotFoundError:
+        olds = _AREA_OLD_NAMES.get(area, ()) if "{地區}" in template else ()
+        for old in olds:
+            try:
+                found = _child(drive, node, _fill(template, year, old), folder=False)
+                name = _fill(template, year, old)
+                break
+            except FileNotFoundError:
+                continue
+        else:
+            raise
     path.append(name)
-    return _child(drive, node, name, folder=False)["id"], "/".join(path)
+    return found["id"], "/".join(path)
 
 
 class YearRoots:
