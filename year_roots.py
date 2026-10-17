@@ -290,6 +290,11 @@ def _master_id() -> str:
     return os.getenv("MASTER_SPREADSHEET_ID", "").strip() or MASTER_SPREADSHEET_ID
 
 
+# 部署端可指定找檔用的 Drive 連線（例如 tool-system 用擁有資料夾的 Jenny OAuth；
+# 服務帳號看不到沒分享給它的資料夾，會誤判「找不到」）。未指定時用服務帳號。
+drive_factory: Optional[Callable[[], object]] = None
+
+
 def get_year_roots() -> Optional[YearRoots]:
     """orders-system 實例：用服務帳號讀寫主控表、找雲端檔。讀不到設定時回傳 None。"""
     global _INSTANCE, _LOADED_AT
@@ -321,7 +326,8 @@ def get_year_roots() -> Optional[YearRoots]:
             ).execute()
 
         _INSTANCE = YearRoots(
-            values, lambda: build("drive", "v3", credentials=creds, cache_discovery=False), writer
+            values, drive_factory or (lambda: build("drive", "v3", credentials=creds, cache_discovery=False)),
+            writer,
         )
         _LOADED_AT = time.time()
     except Exception as exc:
