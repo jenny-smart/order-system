@@ -88,6 +88,7 @@ from function import line_notice_generator as _line_notice_page
 from function import next_appointment_list as _next_appointment_page
 from function import next_service_time_updater as _next_service_time_page
 from function import member_preferences as _member_preferences_page
+from function import member_phone_lookup as _member_phone_lookup_page
 from function import batch_booking_optimized as _batch_booking_optimized_page
 from function import reserve_menu as _reserve_menu_page
 from function import lemon_staff_replacement as _lemon_staff_replacement_page
@@ -153,6 +154,11 @@ with col_env:
     env = "dev" if env_label.startswith("dev") else "prod"
 
 st.markdown("<hr>", unsafe_allow_html=True)
+
+# 服務金額設定（比照 orders-system：登入區下方、功能選單上方）
+from service_pricing import render_settings as _render_service_pricing_settings
+_render_service_pricing_settings(st)
+
 step("2", "功能選單")
 
 FUNCTION_OPTIONS = [
@@ -183,6 +189,7 @@ FUNCTION_OPTIONS = [
     ("週末服務 LINE 提醒：篩選週末已付款訂單、產生提醒訊息並追蹤回覆。", "orders", "週末服務 LINE 提醒"),
     ("專員隔日上班提醒：依服務日期彙整每位專員班次與 LINE 聊天連結。", "orders", "專員隔日上班提醒"),
     # ---------- E. 會員／客戶管理 ----------
+    ("會員手機查詢：貼上姓名／LINE 或讀取 Google Sheet 指定列，查詢手機並核對會員。", "orders", "會員手機查詢"),
     ("會員喜好設定：輸入電話查會員，設定喜愛專員性別與喜愛／不喜愛專員。", "orders", "會員喜好設定"),
     ("整理預約下次服務：搜尋評價日期區間內有填預約下次服務的評價並整理名單。", "orders", "整理預約下次服務"),
     ("更新建議下次服務時間：依地址＋電話查後台最近3次服務日期並寫回 Sheet。", "orders", "更新建議下次服務時間"),
@@ -218,7 +225,7 @@ _CATEGORY_HEADERS_BY_FEATURE = {
     "取消訂單": "B. 訂單附屬功能",
     "雙向訂單檢查": "C. 稽核比對工具",
     "LINE 通知產生器": "D. LINE 通知／提醒",
-    "會員喜好設定": "E. 會員／客戶管理",
+    "會員手機查詢": "E. 會員／客戶管理",
     "台北/台中區對帳": "F. 財務功能",
 }
 _menu_display_options = []
@@ -349,5 +356,7 @@ elif mode == "整理預約下次服務":
     _next_appointment_page.render(backend_email, backend_password, env)
 elif mode == "更新建議下次服務時間":
     _next_service_time_page.render(backend_email, backend_password, env)
+elif mode == "會員手機查詢":
+    _member_phone_lookup_page.render(backend_email, backend_password, env)
 elif mode == "會員喜好設定":
     _member_preferences_page.render(backend_email, backend_password, env)
