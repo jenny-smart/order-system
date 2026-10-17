@@ -245,44 +245,22 @@ def _secret_value(key, default=""):
     return str(os.getenv(key, default) or default).strip()
 
 
-def _year_root_id(kind: str, region: str, spreadsheet_id: str) -> str:
-    """依主控表「年度根目錄設定」的模式切換年度檔；原設定／比對時回傳原本的 ID。"""
-    try:
-        from year_roots import choose_file_id
-    except Exception:
-        return spreadsheet_id
-    if kind == "ATM":
-        category, index = ("名冊薪資", 1) if region in ("桃園", "新竹") else ("內勤工作表單", 0)
-    else:
-        category, index = ("服務異動", 0) if region in ("桃園", "新竹") else ("內勤工作表單", 0)
-    return choose_file_id(category, region, spreadsheet_id, file_index=index)
+CHANGE_TAB_TITLE = "清潔異動"
+
+
+def _change_root_category(region: str) -> str:
+    """桃園／新竹的清潔異動在「服務異動」年度檔，其餘地區在「內勤工作表單」。"""
+    return "服務異動" if region in ("桃園", "新竹") else "內勤工作表單"
 
 
 def _sheet_config(region: str) -> dict:
+    """清潔異動一律依年度根目錄找當年度檔（不讀 secrets 的試算表 ID／GID）。"""
     if region not in REGION_SECRET_PREFIX:
         raise ValueError(f"不支援的地區：{region}（目前支援：{list(REGION_SECRET_PREFIX.keys())}）")
-    prefix = REGION_SECRET_PREFIX[region]
-    spreadsheet_id = _secret_value(f"CHANGE_ORDER_{prefix}_SPREADSHEET_ID")
-    gid_text = _secret_value(f"CHANGE_ORDER_{prefix}_GID")
-    worksheet_title = _secret_value(f"CHANGE_ORDER_{prefix}_WORKSHEET_TITLE", "清潔異動")
-    if not spreadsheet_id:  # 沒有 secrets 時改用部署端設定（例如 tool-system 主控表「清潔異動設定」）
-        from . import host
-        fallback = host.lookup_region_sheet("CHANGE", region) or {}
-        spreadsheet_id = str(fallback.get("spreadsheet_id") or "").strip()
-        gid_text = str(fallback.get("gid") or gid_text or "").strip()
-        worksheet_title = fallback.get("worksheet_title") or worksheet_title
-    try:
-        gid = int(gid_text) if gid_text else None
-    except ValueError as exc:
-        raise ValueError(f"Secrets 的「{region}」清潔異動 GID 必須是整數") from exc
-    # 年度根目錄「根目錄」模式：沒有原設定 ID 也能直接用根目錄找到的年度檔
-    resolved = _year_root_id("CHANGE", region, spreadsheet_id)
-    if not resolved:
-        raise ValueError(f"Secrets 尚未設定「{region}」清潔異動試算表 ID，年度根目錄也找不到")
-    if resolved != spreadsheet_id:
-        gid = None  # 換到別的年度檔時 GID 不同，改用分頁名稱
-    spreadsheet_id = resolved
-    return {"spreadsheet_id": spreadsheet_id, "gid": gid, "worksheet_title": worksheet_title}
+    from year_roots import root_file_id
+
+    spreadsheet_id = root_file_id(_change_root_category(region), region)
+    return {"spreadsheet_id": spreadsheet_id, "gid": None, "worksheet_title": CHANGE_TAB_TITLE}
 
 
 def _get_gspread_client():
@@ -335,26 +313,34 @@ def _get_gspread_client():
 
 
 def supported_regions() -> list:
-    """有設定清潔異動試算表的地區（secrets 或部署端設定）。"""
+    """有清潔異動的地區：部署端有指定就用指定的，否則看年度根目錄設定有登記的地區。"""
     from . import host
     configured = host.lookup_regions("CHANGE")
     if configured is not None:
         return [r for r in configured if r in REGION_SECRET_PREFIX]
-    result = []
-    for region in REGION_SECRET_PREFIX:
-        try:
-            _sheet_config(region)
-        except Exception:
-            continue
-        result.append(region)
-    return result
+    try:
+        from year_roots import find_rule, get_year_roots
+        roots = get_year_roots()
+    except Exception:
+        roots = None
+    if roots is None:
+        return list(REGION_SECRET_PREFIX)
+    return [r for r in REGION_SECRET_PREFIX
+            if find_rule(roots.rules, _change_root_category(r), r) is not None]
+
+
+def _find_change_tab(titles: list, wanted: str = "清潔異動"):
+    """先找「清潔異動」；沒有時找唯一一個「…訂單金流…異動表」（桃園／新竹的服務異動檔）。"""
+    if wanted in titles:
+        return wanted
+    matches = [t for t in titles if "訂單金流" in t and "異動表" in t]
+    return matches[0] if len(matches) == 1 else None
 
 
 def get_worksheet(region: str, tab_name: str = "清潔異動"):
     """
     依地區回傳對應的 gspread worksheet 物件。
-    檔案依年度根目錄設定找到後，分頁一律先依名稱找（預設「清潔異動」）；
-    名稱找不到才用 GID；都找不到就報錯（不會改用第一個分頁，避免寫錯分頁）。
+    檔案依年度根目錄找，分頁依名稱找；找不到就報錯（不會改用第一個分頁，避免寫錯分頁）。
     """
     config = _sheet_config(region)
     client = _get_gspread_client()
@@ -362,21 +348,18 @@ def get_worksheet(region: str, tab_name: str = "清潔異動"):
         sh = client.open_by_key(config["spreadsheet_id"])
     except gspread.exceptions.SpreadsheetNotFound as exc:
         raise RuntimeError(
-            f"無法開啟「{region}」清潔異動試算表。請確認試算表 ID 正確，且已分享給目前的 Google 服務帳號（編輯者權限）。"
+            f"無法開啟「{region}」清潔異動試算表（{config['spreadsheet_id']}），請確認已分享給目前的 Google 服務帳號（編輯者權限）。"
         ) from exc
 
-    try:
-        return sh.worksheet(config["worksheet_title"] or tab_name)
-    except gspread.exceptions.WorksheetNotFound:
-        pass
-
-    gid = config["gid"]
-    if gid is not None:
-        for ws in sh.worksheets():
-            if ws.id == gid:
-                return ws
-    title = config["worksheet_title"] or tab_name
-    raise RuntimeError(f"「{region}」清潔異動試算表找不到「{title}」分頁（gid={gid}），請確認分頁名稱")
+    worksheets = sh.worksheets()
+    title = _find_change_tab([ws.title for ws in worksheets], tab_name or config["worksheet_title"])
+    for ws in worksheets:
+        if title and ws.title == title:
+            return ws
+    raise RuntimeError(
+        f"「{region}」清潔異動試算表「{sh.title}」找不到「{tab_name}」分頁"
+        f"（也沒有唯一的「訂單金流…異動表」分頁），請確認分頁名稱"
+    )
 
 
 # ============================================================

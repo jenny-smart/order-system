@@ -184,23 +184,21 @@ def resolve(drive, rule: Rule, year: int, area: str = "", file_index: int = 0) -
         name = _fill(template, year, area)
         node = _child(drive, node, name, folder=True)["id"]
         path.append(name)
-    template = rule.file_names[min(file_index, len(rule.file_names) - 1)]
-    name = _fill(template, year, area)
-    try:
-        found = _child(drive, node, name, folder=False)
-    except FileNotFoundError:
-        olds = _AREA_OLD_NAMES.get(area, ()) if "{地區}" in template else ()
-        for old in olds:
-            try:
-                found = _child(drive, node, _fill(template, year, old), folder=False)
-                name = _fill(template, year, old)
-                break
-            except FileNotFoundError:
-                continue
-        else:
-            raise
-    path.append(name)
-    return found["id"], "/".join(path)
+    entry = rule.file_names[min(file_index, len(rule.file_names) - 1)]
+    # 同一個檔可登記多種寫法，用「｜」分隔，依序找（例如 2027 起改名的新檔名｜2026 的舊檔名）
+    candidates = []
+    for template in (t.strip() for t in entry.split("｜") if t.strip()):
+        candidates.append(_fill(template, year, area))
+        if "{地區}" in template:
+            candidates += [_fill(template, year, old) for old in _AREA_OLD_NAMES.get(area, ())]
+    for name in candidates:
+        try:
+            found = _child(drive, node, name, folder=False)
+        except FileNotFoundError:
+            continue
+        path.append(name)
+        return found["id"], "/".join(path)
+    raise FileNotFoundError(f"找不到「{'」或「'.join(candidates)}」")
 
 
 class YearRoots:
@@ -267,6 +265,24 @@ class YearRoots:
         else:
             self._report(rule, f"{label} 不一致：根目錄找到 {path}（{found}），原設定 {configured_id}")
         return configured_id
+
+
+    def locate(self, category: str, area: str, year: int, file_index: int = 0) -> str:
+        """只依根目錄找檔（不看模式、不退回原設定）；找不到就丟出錯誤。"""
+        rule = find_rule(self.rules, category, area)
+        if rule is None:
+            raise FileNotFoundError(f"年度根目錄設定沒有「{category}／{area or '共用'}」這一列")
+        label = f"{area or '共用'} {year}"
+        key = (rule.row, year, area, file_index)
+        try:
+            if key not in self._resolved:
+                self._resolved[key] = resolve(self.drive, rule, year, area, file_index)
+        except Exception as exc:
+            self._report(rule, f"{label} 找不到：{exc}")
+            raise FileNotFoundError(f"年度根目錄找不到「{category}／{area or '共用'}」{year} 年度檔：{exc}") from exc
+        found, path = self._resolved[key]
+        self._report(rule, f"{label} 使用根目錄：{path}")
+        return found
 
 
 MASTER_SPREADSHEET_ID = "1nNAXy6rvBnGR8ACnqKKzKNA4-UwZtZp47i806EPmR_8"
@@ -348,3 +364,11 @@ def choose_file_id(category: str, area: str, configured_id: str,
     except Exception as exc:
         print(f"⚠ 年度根目錄比對失敗，沿用原設定：{exc}", flush=True)
         return str(configured_id or "").strip()
+
+
+def root_file_id(category: str, area: str, year: Optional[int] = None, file_index: int = 0) -> str:
+    """只用年度根目錄找檔（不讀 secrets／原設定 ID）；設定讀不到或找不到檔都會報錯。"""
+    roots = get_year_roots()
+    if roots is None:
+        raise RuntimeError(f"讀不到主控表「{ROOT_SHEET}」，無法依根目錄找檔")
+    return roots.locate(category, area, year or taipei_year(), file_index)

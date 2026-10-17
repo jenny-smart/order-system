@@ -12,18 +12,22 @@ class MemoHostFallbackTest(unittest.TestCase):
     def tearDown(self):
         host.region_sheet, host.service_account, host.regions = self.saved
 
-    def test_change_order_uses_host_sheet_when_secrets_missing(self):
-        host.region_sheet = lambda kind, region: {"spreadsheet_id": f"{kind}-{region}", "gid": 7}
-        with patch.object(c, "_secret_value", lambda key, default="": default), \
-             patch.object(c, "_year_root_id", lambda kind, region, sid: sid):
+    def test_change_order_ignores_secrets_and_host_sheet(self):
+        host.region_sheet = lambda kind, region: {"spreadsheet_id": "host", "gid": 7}
+        calls = []
+        with patch.object(c, "_secret_value", lambda key, default="": "secret"), \
+             patch("year_roots.root_file_id", lambda cat, area: calls.append((cat, area)) or f"ROOT-{area}"):
             config = c._sheet_config("台北")
-        self.assertEqual(config, {"spreadsheet_id": "CHANGE-台北", "gid": 7, "worksheet_title": "清潔異動"})
+            self.assertEqual(c._sheet_config("桃園")["spreadsheet_id"], "ROOT-桃園")
+        self.assertEqual(config, {"spreadsheet_id": "ROOT-台北", "gid": None, "worksheet_title": "清潔異動"})
+        self.assertEqual(calls, [("內勤工作表單", "台北"), ("服務異動", "桃園")])
 
-    def test_secrets_win_over_host(self):
-        host.region_sheet = lambda kind, region: {"spreadsheet_id": "host"}
-        with patch.object(c, "_secret_value", lambda key, default="": "secret" if key.endswith("SPREADSHEET_ID") else default), \
-             patch.object(c, "_year_root_id", lambda kind, region, sid: sid):
-            self.assertEqual(c._sheet_config("台北")["spreadsheet_id"], "secret")
+    def test_change_order_root_missing_raises(self):
+        def missing(cat, area):
+            raise FileNotFoundError("找不到")
+        with patch("year_roots.root_file_id", missing):
+            with self.assertRaises(FileNotFoundError):
+                c._sheet_config("台北")
 
     def test_supported_regions_from_host(self):
         host.regions = lambda kind: ["台北", "台中", "火星"]
@@ -45,29 +49,6 @@ class MemoHostFallbackTest(unittest.TestCase):
 
 
 class YearRootSwitchTest(unittest.TestCase):
-    def test_root_mode_without_configured_id(self):
-        with patch.object(c, "_secret_value", lambda key, default="": default), \
-             patch.object(host, "region_sheet", None), \
-             patch.object(c, "_year_root_id", lambda kind, region, sid: sid or "ROOT-2027"):
-            self.assertEqual(c._sheet_config("台北")["spreadsheet_id"], "ROOT-2027")
-
-    def test_switched_file_drops_old_gid(self):
-        secrets = {"CHANGE_ORDER_TAIPEI_SPREADSHEET_ID": "OLD", "CHANGE_ORDER_TAIPEI_GID": "123"}
-        with patch.object(c, "_secret_value", lambda key, default="": secrets.get(key, default)), \
-             patch.object(c, "_year_root_id", lambda kind, region, sid: "NEW"):
-            config = c._sheet_config("台北")
-        self.assertEqual((config["spreadsheet_id"], config["gid"]), ("NEW", None))
-        with patch.object(c, "_secret_value", lambda key, default="": secrets.get(key, default)), \
-             patch.object(c, "_year_root_id", lambda kind, region, sid: sid):
-            self.assertEqual(c._sheet_config("台北")["gid"], 123)
-
-    def test_missing_everywhere_raises(self):
-        with patch.object(c, "_secret_value", lambda key, default="": default), \
-             patch.object(host, "region_sheet", None), \
-             patch.object(c, "_year_root_id", lambda kind, region, sid: sid):
-            with self.assertRaises(ValueError):
-                c._sheet_config("台北")
-
     def test_atm_switched_file_uses_title(self):
         secrets = {"ATM_TAIPEI_SPREADSHEET_ID": "OLD", "ATM_TAIPEI_GID": "5"}
         with patch.object(atm, "_secret_text", lambda key: secrets.get(key, "")), \
@@ -97,20 +78,25 @@ class WorksheetByNameTest(unittest.TestCase):
         def get_worksheet_by_id(self, gid):
             return next((("ws", t) for t, i in self.tabs.items() if i == gid), None)
 
-    def test_change_order_prefers_tab_name_over_gid(self):
-        sheet = self.Sheet({"其他": 1, "清潔異動": 2})
+    def _get(self, tabs):
+        sheet = self.Sheet(tabs)
+        sheet.title = "測試檔"
         client = type("C", (), {"open_by_key": lambda self, key: sheet})()
-        with patch.object(c, "_sheet_config", lambda region: {"spreadsheet_id": "X", "gid": 1, "worksheet_title": "清潔異動"}), \
+        with patch.object(c, "_sheet_config", lambda region: {"spreadsheet_id": "X", "gid": None, "worksheet_title": "清潔異動"}), \
              patch.object(c, "_get_gspread_client", lambda: client):
-            self.assertEqual(c.get_worksheet("台北"), ("ws", "清潔異動"))
+            return c.get_worksheet("台北")
+
+    def test_change_order_finds_tab_by_name(self):
+        self.assertEqual(self._get({"其他": 1, "清潔異動": 2}).title, "清潔異動")
+        # 桃園／新竹服務異動檔：沒有「清潔異動」時用唯一的「訂單金流…異動表」
+        self.assertEqual(self._get({"2026訂單金流(加減時/儲值金/其他)異動表": 5, "2025客戶退款": 0}).title,
+                         "2026訂單金流(加減時/儲值金/其他)異動表")
 
     def test_change_order_missing_tab_raises(self):
-        sheet = self.Sheet({"其他": 1})
-        client = type("C", (), {"open_by_key": lambda self, key: sheet})()
-        with patch.object(c, "_sheet_config", lambda region: {"spreadsheet_id": "X", "gid": 5, "worksheet_title": "清潔異動"}), \
-             patch.object(c, "_get_gspread_client", lambda: client):
-            with self.assertRaises(RuntimeError):
-                c.get_worksheet("台北")
+        with self.assertRaises(RuntimeError):
+            self._get({"其他": 0})
+        with self.assertRaises(RuntimeError):  # 兩個候選分頁時不猜
+            self._get({"2026訂單金流異動表": 1, "2027訂單金流異動表": 2})
 
     def test_atm_prefers_tab_name_then_gid(self):
         cfg = {"spreadsheet_id": "X", "gid": 9, "worksheet_title": "ATM"}
