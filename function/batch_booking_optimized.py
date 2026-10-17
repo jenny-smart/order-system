@@ -1,11 +1,13 @@
 # ============================================================
 # 檔名：function/batch_booking_optimized.py
-# 功能：儲值金訂單批次建單優化；依同一人＋同一地址自動分組，可一次複選多個日期／時段建立訂單。
-# 更新時間：2026-08-19
+# 功能：儲值金訂單批次建單優化；依電話＋地址分組，多筆組先批次、每組完成即回填，
+#       單筆組再逐筆；日曆在訂單回填後才 lazy 初始化（shared/hybrid_batch_runner.py）。
+# 更新時間：2026-10-17
 # ============================================================
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import sys
 import traceback
 from collections import OrderedDict
 from datetime import datetime
@@ -16,12 +18,10 @@ import streamlit as st
 from accounts import ACCOUNTS
 from function.ui_common import step, info_panel
 from orders import (
-    build_group_key,
     get_region_by_address,
     load_worksheet,
     normalize_addr_for_match,
     normalize_phone,
-    run_process_web,
 )
 from shared.execution_log_service import log_execution
 
@@ -192,218 +192,96 @@ def _parse_row_spec(row_spec: str) -> list[int]:
 
 
 def render(backend_email: str, backend_password: str, env: str) -> None:
-    step("3", "批次建單優化")
-    info_panel("操作方式", [
-        "輸入工作表名稱及列號即可批次執行，不需先載入或逐筆勾選。",
-        "列號支援單列、逗號及區間，例如：241、241,242、241-245、241,243-245。",
-        "系統會依地址自動判斷地區；同一人、同一地址、相同人數與時數會集中批次送單。",
-        "不同日期、時段、週末計價或車馬費不拆批；同日期與同時段重複幾次，就會分開送幾次。",
-        "批次後逐列回查，只有取得實際新訂單編號才視為成功。",
-        "只處理訂單編號空白且必要資料完整的列；已有訂單編號的列不會重複建單。",
-    ])
+    """批次建單優化畫面（移植 orders-system batch_ui_consistency.render_optimized_like_batch）。
 
-    if not backend_email.strip() or not backend_password.strip():
-        st.warning("請先輸入上方後台帳號與密碼。")
-        return
+    畫面與原「批次建單」一致；執行改走 shared.hybrid_batch_runner.run_process_web_hybrid：
+    依電話＋地址分組，2 筆以上同組先批次、每組完成即回填，單筆組再逐筆；日曆 lazy init。
+    """
+    from shared.batch_ui_consistency import region_credentials, resolve_target_rows
+    from shared.hybrid_batch_runner import run_process_web_hybrid
 
-    st.caption(f"固定資料來源：{STORED_VALUE_SHEET_TITLE}｜Sheet ID：{STORED_VALUE_SHEET_ID}")
-
-    c1, c2 = st.columns([2, 1])
+    step("4", "執行設定")
+    c1, c2, c3 = st.columns(3)
+    regions = list(ACCOUNTS.keys()) or ["台北"]
+    default_index = regions.index("台北") if "台北" in regions else 0
     with c1:
-        sheet_name = st.text_input(
-            "工作表名稱",
-            value=st.session_state.get("batch_opt_sheet_name", ""),
-            placeholder="例如：台北202609、台中202609",
-            key="batch_opt_sheet_name",
-        )
+        region = st.selectbox("執行區域", regions, index=default_index, key="batch_opt_region")
     with c2:
-        row_spec = st.text_input(
-            "列號",
-            placeholder="例如：241,242 或 241-245",
-            key="batch_opt_row_spec",
-        )
+        sheet_name = st.text_input("工作表名稱", placeholder="例：台北202610", key="batch_opt_sheet_name").strip()
+    with c3:
+        row_spec = st.text_input("執行列號", placeholder="例：2,3,5-7", key="batch_opt_row_spec").strip()
+    st.markdown('<div class="hint-box">💡 列號支援：單列 <code>2</code>、逗號分隔 <code>2,3,5</code>、區間 <code>2,3,5-7</code>。範圍內不符合條件的列會略過，不會中止整批。</div>', unsafe_allow_html=True)
+    st.markdown("<hr>", unsafe_allow_html=True)
 
+    step("3", "執行項目")
     default_actions = ["建單", "寄確認信", "改 Google 日曆"] if env == "prod" else ["建單"]
     selected_actions = st.multiselect(
-        "執行項目",
-        ["建單", "寄確認信", "改 Google 日曆"],
-        default=default_actions,
-        key="batch_opt_actions",
+        "執行項目", ["建單", "寄確認信", "改 Google 日曆"],
+        default=default_actions, key="batch_opt_actions_same_ui", label_visibility="collapsed",
     )
+    st.markdown('<div class="hint-box">建單與回填優先；只有勾選改日曆且該筆已有訂單編號後，才初始化 Google Calendar。</div>', unsafe_allow_html=True)
+    allow_auto_lemon = st.checkbox("查無班表時自動補檸檬人（不動其他客人已配班專員）", value=False, key="batch_opt_allow_auto_lemon")
+    st.caption("指定範圍及自動篩選可包含失敗列；調整後可直接重試，不必清空 N 欄結果。")
+    auto_no_slot = st.checkbox("自動篩選：狀態未安排＋訂單編號空白＋無班表", value=False, key="batch_opt_auto_no_slot")
+    auto_missing_o = st.checkbox("自動篩選：狀態未安排＋訂單編號空白＋O欄找不到訂單編號", value=False, key="batch_opt_auto_missing_o")
 
-    try:
-        requested_rows = _parse_row_spec(row_spec) if row_spec.strip() else []
-    except ValueError as exc:
-        requested_rows = []
-        st.error(str(exc))
-
-    if requested_rows:
-        st.info(
-            f"預計處理 {len(requested_rows)} 列："
-            + "、".join(str(a) if a == b else f"{a}-{b}" for a, b in _contiguous_ranges(requested_rows))
-        )
-
-    confirm = st.checkbox(
-        f"我確認要在{'正式機 prod' if env == 'prod' else '測試機 dev'}執行以上列號",
-        key="batch_opt_confirm",
-    )
-    run_clicked = st.button(
-        "確認批次建立指定列",
-        type="primary",
-        width="stretch",
-        disabled=not confirm or not requested_rows or not sheet_name.strip() or not selected_actions,
-        key="batch_opt_execute",
-    )
-
-    log_box = st.empty()
+    run_clicked = st.button("🚀  開始執行", use_container_width=True, key="batch_opt_same_ui_run")
+    with st.expander("📄  執行過程", expanded=True):
+        log_box = st.empty()
+        if not run_clicked:
+            log_box.text("尚未執行")
     if not run_clicked:
-        summary = st.session_state.get("batch_opt_summary") or {}
-        if summary:
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("指定", summary.get("selected", 0))
-            c2.metric("實際處理", summary.get("processed", 0))
-            c3.metric("成功", summary.get("success", 0))
-            c4.metric("失敗", summary.get("fail", 0))
-        results = st.session_state.get("batch_opt_results") or []
-        if results:
-            st.dataframe(pd.DataFrame(results), width="stretch", hide_index=True)
+        return
+    if not sheet_name:
+        st.error("請輸入工作表名稱。")
+        return
+    if not selected_actions:
+        st.error("請至少選擇一個執行項目。")
         return
 
     logs = []
-    run_status = st.status("已收到執行指令，正在讀取工作表…", expanded=True)
 
     def ui_log(msg):
         logs.append(_format_log(msg))
-        log_box.text("\n\n".join(logs[-120:]))
+        log_box.text("\n\n".join(logs[-160:]))
 
+    target_rows = []
     try:
-        run_status.write(f"讀取工作表分頁：{sheet_name.strip()}")
-        candidates = _load_candidates(sheet_name.strip())
-        run_status.write("工作表讀取完成，正在檢查指定列號與地址地區…")
-        candidate_map = {int(row["__sheet_row__"]): row for _, row in candidates.iterrows()}
-        invalid_rows = [row for row in requested_rows if row not in candidate_map]
-        if invalid_rows:
-            raise ValueError(
-                "以下列號不存在、必要資料不完整，或已有訂單編號："
-                + "、".join(map(str, invalid_rows))
-            )
-
-        rows_by_region = {}
-        for row_no in requested_rows:
-            address = _text(candidate_map[row_no].get("地址"))
-            region = get_region_by_address(address, ACCOUNTS)
-            if not region:
-                raise ValueError(f"第 {row_no} 列無法依地址判斷地區：{address}")
-            rows_by_region.setdefault(region, []).append(row_no)
-
-        jobs = [(region, sorted(row_numbers)) for region, row_numbers in rows_by_region.items()]
-        grouped_rows = {}
-        for region, row_numbers in jobs:
-            for row_no in row_numbers:
-                grouped_rows.setdefault((region, build_group_key(candidate_map[row_no])), []).append(row_no)
-        run_status.write(f"群組完成：{len(requested_rows)} 筆資料分成 {len(grouped_rows)} 組。")
-        for group_no, ((region, _), row_numbers) in enumerate(grouped_rows.items(), 1):
-            first = candidate_map[row_numbers[0]]
-            run_status.write(
-                f"第 {group_no} 組｜{region}｜{_text(first.get('姓名'))}｜"
-                f"列號 {'、'.join(map(str, row_numbers))}"
-            )
-
-        total_success = 0
-        total_fail = 0
-        total_processed = 0
-        range_results = []
-
-        with st.spinner("依指定列號批次執行中..."):
-            for region, row_numbers in jobs:
-                start_row, end_row = min(row_numbers), max(row_numbers)
-                row_label = "、".join(map(str, row_numbers))
-                ui_log(f"▶ {region}：一次送入指定列 {row_label}，由核心依服務條件分組執行")
-                run_status.write(f"正在執行 {region}：第 {row_label} 列")
-                try:
-                    result = run_process_web(
-                        env_name=env,
-                        region=region,
-                        backend_email=backend_email.strip(),
-                        backend_password=backend_password.strip(),
-                        sheet_name=sheet_name.strip(),
-                        start_row=start_row,
-                        end_row=end_row,
-                        selected_actions=selected_actions,
-                        logger=ui_log,
-                        allow_auto_lemon_shift=False,
-                        selected_rows=row_numbers,
-                    )
-                    result = result if isinstance(result, dict) else {}
-                    success = int(result.get("success_count", 0) or 0)
-                    fail = int(result.get("fail_count", 0) or 0)
-                    processed = int(result.get("total_processed", 0) or 0)
-                    total_success += success
-                    total_fail += fail
-                    total_processed += processed
-                    range_results.append({
-                        "地區": region,
-                        "指定列": row_label,
-                        "處理筆數": processed,
-                        "成功": success,
-                        "失敗": fail,
-                    })
-                    log_execution(
-                        function_name="批次建單優化", status="失敗" if fail else "成功",
-                        area=region, date=sheet_name.strip(), target=row_label,
-                        message=f"處理{processed}筆，成功{success}筆，失敗{fail}筆",
-                    )
-                except Exception as exc:
-                    failed = len(row_numbers)
-                    total_fail += failed
-                    range_results.append({
-                        "地區": region,
-                        "指定列": row_label,
-                        "處理筆數": 0,
-                        "成功": 0,
-                        "失敗": failed,
-                        "錯誤": str(exc),
-                    })
-                    ui_log(f"❌ 執行失敗：{exc}")
-                    log_execution(
-                        function_name="批次建單優化", status="失敗", area=region,
-                        date=sheet_name.strip(), target=row_label,
-                        message=str(exc), traceback_text=traceback.format_exc(),
-                    )
-
-        st.session_state.batch_opt_results = range_results
-        st.session_state.batch_opt_summary = {
-            "selected": len(requested_rows),
-            "processed": total_processed,
-            "success": total_success,
-            "fail": total_fail,
-        }
-        if total_fail:
-            run_status.update(label=f"執行完成：成功 {total_success}，失敗 {total_fail}", state="error", expanded=True)
-            st.warning(f"執行完成：成功 {total_success}，失敗 {total_fail}。")
-        else:
-            run_status.update(label=f"執行完成：成功 {total_success} 筆", state="complete", expanded=False)
-            st.success(f"執行完成：成功 {total_success} 筆。")
-    except Exception as exc:
-        message = str(exc).strip() or f"{type(exc).__name__}: {exc!r}"
-        if isinstance(exc, KeyError):
-            message = f"找不到設定或欄位「{exc.args[0]}」（KeyError），請確認工作表名稱、欄位與地區設定。"
-        run_status.update(label="執行失敗", state="error", expanded=True)
-        run_status.write(message)
-        st.error(f"執行失敗：{message}")
-        log_execution(
-            function_name="批次建單優化", status="失敗",
-            date=sheet_name.strip(), target=row_spec.strip(),
-            message=message, traceback_text=traceback.format_exc(),
+        target_rows, invalid, region_mismatch = resolve_target_rows(
+            sys.modules[__name__], sheet_name, region, row_spec,
+            auto_no_slot=auto_no_slot, auto_missing_o=auto_missing_o,
         )
-        return
+        if invalid:
+            ui_log("⏭️ 略過不符合執行條件列：" + "、".join(map(str, invalid)))
+        if region_mismatch:
+            ui_log(f"⏭️ 略過非{region}列：" + "、".join(map(str, region_mismatch)))
+        if not target_rows:
+            raise ValueError("指定範圍內沒有符合執行條件的列。")
 
-    summary = st.session_state.get("batch_opt_summary") or {}
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("指定", summary.get("selected", 0))
-    c2.metric("實際處理", summary.get("processed", 0))
-    c3.metric("成功", summary.get("success", 0))
-    c4.metric("失敗", summary.get("fail", 0))
-    results = st.session_state.get("batch_opt_results") or []
-    if results:
-        st.dataframe(pd.DataFrame(results), width="stretch", hide_index=True)
+        email, password = region_credentials(region, backend_email, backend_password)
+        if not email or not password:
+            raise RuntimeError(f"{region} 尚未設定後台帳號密碼")
+        ui_log(f"實際執行列號：{'、'.join(map(str, target_rows))}")
+        ui_log("批次優化：2 筆以上同組先批次；單筆組改走逐筆。每個多筆組建單完成後一次 batch_update 回填該組結果，再處理日曆。")
+        result = run_process_web_hybrid(
+            env_name=env, region=region, backend_email=email, backend_password=password,
+            sheet_name=sheet_name, start_row=min(target_rows), end_row=max(target_rows),
+            selected_actions=selected_actions, logger=ui_log,
+            allow_auto_lemon_shift=allow_auto_lemon, selected_rows=target_rows,
+        ) or {}
+        success = int(result.get("success_count", 0) or 0)
+        fail = int(result.get("fail_count", 0) or 0)
+        st.success(f"執行完成：成功 {success}，失敗 {fail}，略過 {len(invalid) + len(region_mismatch)}。")
+        log_execution(
+            function_name="批次建單優化", status="失敗" if fail else "成功",
+            area=region, date=sheet_name, target="、".join(map(str, target_rows)),
+            message=f"處理{int(result.get('total_processed', 0) or 0)}筆，成功{success}筆，失敗{fail}筆",
+        )
+    except Exception as exc:
+        ui_log(f"❌ 執行失敗：{exc}")
+        st.error(f"執行失敗：{exc}")
+        log_execution(
+            function_name="批次建單優化", status="失敗", area=region,
+            date=sheet_name, target="、".join(map(str, target_rows)) or row_spec,
+            message=str(exc), traceback_text=traceback.format_exc(),
+        )

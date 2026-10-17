@@ -170,7 +170,12 @@ def set_customer_notice_clip_style(ws, headers=None, row_numbers=None):
 
 def update_sheet_rows(ws, row_results):
     headers = ensure_columns_in_sheet(ws)
-    header_index = {h: i + 1 for i, h in enumerate(headers)}
+    # 工作表有重複欄名時，一律回填第一個同名欄位（移植 orders-system
+    # selected_row_status_guard._update_sheet_rows_first_header）。
+    header_index = {}
+    for i, h in enumerate(headers, 1):
+        if h and h not in header_index:
+            header_index[h] = i
     updates = []
 
     for row_num, info in row_results.items():
@@ -190,9 +195,9 @@ def update_sheet_rows(ws, row_results):
             if key not in header_index:
                 continue
 
-            # I欄「狀態」只允許在成功完成流程時寫入「已安排」。
-            # 其他空白或非已安排值都不覆蓋原本的「未安排」。
-            if key == "狀態" and str(value).strip() != "已安排":
+            # I欄「狀態」只允許在成功完成流程時寫入「已安排」，或每月確認事件的
+            # 「待確認」；其他空白或非已安排值都不覆蓋原本的「未安排」。
+            if key == "狀態" and str(value).strip() not in ("已安排", "待確認"):
                 continue
 
             updates.append({

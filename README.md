@@ -32,3 +32,12 @@ VIP提前異動費目前保留每2人1小時200／300元，待確認是否改為
 ## Google Sheets 配額節流
 
 `shared/gsheet.py` 的 `build_gsheet_client()` 使用 `shared/sheets_quota.py` 的 `QuotaHTTPClient`：讀／寫各自至少間隔 2 秒，只有 429 配額錯誤會指數退避重試（最多 7 次），其他錯誤與後台建單一律不重試。
+
+## 批次建單三入口與雲端批次成單
+
+- **批次建單（Google Sheet）**：`function/order_creation.render_batch` → `shared/hybrid_batch_runner.run_process_web_direct_single`，逐列單筆成單、每列完成立即回填，不分組。
+- **批次建單優化**：`function/batch_booking_optimized.render` → `run_process_web_hybrid`，依正規化電話＋地址分組；2 筆以上同組先批次、整組一次回填，單筆組再逐筆；Google 日曆在訂單回填後才 lazy 初始化。範圍內不符合條件或非本區的列略過，不中止整批。
+- **批次建單優化＋雲端批次成單**：`function/cloud_batch_booking.py` 以 `workflow_dispatch` 觸發 `.github/workflows/optimized-cloud-batch-booking.yml`，雲端執行 `python -m shared.cloud_batch_booking --sheet <分頁> ...`；進度寫入 `_雲端成單進度` 工作表（每個 run／attempt 一列，不含客戶資料），頁面每 15 秒更新。雲端預設排除 N 欄「失敗」列，需勾選「我確認已調整，重試失敗列」才重試。啟動時把目前服務金額設定（`service_pricing.load_config()`）以 `pricing_json` 傳給 workflow（環境變數 `SERVICE_PRICING_JSON`）。
+- 共用防呆（`shared/batch_booking_safety.py`、`shared/selected_row_status_guard.py`、`shared/batch_recovery_meta.py`）：建單前先反查後台，已成立但未回填者依訂單編號精確補回（不重建、不重寄信）；同條件後台訂單多於空白列時整批擋下待人工確認；只建立 I 欄「未安排」＋M 欄空白的列；重複欄名一律以第一個欄位為準；「每月確認」事件不改日曆、I 欄寫「待確認」；勾選補檸檬人時只有「無班表」列才補班並重試。
+
+雲端批次需在 **jenny-smart/order-system** 的 GitHub Actions secrets 設定：`GOOGLE_SERVICE_ACCOUNT_JSON`、`TAIPEI_EMAIL`／`TAIPEI_PASSWORD`、`TAICHUNG_EMAIL`／`TAICHUNG_PASSWORD`、`TAOYUAN_EMAIL`／`TAOYUAN_PASSWORD`、`HSINCHU_EMAIL`／`HSINCHU_PASSWORD`、`KAOHSIUNG_EMAIL`／`KAOHSIUNG_PASSWORD`、`GOOGLE_MAPS_API_KEY`；Streamlit 端需設定 `ORDERS_GITHUB_TOKEN`（可對 order-system 執行 Actions workflow_dispatch／讀取 runs 與 logs）。workflow 以 `ref: main` 啟動，須合併到 main 後才可使用。

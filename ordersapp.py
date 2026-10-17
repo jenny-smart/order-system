@@ -1,9 +1,14 @@
 # ============================================================
 # 檔名：ordersapp.py
-# 版本：v8.79
+# 版本：v8.80
 # 模組：服務訂單系統主畫面／統一功能選單
 # 最後更新：2026-10-17
 #
+# v8.80
+# - 新增「批次建單優化＋雲端批次成單」（function/cloud_batch_booking.py；
+#   GitHub Actions 執行 python -m shared.cloud_batch_booking）。
+# - 原「批次建單」固定走單筆 runner；「批次建單優化」改走混合分組 runner，
+#   兩者共用斷點保護與中斷復原（shared/hybrid_batch_runner.py）。
 # v8.79
 # - 功能選單分類標題改依功能名稱放置（比照 orders-system），修正「取消訂單」
 #   被歸到 A 類的問題。
@@ -20,7 +25,7 @@
 # - VIP Calendar patch 改由單一 patch bundle 套用。
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.79"
+__version__ = "8.80"
 
 import importlib
 
@@ -90,6 +95,7 @@ from function import next_service_time_updater as _next_service_time_page
 from function import member_preferences as _member_preferences_page
 from function import member_phone_lookup as _member_phone_lookup_page
 from function import batch_booking_optimized as _batch_booking_optimized_page
+from function import cloud_batch_booking as _cloud_batch_booking_page
 from function import reserve_menu as _reserve_menu_page
 from function import lemon_staff_replacement as _lemon_staff_replacement_page
 from function.memo_router import render as _render_memo
@@ -165,6 +171,7 @@ FUNCTION_OPTIONS = [
     # ---------- A. 建單／成單流程 ----------
     ("批次建單：從 Google Sheet 逐列建立訂單、寄確認信、同步日曆。", "orders", "批次建單（Google Sheet）"),
     ("批次建單優化：儲值金訂單依同一人＋同一地址分組，可一次複選多個日期／時段建單。", "orders", "批次建單優化"),
+    ("批次建單優化＋雲端批次成單：沿用批次優化核心，由雲端背景持續成單至完成。", "orders", "批次建單優化＋雲端批次成單"),
     ("檸檬保留單建單：依日期區間、時段與保留率分析班表並批次成立保留單。", "orders", "檸檬保留單建單"),
     ("建立舊客訂單：電話查會員、帶入歷史資料建單；需求搜尋整合在此流程內。", "orders", "建立舊客訂單"),
     ("建立新客訂單：貼上制式文字拆成欄位，供客服修改後建立訂單。", "orders", "建立新客訂單"),
@@ -257,6 +264,10 @@ if _system_key == "memo":
 
 if mode == "批次建單優化":
     _batch_booking_optimized_page.render(backend_email, backend_password, env)
+    st.stop()
+
+if mode == "批次建單優化＋雲端批次成單":
+    _cloud_batch_booking_page.render(env)
     st.stop()
 
 if mode == "檸檬保留單建單":

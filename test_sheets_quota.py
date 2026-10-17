@@ -1,11 +1,12 @@
 # 移植自 orders-system test_sheets_quota.py（fbf485d）。
-# 雲端批次（cloud_batch_booking／cloud_booking_progress）尚未移植到 order-system，
-# 對應的兩個測試（部分中止保留結果、進度寫入節流）待雲端批次移植時一併加入。
+# 雲端批次的兩個測試（部分中止保留結果、進度寫入節流）於第五批移植雲端批次時加入。
 from unittest.mock import MagicMock, patch
 import pytest
 from gspread.exceptions import APIError
 from gspread.http_client import HTTPClient
 import shared.sheets_quota as quota
+import shared.cloud_batch_booking as cloud
+from shared.cloud_booking_progress import Progress
 
 
 def api_error(code):
@@ -58,3 +59,29 @@ def test_gsheet_client_uses_quota_http_client():
          patch.object(gsheet.gspread, 'authorize') as authorize:
         gsheet.build_gsheet_client()
     assert authorize.call_args.kwargs['http_client'] is quota.QuotaHTTPClient
+
+
+def test_partial_abort_preserves_confirmed_results_and_stops_batch():
+    def fail_after_one(**kwargs):
+        kwargs['progress_callback'](1, 1, 0, '3')
+        raise api_error(429)
+    with patch.object(cloud, 'load_pending', return_value=[(2, '台北', ''), (3, '台北', '')]) as load, \
+         patch.object(cloud, 'ACCOUNTS', {'台北': {'email': 'test', 'password': 'test'}}), \
+         patch.object(cloud, 'run_process_web_hybrid', side_effect=fail_after_one), \
+         patch.object(cloud, 'Progress') as progress:
+        assert cloud.run('sheet', pause_seconds=0) == 2
+    assert load.call_count == 1
+    assert progress.return_value.publish.call_args.args == ('中止，未回報列待核對', 1, 1, 0, 1, 2)
+
+
+def test_progress_write_is_throttled_but_final_state_is_immediate():
+    progress = Progress('sheet')
+    progress.key = '123:1'
+    progress.sheet = MagicMock()
+    progress.row = 2
+    progress.last_published = 100
+    with patch('shared.cloud_booking_progress.time.monotonic', return_value=101):
+        progress.publish('成單中', 1, 1, 0, 1, 2)
+        progress.sheet.update.assert_not_called()
+        progress.publish('完成', 2, 2, 0, 0, 2)
+    progress.sheet.update.assert_called_once()
