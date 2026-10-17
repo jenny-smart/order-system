@@ -1,0 +1,75 @@
+# ============================================================
+# order-system → tool-system 自動同步（取代 orders-system 的同步）
+#
+# 根目錄 *.py、function/、shared/、memo_system/、config/ 同步到
+# tool-system 的 tools/orders_system/（env.py 與 tool-system 專用檔不動，
+# 見 scripts/sync_to_tool_system.sh）。
+#
+# 切換方式：
+# 1. 在 order-system 設定 secret TOOL_SYSTEM_PUSH_TOKEN（tool-system Contents 讀寫）
+# 2. 先手動執行一次（Actions → Sync order-system to tool-system → Run workflow）
+# 3. 確認 Tools App 正常後，設定 repository variable SYNC_TO_TOOL_SYSTEM=true
+#    啟用 push 自動同步，並停用 orders-system 的 Sync ordersapp to tool-system
+# ============================================================
+name: Sync order-system to tool-system
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "*.py"
+      - "function/**"
+      - "shared/**"
+      - "memo_system/**"
+      - "config/**"
+      - "requirements.txt"
+      - "packages.txt"
+      - "scripts/sync_to_tool_system.sh"
+      - ".github/workflows/sync-to-tool-system.yml"
+  workflow_dispatch: {}
+
+concurrency:
+  group: sync-to-tool-system
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.event_name == 'workflow_dispatch' || vars.SYNC_TO_TOOL_SYSTEM == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout order-system（來源）
+        uses: actions/checkout@v4
+        with:
+          path: order-system
+
+      - name: Checkout tool-system（目的地）
+        uses: actions/checkout@v4
+        with:
+          repository: jenny-smart/tool-system
+          token: ${{ secrets.TOOL_SYSTEM_PUSH_TOKEN }}
+          path: tool-system
+
+      - name: 同步程式
+        run: order-system/scripts/sync_to_tool_system.sh order-system tool-system
+
+      - name: 同步後台地址瀏覽器依賴
+        run: |
+          for deps in tool-system/requirements.txt tool-system/tools/orders_system/requirements.txt; do
+            touch "$deps"
+            grep -qxF 'playwright>=1.48,<2' "$deps" || printf '\nplaywright>=1.48,<2\n' >> "$deps"
+          done
+          touch tool-system/packages.txt
+          grep -qxF 'chromium' tool-system/packages.txt || printf '\nchromium\n' >> tool-system/packages.txt
+
+      - name: Commit 並 push 到 tool-system
+        run: |
+          cd tool-system
+          git add -A tools/orders_system requirements.txt packages.txt
+          if git diff --cached --quiet; then
+            echo "沒有變動"
+            exit 0
+          fi
+          git config user.name "order-system-sync-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git commit -m "🔄 自動同步 order-system → $(date -u +'%Y-%m-%d %H:%M UTC')"
+          git push
