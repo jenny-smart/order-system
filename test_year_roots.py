@@ -14,16 +14,17 @@ def test_compare_mode_keeps_configured(monkeypatch):
     assert year_roots.choose_file_id("內勤工作表單", "台北", "X") == "X"
 
 
-def test_routes_categories(monkeypatch):
-    calls = []
-    monkeypatch.setattr(year_roots, "choose_file_id",
-                        lambda cat, area, cid, file_index=0: calls.append((cat, area, file_index)) or cid)
+def test_routes_categories():
     from memo_system import atm
-    atm._year_root_id("ATM", "新竹", "C")
-    atm._year_root_id("ATM", "高雄", "D")
-    assert calls == [("名冊薪資", "新竹", 1), ("內勤工作表單", "高雄", 0)]
+    assert atm._atm_root_rule("新竹") == ("名冊薪資", 1)
+    assert atm._atm_root_rule("高雄") == ("內勤工作表單", 0)
     assert change_order._change_root_category("桃園") == "服務異動"
     assert change_order._change_root_category("台北") == "內勤工作表單"
+
+
+def test_half_width_parentheses_are_part_of_file_name():
+    assert year_roots._fill("{YYYY}桃園專員薪資(外場)", 2026) == "2026桃園專員薪資(外場)"
+    assert year_roots._fill("{YYYY}台北營業額總表（捷徑）", 2026) == "2026台北營業額總表"
 
 
 def test_locate_ignores_mode_and_reports(monkeypatch):

@@ -273,73 +273,40 @@ def _secret_text(key: str) -> str:
     return str(os.getenv(key, "") or "").strip()
 
 
-def _year_root_id(kind: str, region: str, spreadsheet_id: str) -> str:
-    """依主控表「年度根目錄設定」的模式切換年度檔；原設定／比對時回傳原本的 ID。"""
-    try:
-        from year_roots import choose_file_id
-    except Exception:
-        return spreadsheet_id
-    if kind == "ATM":
-        category, index = ("名冊薪資", 1) if region in ("桃園", "新竹") else ("內勤工作表單", 0)
-    else:
-        category, index = ("服務異動", 0) if region in ("桃園", "新竹") else ("內勤工作表單", 0)
-    return choose_file_id(category, region, spreadsheet_id, file_index=index)
+# 分頁依名稱找：「ATM」，沒有時用「富邦ATM」（桃園／新竹的支出明細檔）
+ATM_TAB_TITLES = ("ATM", "富邦ATM")
+
+
+def _atm_root_rule(region: str):
+    """桃園／新竹的 ATM 在「名冊薪資」第 2 個檔（支出明細），其餘地區在「內勤工作表單」。"""
+    return ("名冊薪資", 1) if region in ("桃園", "新竹") else ("內勤工作表單", 0)
 
 
 def _atm_sheet_config(region: str) -> Dict:
+    """ATM 一律依年度根目錄找當年度檔（不讀 secrets 的試算表 ID／GID）。"""
     if region not in REGION_SECRET_PREFIX:
         raise ValueError(f"未知地區「{region}」，目前支援：{list(REGION_SECRET_PREFIX.keys())}")
-    prefix = REGION_SECRET_PREFIX[region]
-    spreadsheet_id = _secret_text(f"ATM_{prefix}_SPREADSHEET_ID")
-    gid_text = _secret_text(f"ATM_{prefix}_GID")
-    worksheet_title = _secret_text(f"ATM_{prefix}_WORKSHEET_TITLE") or ATM_WORKSHEET_TITLE
-    if not spreadsheet_id:  # 部署端設定（例如 tool-system）
-        from . import host
-        fallback = host.lookup_region_sheet("ATM", region) or {}
-        spreadsheet_id = str(fallback.get("spreadsheet_id") or "").strip()
-        gid_text = str(fallback.get("gid") or gid_text or "").strip()
-        worksheet_title = fallback.get("worksheet_title") or worksheet_title
-    if not spreadsheet_id:
-        try:
-            from . import env as local_env
-            spreadsheet_id = str(
-                getattr(local_env, "ATM_SHEET_IDS", {}).get(region, "")
-            ).strip()
-            worksheet_title = str(
-                getattr(local_env, "ATM_WORKSHEET_TITLE", worksheet_title)
-            ).strip() or worksheet_title
-        except Exception:
-            pass
-    try:
-        gid = int(gid_text) if gid_text else None
-    except ValueError as exc:
-        raise ValueError(f"Secrets 的「{region}」ATM GID 必須是整數") from exc
-    # 年度根目錄「根目錄」模式：沒有原設定 ID 也能直接用根目錄找到的年度檔
-    resolved = _year_root_id("ATM", region, spreadsheet_id)
-    if not resolved:
-        raise ValueError(f"找不到「{region}」ATM 試算表設定，年度根目錄也找不到")
-    if resolved != spreadsheet_id:
-        gid = None  # 換到別的年度檔時 GID 不同，改用分頁名稱
-    spreadsheet_id = resolved
-    return {"spreadsheet_id": spreadsheet_id, "gid": gid, "worksheet_title": worksheet_title}
+    from year_roots import root_file_id
+
+    category, index = _atm_root_rule(region)
+    spreadsheet_id = root_file_id(category, region, file_index=index)
+    return {"spreadsheet_id": spreadsheet_id, "gid": None, "worksheet_title": ATM_WORKSHEET_TITLE}
+
+
+def find_atm_tab(spreadsheet, region: str):
+    """依名稱找 ATM 分頁；都找不到就報錯（不會改用第一個分頁）。"""
+    by_title = {ws.title: ws for ws in spreadsheet.worksheets()}
+    for title in ATM_TAB_TITLES:
+        if title in by_title:
+            return by_title[title]
+    raise ValueError(
+        f"「{region}」ATM 試算表「{spreadsheet.title}」找不到「{'」或「'.join(ATM_TAB_TITLES)}」分頁，請確認分頁名稱"
+    )
 
 
 def get_atm_worksheet(region: str):
     config = _atm_sheet_config(region)
-    sh = get_atm_spreadsheet(config["spreadsheet_id"])
-    # 檔案依年度根目錄設定找到後，分頁一律先依名稱找（預設「ATM」）；名稱找不到才用 GID
-    try:
-        return sh.worksheet(config["worksheet_title"])
-    except gspread.exceptions.WorksheetNotFound:
-        if config["gid"] is None:
-            raise
-    try:
-        worksheet = sh.get_worksheet_by_id(config["gid"])
-    except gspread.exceptions.WorksheetNotFound:
-        worksheet = None
-    if worksheet is None:
-        raise ValueError(f"找不到「{region}」ATM 分頁「{config['worksheet_title']}」（gid={config['gid']}）")
-    return worksheet
+    return find_atm_tab(get_atm_spreadsheet(config["spreadsheet_id"]), region)
 
 
 # -----------------------------------------------------------------------------
