@@ -15,7 +15,14 @@ import streamlit as st
 
 from accounts import ACCOUNTS
 from function.ui_common import step, info_panel
-from orders import build_group_key, get_region_by_address, load_worksheet, run_process_web
+from orders import (
+    build_group_key,
+    get_region_by_address,
+    load_worksheet,
+    normalize_addr_for_match,
+    normalize_phone,
+    run_process_web,
+)
 from shared.execution_log_service import log_execution
 
 STORED_VALUE_SHEET_ID = "1de41gNvBZCGdfy0qNouRNEaQD7R019VAvz2cfq88ZrE"
@@ -80,8 +87,8 @@ def _load_candidates(sheet_name: str) -> pd.DataFrame:
     for c in REQUIRED_COLUMNS:
         work[c] = work[c].map(_text)
 
-    # 優化版只處理尚未有訂單編號的列；既有訂單完全不碰。
-    work = work[work["訂單編號"].eq("")]
+    # 建單候選必須同時符合 I 欄未安排、M 欄訂單編號空白。
+    work = work[work["狀態"].eq("未安排") & work["訂單編號"].eq("")]
     work = work[
         work["姓名"].ne("")
         & work["電話"].ne("")
@@ -92,15 +99,19 @@ def _load_candidates(sheet_name: str) -> pd.DataFrame:
     ]
     work["日期顯示"] = work["日期"].map(_date_text)
     work["時段顯示"] = work.apply(lambda r: f"{_time_text(r['開始時間'])}-{_time_text(r['結束時間'])}", axis=1)
-    work["群組鍵"] = work.apply(lambda r: (_text(r["姓名"]), _text(r["電話"]), _text(r["地址"])), axis=1)
+    work["群組鍵"] = work.apply(
+        lambda r: (normalize_phone(r["電話"]), normalize_addr_for_match(r["地址"])), axis=1
+    )
     return work
 
 
 def _build_groups(df: pd.DataFrame):
     groups = []
     for key, g in df.groupby("群組鍵", sort=False):
-        name, phone, address = key
         g = g.sort_values(["日期顯示", "開始時間", "__sheet_row__"])
+        name = _text(g.iloc[0].get("姓名"))
+        phone = _text(g.iloc[0].get("電話"))
+        address = _text(g.iloc[0].get("地址"))
         dates = [x for x in g["日期顯示"].tolist() if x]
         groups.append({
             "key": key,

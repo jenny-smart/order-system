@@ -35,7 +35,13 @@ class CalculationContractTest(unittest.TestCase):
                  patch.object(q, '_query_booking_slot_with_lemon_retry', side_effect=RuntimeError('stop before write')) as query:
                 with self.assertRaisesRegex(RuntimeError, 'stop before write'):
                     q.quick_create_order('dev', payway, '',
-                        {'session': object(), 'phone': '', 'member_payload': {'member': {'member_id': '1'}}},
+                        {'session': object(), 'phone': '', 'member_payload': {'member': {
+                            'member_id': '1',
+                            'memberAddressList': [{
+                                'id': '7', 'address': '測試地址',
+                                'areaId': '25', 'companyId': '1',
+                            }],
+                        }}},
                         '測試地址', '1', '2026-09-26', '08:30-12:30', '4', person='2')
                 data = query.call_args.args[3]
                 self.assertEqual((data['hour'], data['person'], data['period_s']), ('4', '2', '08:30-12:30'))

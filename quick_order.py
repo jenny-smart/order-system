@@ -1,9 +1,26 @@
 # ============================================================
 # 檔名：quick_order.py
-# 版本：v8.62
-# 最後更新：2026-08-12
+# 版本：v8.66
+# 最後更新：2026-10-16
 #
 # Change Log
+# v8.66
+# - 修正新客、建了會員但沒成單的客人、舊客新地址全部無法成單
+#   （後台班表回覆：[]）：v8.65 起地址流程完全不查服務區域，會員地址
+#   清單沒有該地址時 area_id／company_id／lat／lng 都是空的，後台
+#   get_section 因此回傳空班表。
+# - 改為比照後台手動成單：會員既有地址有服務區域就直接沿用；沒有時
+#   先用座標＋查詢地址（check_contain）補區域，查不到再用後台原生
+#   「查詢地址」按鈕補，送單時後台會以新地址建立。
+# - 仍查不到服務區域時直接停止並列出原因，不套用預設區域。
+# v8.65
+# - 成單與訂單轉換增加「已被其他重疊訂單占用」人力保護：
+#   不再直接信任 schedule/edit 或 get_section 列出的候選人員，
+#   必須同時出現在班表灰底「未配班」名單，並通過同日重疊訂單核對。
+# - 訂單轉換、混合配班與共用建單核心在寫入前會再次查核；
+#   後台登入失效、占用查詢失敗或找不到目標訂單時一律停止，
+#   不送出建單／換班 POST。
+# （v8.63／v8.64 為 LINE 通知產生器變更，不在本次移植範圍）
 # v8.62
 # - 修正合併多個不同服務日期的儲值金／VIP 訂單 LINE 通知：combined_period
 #   已包含每筆完整日期，訊息範本不再額外加上第一筆日期，避免第一行日期重複。
@@ -398,7 +415,7 @@
 # v7.3 - PERIOD_DISPLAY_INFO / _format_period_display
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.39"
+__version__ = "8.66"
 
 import time
 import re
@@ -581,6 +598,229 @@ def _fetch_purchase_block_for_order_no(session, order_no):
         if block.get("order_no") == target:
             return block
     raise Exception(f"查無訂單：{target}")
+
+
+def _staff_name_key(value):
+    """把後台班表上的人員顯示文字正規化成可比對的姓名。"""
+    text = re.sub(r"\s+", "", str(value or ""))
+    lemon = re.search(r"檸檬人\d+", text)
+    if lemon:
+        return lemon.group(0)
+    text = re.sub(r"\(\d+\).*$", "", text)
+    return text.strip()
+
+
+def _period_bounds_minutes(value):
+    match = re.search(r"(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})", str(value or ""))
+    if not match:
+        return None
+    start = int(match.group(1)) * 60 + int(match.group(2))
+    end = int(match.group(3)) * 60 + int(match.group(4))
+    return (start, end) if end > start else None
+
+
+def _periods_overlap(left, right):
+    left_bounds = _period_bounds_minutes(left)
+    right_bounds = _period_bounds_minutes(right)
+    if not left_bounds or not right_bounds:
+        return False
+    return max(left_bounds[0], right_bounds[0]) < min(left_bounds[1], right_bounds[1])
+
+
+def _period_from_schedule_text(value):
+    compact = re.sub(r"\s+", "", str(value or ""))
+    for period in sorted(PERIOD_TO_SHIFT_CODE, key=len, reverse=True):
+        if period in compact:
+            return period
+    return ""
+
+
+def _unassigned_label_staff_name(value):
+    """解析班表灰底「未配班」區塊內的人員標籤。
+
+    實際文字會帶班別/時數前綴與評分後綴，例如
+    ``6檸檬人40`` -> ``檸檬人4``、``48汪才開3`` -> ``汪才開``。
+    """
+    text = re.sub(r"\s+", "", str(value or "")).strip()
+    lemon = re.match(r"^\d*檸檬人(?P<number>\d+|[甲乙丙丁戊己])(?P<rating>\d)$", text)
+    if lemon:
+        return f"檸檬人{lemon.group('number')}"
+    normal = re.match(
+        r"^\d+[×xX♀♂]*"
+        r"(?P<name>[\u3400-\u9fff·‧]{2,})"
+        r"\d*[VDNX]?$",
+        text,
+    )
+    return normal.group("name") if normal else ""
+
+
+def _parse_schedule_unassigned_staff(html_text, service_date, period_s):
+    """從 /schedule 取出指定日期、完整時段的灰底未配班名單。"""
+    soup = BeautifulSoup(html_text or "", "html.parser")
+    target_period = str(period_s or "").replace(" ", "")
+    target_mmdd = str(service_date or "")[5:]
+    for table in soup.find_all("table"):
+        rows = table.find_all("tr")
+        if not rows:
+            continue
+        headers = rows[0].find_all(["th", "td"], recursive=False)
+        periods = [_period_from_schedule_text(cell.get_text(" ", strip=True)) for cell in headers]
+        if target_period not in periods:
+            continue
+        for row in rows[1:]:
+            cells = row.find_all(["th", "td"], recursive=False)
+            if not cells:
+                continue
+            row_text = row.get_text(" ", strip=True)
+            if target_mmdd and target_mmdd not in row_text and str(service_date) not in row_text:
+                continue
+            for index, cell in enumerate(cells):
+                if index >= len(periods) or periods[index] != target_period:
+                    continue
+                grey_blocks = cell.select('p[style*="616161"], div[style*="616161"]')
+                for block in grey_blocks:
+                    block_text = block.get_text(" ", strip=True)
+                    count_match = re.search(r"未配班\s*(\d+)\s*人", block_text)
+                    if not count_match:
+                        continue
+                    expected_count = int(count_match.group(1))
+                    names = set()
+                    leaf_spans = [
+                        span for span in block.find_all("span")
+                        if not span.find("span") and not span.find_parent("a")
+                    ]
+                    for span in leaf_spans:
+                        name = _unassigned_label_staff_name(span.get_text(" ", strip=True))
+                        if name:
+                            names.add(_staff_name_key(name))
+                    return {"count": expected_count, "names": names, "raw_text": block_text}
+    return None
+
+
+def _get_unassigned_staff_for_period(session, base_url, service_date, period_s):
+    """即時讀取班表灰底未配班名單；不完整時失敗關閉。"""
+    resp = session.get(
+        f"{base_url}/schedule",
+        params={"date": str(service_date), "staffId": ""},
+        headers=HEADERS,
+        allow_redirects=True,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(f"未配班名單查詢失敗（HTTP {resp.status_code}）")
+    html = resp.text or ""
+    if "login" in str(getattr(resp, "url", "")).lower() or re.search(
+        r'type=["\']password["\']', html, re.I,
+    ):
+        raise RuntimeError("後台登入已失效，無法讀取未配班名單")
+    parsed = _parse_schedule_unassigned_staff(html, service_date, period_s)
+    if parsed is None:
+        raise RuntimeError(f"班表找不到 {service_date} {period_s} 的未配班區塊")
+    expected_count = int(parsed.get("count") or 0)
+    names = set(parsed.get("names") or set())
+    if len(names) != expected_count:
+        raise RuntimeError(
+            f"未配班名單不完整：畫面顯示 {expected_count} 人，但只解析到 {len(names)} 人"
+        )
+    return parsed
+
+
+def _get_occupied_staff_for_period(
+    session, base_url, service_date, period_s, exclude_purchase_id=None,
+):
+    """找出同日、服務時間重疊且已綁在其他訂單的人員。
+
+    /schedule/edit 會把別張訂單的 shiftId 列成候選，因此不能只相信
+    修改頁。查詢無法驗證時拋錯，由呼叫端停止任何寫入。
+    """
+    occupied = set()
+    exclude_purchase_id = str(exclude_purchase_id or "").strip()
+    saw_excluded_purchase = False
+    for page in range(1, 81):
+        params = dict(PURCHASE_FILTER_PARAMS_TEMPLATE)
+        params.update({
+            "clean_date_s": str(service_date),
+            "clean_date_e": str(service_date),
+            "page": str(page),
+        })
+        resp = session.get(
+            f"{base_url}/purchase", params=params,
+            headers=HEADERS, allow_redirects=True,
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"占用人力查詢失敗（HTTP {resp.status_code}）")
+        html = resp.text or ""
+        if "login" in str(getattr(resp, "url", "")).lower() or (
+            re.search(r'type=["\']password["\']', html, re.I)
+            and not re.search(r'/schedule/edit\?', html, re.I)
+        ):
+            raise RuntimeError("後台登入已失效，無法確認人力是否未安排")
+        soup = BeautifulSoup(html, "html.parser")
+        rows = []
+        order_row_count = 0
+        for tr in soup.find_all("tr"):
+            if re.search(r"\b(?:LC|TT)\d+\b", tr.get_text(" ", strip=True)):
+                order_row_count += 1
+            shift_links = tr.find_all("a", href=re.compile(r"/schedule/edit\?", re.I))
+            if shift_links:
+                rows.append((tr, shift_links))
+        for tr, shift_links in rows:
+            row_text = tr.get_text(" ", strip=True)
+            row_date, row_period = _parse_service_date_time_loose(row_text)
+            if row_date != str(service_date) or not _periods_overlap(row_period, period_s):
+                continue
+            purchase_ids = set()
+            for link in shift_links:
+                match = re.search(r"(?:[?&])purchase_id=(\d+)", str(link.get("href", "")))
+                if match:
+                    purchase_ids.add(match.group(1))
+            if exclude_purchase_id and exclude_purchase_id in purchase_ids:
+                saw_excluded_purchase = True
+                continue
+            for link in shift_links:
+                name = _staff_name_key(link.get_text(" ", strip=True))
+                if name:
+                    occupied.add(name)
+        if order_row_count < 20:
+            break
+    if exclude_purchase_id and not saw_excluded_purchase:
+        raise RuntimeError(
+            f"占用人力查詢中找不到目標訂單 ID {exclude_purchase_id}，無法安全換班"
+        )
+    return occupied
+
+
+def _assert_booking_staff_unassigned(
+    session, base_url, service_date, period_s, cleaners, needed_people=None,
+):
+    """成單前防線：只接受班表灰底「未配班」人力。"""
+    unassigned = _get_unassigned_staff_for_period(
+        session, base_url, service_date, period_s,
+    )
+    allowed = set(unassigned.get("names") or set())
+    needed = int(needed_people or len(cleaners or []) or 0)
+    if int(unassigned.get("count") or 0) < needed:
+        raise Exception(
+            f"已停止成立訂單：{service_date} {period_s} "
+            f"未配班只剩 {unassigned.get('count', 0)} 人，需要 {needed} 人。"
+        )
+    selected = {_staff_name_key(name) for name in (cleaners or []) if _staff_name_key(name)}
+    outside_allowlist = sorted(selected - allowed)
+    if outside_allowlist:
+        raise Exception(
+            "已停止成立訂單：後台班表 API 回傳的人員不在灰底「未配班」名單（"
+            + "、".join(outside_allowlist)
+            + "）。"
+        )
+
+    # 保留訂單列表重疊檢查作為第二道防線。
+    occupied = _get_occupied_staff_for_period(session, base_url, service_date, period_s)
+    conflicts = sorted(selected & occupied)
+    if conflicts:
+        raise Exception(
+            "已停止成立訂單：後台班表回傳的人力已被其他重疊訂單安排（"
+            + "、".join(conflicts)
+            + "）。系統不會動用其他訂單的人力，請改用未安排人力。"
+        )
 
 
 def _check_order_no_duplicate(session, order_no):
@@ -856,6 +1096,11 @@ def quick_create_order(
         session, base_url, payway, base_data, token, slot, allow_auto_lemon_shift,
     )
     cleaners = extract_cleaners_from_section_response(raw_section, slot)
+    # 後台 get_section 偶爾會回傳已綁在其他訂單的人員。送單前
+    # 另查同日重疊訂單；有任何占用衝突就不 POST 建單。
+    _assert_booking_staff_unassigned(
+        session, base_url, date_s, period_s, cleaners, needed_people=person,
+    )
     # v2026.07.10：修正重大 bug——前面 check_contain 若失敗，可能借用過
     # /booking/single 頁面的 token（見上面 v8.5 的備援邏輯），並把 token
     # 變數永久換成借來的那個。如果送出建單時仍沿用這個借來的 token，會導致
@@ -870,6 +1115,10 @@ def quick_create_order(
         token = _fresh_token
     staff_display = format_staff_from_cleaners(cleaners, people=person)
     before_order_nos = list_order_numbers_for_phone(session, phone, name=member_name)
+    # 貼近真正 POST 再查一次，縮小第一次檢查後被別筆訂單先占用的競態窗口。
+    _assert_booking_staff_unassigned(
+        session, base_url, date_s, period_s, cleaners, needed_people=person,
+    )
     booking_resp = session.post(booking_url, data=_build_booking_submit_data(base_data, token, payway, slot), headers=HEADERS, allow_redirects=True)
     display_period = display_period_text(period_s.split("-")[0], period_s.split("-")[1])
     after_order_nos = set()
@@ -1327,13 +1576,27 @@ def assign_lemon_cleaners_to_order(session, base_url, order_no_a, service_date, 
         m = re.search(r"檸檬人\s*(\d+)", str(name or ""))
         return int(m.group(1)) if m else 9999
 
-    def _pick_lemon(slot_map, used):
+    def _pick_lemon(slot_map, used, occupied, unassigned):
         candidates = [
             (k.strip(), v) for k, v in slot_map.items()
-            if "檸檬人" in k and k.strip() not in used
+            if "檸檬人" in k
+            and _staff_name_key(k) not in used
+            and _staff_name_key(k) not in occupied
+            and _staff_name_key(k) in unassigned
         ]
         candidates.sort(key=lambda x: _lemon_name_no(x[0]))
         return candidates[0] if candidates else None
+
+    try:
+        unassigned_names = set(_get_unassigned_staff_for_period(
+            session, base_url, service_date, period_s,
+        ).get("names") or set())
+        occupied_names = _get_occupied_staff_for_period(
+            session, base_url, service_date, period_s,
+            exclude_purchase_id=purchase_id,
+        )
+    except Exception as exc:
+        return {"success": False, "message": f"無法確認未安排人力，已停止換班：{exc}"}
 
     csrf, origin_ids, slots = _get_schedule_edit_info(session, base_url, service_date, purchase_id)
     if not slots:
@@ -1350,11 +1613,11 @@ def assign_lemon_cleaners_to_order(session, base_url, order_no_a, service_date, 
     for i, slot_map in enumerate(slots):
         if i >= n:
             break
-        entry = _pick_lemon(slot_map, used_names)
+        entry = _pick_lemon(slot_map, used_names, occupied_names, unassigned_names)
         if entry:
             shift_choices.append(entry[1])
             assigned_names.append(entry[0])
-            used_names.add(entry[0])
+            used_names.add(_staff_name_key(entry[0]))
         else:
             # 這個槽位排班頁沒有檸檬人，需要先去勾班
             shift_choices.append(None)
@@ -1383,16 +1646,26 @@ def assign_lemon_cleaners_to_order(session, base_url, order_no_a, service_date, 
         csrf, origin_ids, slots = _get_schedule_edit_info(session, base_url, service_date, purchase_id)
         if not slots:
             return {"success": False, "message": "勾班後無法重取排班修改頁，請手動操作"}
+        try:
+            unassigned_names = set(_get_unassigned_staff_for_period(
+                session, base_url, service_date, period_s,
+            ).get("names") or set())
+            occupied_names = _get_occupied_staff_for_period(
+                session, base_url, service_date, period_s,
+                exclude_purchase_id=purchase_id,
+            )
+        except Exception as exc:
+            return {"success": False, "message": f"無法確認未安排人力，已停止換班：{exc}"}
         # 重新填入 None 的槽位
         for i, slot_map in enumerate(slots):
             if i >= n:
                 break
             if shift_choices[i] is None:
-                entry = _pick_lemon(slot_map, used_names)
+                entry = _pick_lemon(slot_map, used_names, occupied_names, unassigned_names)
                 if entry:
                     shift_choices[i] = entry[1]
                     assigned_names[i] = entry[0]
-                    used_names.add(entry[0])
+                    used_names.add(_staff_name_key(entry[0]))
                 else:
                     return {
                         "success": False,
@@ -1402,6 +1675,46 @@ def assign_lemon_cleaners_to_order(session, base_url, order_no_a, service_date, 
 
     # 過濾掉 None（避免 None 混入名單；同時不覆蓋 n=person_count）
     assigned_names = [name for name in assigned_names if name]
+
+    # 寫入前重查，防止挑選後被另一筆訂單先占用。
+    try:
+        unassigned_before_post = set(_get_unassigned_staff_for_period(
+            session, base_url, service_date, period_s,
+        ).get("names") or set())
+        occupied_before_post = _get_occupied_staff_for_period(
+            session, base_url, service_date, period_s,
+            exclude_purchase_id=purchase_id,
+        )
+    except Exception as exc:
+        return {"success": False, "message": f"無法確認未安排人力，已停止換班：{exc}"}
+    conflicts = sorted({
+        _staff_name_key(name) for name in assigned_names
+        if _staff_name_key(name) in occupied_before_post
+    })
+    if conflicts:
+        return {
+            "success": False,
+            "assigned": [],
+            "message": (
+                "已停止換班：候選人力已被其他重疊訂單占用（"
+                + "、".join(conflicts)
+                + "），未動用其他訂單人力。"
+            ),
+        }
+    no_longer_unassigned = sorted({
+        _staff_name_key(name) for name in assigned_names
+        if _staff_name_key(name) not in unassigned_before_post
+    })
+    if no_longer_unassigned:
+        return {
+            "success": False,
+            "assigned": [],
+            "message": (
+                "已停止換班：候選人力已不在灰底「未配班」名單（"
+                + "、".join(no_longer_unassigned)
+                + "）。"
+            ),
+        }
 
     fields = [("_token", csrf), ("_method", "PUT")]
     for oid in origin_ids[:n]:
@@ -1435,6 +1748,16 @@ def _assign_mixed_cleaners_to_order(session, base_url, order_no, service_date, p
     if not purchase_id:
         return {"success": False, "message": f"無法取得訂單 {order_no} 的後台 ID"}
     n = int(person_count)
+    try:
+        unassigned_names = set(_get_unassigned_staff_for_period(
+            session, base_url, service_date, period_s,
+        ).get("names") or set())
+        occupied_names = _get_occupied_staff_for_period(
+            session, base_url, service_date, period_s,
+            exclude_purchase_id=purchase_id,
+        )
+    except Exception as exc:
+        return {"success": False, "message": f"無法確認未安排人力，已停止配班：{exc}"}
     if allow_auto_lemon_shift:
         pre_shift_result = ensure_lemon_cleaner_shifts(session=session, base_url=base_url, service_date=service_date, period_s=period_s, person_count=person_count)
     else:
@@ -1443,6 +1766,17 @@ def _assign_mixed_cleaners_to_order(session, base_url, order_no, service_date, p
     csrf, origin_ids, slots = _get_schedule_edit_info(session, base_url, service_date, purchase_id)
     if not slots:
         return {"success": False, "message": "無法取得排班修改頁，請手動操作"}
+    if allow_auto_lemon_shift:
+        try:
+            unassigned_names = set(_get_unassigned_staff_for_period(
+                session, base_url, service_date, period_s,
+            ).get("names") or set())
+            occupied_names = _get_occupied_staff_for_period(
+                session, base_url, service_date, period_s,
+                exclude_purchase_id=purchase_id,
+            )
+        except Exception as exc:
+            return {"success": False, "message": f"無法確認未安排人力，已停止配班：{exc}"}
     shift_choices = []
     assigned_names = []
     assigned_types = []
@@ -1458,13 +1792,25 @@ def _assign_mixed_cleaners_to_order(session, base_url, order_no, service_date, p
         chosen = None
         chosen_type = None
         # 優先：一般專員
-        normal_candidates = [(name_key.strip(), sid) for name_key, sid in slot_map.items() if "檸檬人" not in name_key and name_key.strip() not in used_names]
+        normal_candidates = [
+            (name_key.strip(), sid) for name_key, sid in slot_map.items()
+            if "檸檬人" not in name_key
+            and _staff_name_key(name_key) not in used_names
+            and _staff_name_key(name_key) not in occupied_names
+            and _staff_name_key(name_key) in unassigned_names
+        ]
         if normal_candidates:
             chosen = normal_candidates[0]
             chosen_type = "一般"
         # 備用：檸檬人
         if not chosen:
-            lemon_candidates = [(name_key.strip(), sid) for name_key, sid in slot_map.items() if "檸檬人" in name_key and name_key.strip() not in used_names]
+            lemon_candidates = [
+                (name_key.strip(), sid) for name_key, sid in slot_map.items()
+                if "檸檬人" in name_key
+                and _staff_name_key(name_key) not in used_names
+                and _staff_name_key(name_key) not in occupied_names
+                and _staff_name_key(name_key) in unassigned_names
+            ]
             preferred = [c for c in lemon_candidates if c[0] in preferred_lemon_names]
             others = [c for c in lemon_candidates if c[0] not in preferred_lemon_names]
             preferred.sort(key=lambda x: _lemon_no(x[0]))
@@ -1477,9 +1823,49 @@ def _assign_mixed_cleaners_to_order(session, base_url, order_no, service_date, p
             shift_choices.append(chosen[1])
             assigned_names.append(chosen[0])
             assigned_types.append(chosen_type)
-            used_names.add(chosen[0])
+            used_names.add(_staff_name_key(chosen[0]))
         else:
             return {"success": False, "message": f"槽位 {i+1} 找不到可用人員（一般專員或檸檬人），請手動操作", "assigned": assigned_names, "assigned_types": assigned_types}
+    try:
+        unassigned_before_post = set(_get_unassigned_staff_for_period(
+            session, base_url, service_date, period_s,
+        ).get("names") or set())
+        occupied_before_post = _get_occupied_staff_for_period(
+            session, base_url, service_date, period_s,
+            exclude_purchase_id=purchase_id,
+        )
+    except Exception as exc:
+        return {"success": False, "message": f"無法確認未安排人力，已停止配班：{exc}"}
+    conflicts = sorted({
+        _staff_name_key(name) for name in assigned_names
+        if _staff_name_key(name) in occupied_before_post
+    })
+    if conflicts:
+        return {
+            "success": False,
+            "assigned": [],
+            "assigned_types": [],
+            "message": (
+                "已停止配班：候選人力已被其他重疊訂單占用（"
+                + "、".join(conflicts)
+                + "），未動用其他訂單人力。"
+            ),
+        }
+    no_longer_unassigned = sorted({
+        _staff_name_key(name) for name in assigned_names
+        if _staff_name_key(name) not in unassigned_before_post
+    })
+    if no_longer_unassigned:
+        return {
+            "success": False,
+            "assigned": [],
+            "assigned_types": [],
+            "message": (
+                "已停止配班：候選人力已不在灰底「未配班」名單（"
+                + "、".join(no_longer_unassigned)
+                + "）。"
+            ),
+        }
     fields = [("_token", csrf), ("_method", "PUT")]
     for oid in origin_ids:
         fields.append(("originShiftId[]", oid))
@@ -3622,468 +4008,90 @@ def quick_create_new_customer_order(env_name, backend_email, backend_password, c
     })
     return _shared_result
 
-    # Step 3: 查或建地址，取 addressId / area_id / company_id / lat / lng
-    addr_list = member.get("memberAddressList", []) or []
-    address_norm = normalize_addr_for_match(address_for_lookup)
-    matched_addr = None
-    for a in addr_list:
-        if normalize_addr_for_match(a.get("address", "")) == address_norm:
-            matched_addr = a
-            break
 
-    if matched_addr:
-        # 確認後台存的地址和原始地址一致才帶 addressId
-        stored_addr = matched_addr.get("address", "")
-        if normalize_addr_for_match(stored_addr) == address_norm:
-            address_id = str(matched_addr.get("addressId") or matched_addr.get("id", ""))
-        else:
-            address_id = ""  # 地址不一致，不帶舊 addressId 避免帶入錯誤地址
-        area_id = str(matched_addr.get("areaId", ""))
-        country_id = str(matched_addr.get("countryId", ""))
-        lat = str(matched_addr.get("lat", ""))
-        lng = str(matched_addr.get("lng", ""))
-        purchase_info = matched_addr.get("purchase", {}) or {}
-        company_id = str(purchase_info.get("company_id", "1"))
-    else:
-        # 2026-07-08：不再用 geocode 猜地址/行政區；交由後台 check_contain 判斷。
-        # 若後台無法判斷 area_id，直接擋下，不使用任何大安區 fallback。
-        # 2026-07-08 補強：check_contain 若拿不到 lat/lng，後台可能用錯誤預設區域
-        # 回傳 area_id，造成成單後地址被加上「大安區」。所以這裡仍先 geocode 取座標，
-        # 但只把座標交給後台判斷，不用 geocode 結果自行猜行政區或改地址字串。
-        geo_lat, geo_lng = geocode_address(address_for_lookup)
-        check_resp = session.post(
-            f"{base_url}/ajax/check_contain",
-            data={
-                # v2026.07.06 修正：後台 /ajax/check_contain 實際要的參數名稱是
-                # camelCase（memberId／cleanTypeId），跟畫面手動點「查詢地區」時
-                # 送出的一致（後台原始頁面 JS：'memberId=' + ... + '&cleanTypeId=' + ...）。
-                # 這裡原本誤用成 snake_case（member_id／clean_type_id），後台完全
-                # 收不到正確的會員 ID 和服務類別，導致 check_contain 永遠查不到
-                # 正確區域——不管地址寫得多正確都一樣會失敗，或（改這個修正前）
-                # 靜默套用固定 fallback 值，導致每筆新地址都被誤標成同一個區域
-                # （例如大安區）。這才是「常常是大安區」現象的真正原因，不是後台
-                # 自己的地址正規化行為。
-                "_token": csrf, "memberId": member_id,
-                "address": address_for_lookup, "lat": str(geo_lat or ""), "lng": str(geo_lng or ""),
-                "cleanTypeId": clean_type_id,
-            },
-            headers={**HEADERS, "X-Requested-With": "XMLHttpRequest"},
-        )
-        try:
-            check_data = check_resp.json()
-        except Exception:
-            raise Exception(f"查詢地址區域失敗：{check_resp.text[:200]}")
-        area_info = (check_data.get("area") or {})
-        if not area_info.get("area_id"):
-            # v8.11：查無正確區域時直接擋下，不再默默套用可能錯誤的固定值，
-            # 避免地址被誤標成錯誤區域（例如一律變成大安區）。
-            raise Exception(
-                f"查詢地址區域失敗：地址「{address_for_lookup}」無法判斷所屬區域"
-                f"（check_contain 回傳無 area_id，地址是否正確或是否為服務涵蓋範圍？）"
-                f"，請確認地址格式或改用後台手動建單。"
-            )
-        address_parts = _complete_missing_district(address_parts, area_info, address_for_lookup, context="新客地址")
-        address_for_lookup = address_parts["full"]
-        address_for_submit = address_parts["detail"]
-        area_id = str(area_info.get("area_id") or "")
-        company_id = str(area_info.get("company_id") or "")
-        country_id = str(address_parts.get("country_id") or area_info.get("country_id") or "")
-        _validate_area_not_known_bad(address_for_lookup, area_info, context="新客地址")
-        if not company_id:
-            raise Exception(
-                f"查詢地址區域失敗：地址「{address_for_lookup}」無法判斷 company_id，"
-                "已停止成單，避免系統誤判區域。"
-            )
-        if not country_id:
-            raise Exception(
-                f"查詢地址區域失敗：地址「{address_for_lookup}」無法判斷縣市/區域下拉選單，"
-                "已停止成單，不會自動改成大安區。"
-            )
-        lat = str(geo_lat or "")
-        lng = str(geo_lng or "")
-        address_id = ""
+def _area_from_check_reply(reply):
+    """從後台「查詢地址」回覆取出服務區域；缺 area_id/company_id 視為查無。"""
+    if not isinstance(reply, dict) or reply.get("return_code") not in (None, "", "0000"):
+        return {}
+    area = reply.get("area") if isinstance(reply.get("area"), dict) else {}
+    if not str(area.get("area_id") or "").strip() or not str(area.get("company_id") or "").strip():
+        return {}
+    return area
 
-    # Step 4: 組 datePeriod（格式：2026-07-11_14:00-18:00）
-    date_period = f"{date_s}_{period_s}"
 
-    # 計算 price（已含稅，用固定公式：人時 × 600平日/700週末）
-    day_type = _day_type_from_date(date_s)
-    unit_price = 700 if day_type == "週末" else 600
-    ph = int(person) * int(float(hour))
-    price_with_tax = unit_price * ph
+def _lookup_backend_service_area(session, member_payload, address, token, clean_type_id):
+    """模擬後台按「查詢地址」：取得服務區域與座標。
 
-    # Step 4b: 查班表，若無人或人數不足，且客服有明確勾選「自動補檸檬人」才勾檸檬人班表；
-    # v2026.07.09：查完（含補勾檸檬人重查）後，人數還是不夠就直接擋單，不再靜默放行
-    # （之前 except 整段吞掉，就算查無班表/人數不足也照樣建單）。
-    # 與舊客 quick_create_order 使用相同的 /booking/single token。
-    # 這裡不能再呼叫 get_csrf_token：_configure_environment 的預設
-    # BOOKING_URL 是 stored_value_routine，會讓新客查班表與一般舊客走不同表單。
-    token_for_section = csrf
-    _base_data_check = {
-        "clean_type_id": clean_type_id,
-        "phone": phone, "name": name, "email": email, "tel": tel or phone,
-        "line": line, "fbName": "", "fb": "", "memoProcess": "", "memoFinance": "",
-        "addressId": address_id, "country_id": country_id, "address": address_for_submit,
-        "ping": ping, "serviceType": service_type,
-        "room": str(customer.get("room", "0")),
-        "bathroom": str(customer.get("bathroom", "0")),
-        "balcony": str(customer.get("balcony", "0")),
-        "livingroom": str(customer.get("livingroom", "0")),
-        "kitchen": str(customer.get("kitchen", "0")),
-        "window": str(customer.get("window", "")),
-        "shutter": str(customer.get("shutter", "")),
-        "clothes": str(customer.get("clothes", "0")),
-        "dyson": str(customer.get("dyson", "0")),
-        "refrigerator": str(customer.get("refrigerator", "0")),
-        "disinfection": str(customer.get("disinfection", "0")),
-        "go_abord": str(customer.get("go_abord", "0")),
-        "home_move": str(customer.get("home_move", "0")),
-        "storage": str(customer.get("storage", "0")),
-        "cabinet": str(customer.get("cabinet", "0")),
-        "quintuple": str(customer.get("quintuple", "0")),
-        "hour": str(int(float(hour))), "price": "", "price_vvip": "",
-        "person": person, "date_s": date_s, "period_s": period_s,
-        "period": "", "cycle": "1", "fare": "", "memo": memo, "notice": notice,
-        "discount_code": "", "payway": payway_code,
-        "invoice_type": invoice_type, "carrier_type_id": carrier_type_id,
-        "carrier_info": carrier_info, "company_title": company_title,
-        "company_no": company_no, "donate_code": "", "is_backend": is_backend,
-        "member_id": member_id,
-        "company_id": company_id, "area_id": area_id,
-        "lat": lat, "lng": lng,
-    }
-    if not str(country_id or "").strip():
-        raise Exception(
-            f"地址「{address_for_lookup}」缺少明確縣市/區域下拉選單，已停止成單，"
-            "不會自動改成大安區。"
-        )
-    if not str(area_id or "").strip() or not str(company_id or "").strip():
-        raise Exception(
-            f"地址「{address_for_lookup}」缺少明確 area_id/company_id，已停止成單，"
-            "請先到後台手動確認區域，避免系統誤判成大安區。"
-        )
-    _validate_address_before_submit(address_for_lookup, area_id, context="新客建單")
-
-    # 後台手動建單與舊客流程都會先 calculate_hour；get_section
-    # 會依賴這些回填欄位判斷完整時段。新客原本略過這步，
-    # 會出現選 09:00-12:00 卻回到 09:00-11:00，進而誤判無人力。
-    _calc_result = calculate_hour(session, _base_data_check, token_for_section)
-    if not _calc_result:
-        raise Exception("計算時數失敗")
-    _calc_fields = extract_calc_fields(
-        _calc_result,
-        fallback_hours=_base_data_check["hour"],
-        fallback_fare="0",
-    )
-    _base_data_check["price"] = str(int(round(price_with_tax / TAX_RATE)))
-    _base_data_check["price_vvip"] = str(_calc_fields.get("price_vvip") or "0")
-    _base_data_check["fare"] = str(_calc_fields.get("fare") or "0")
-
-    _slot = f"{date_s}_{period_s}"
-    _raw_section = get_section_raw(session, _base_data_check, token_for_section, _slot)
-    _slot_found = slot_exists_in_section_response(_raw_section, _slot)
-    _cleaners = extract_cleaners_from_section_response(_raw_section, _slot) if _slot_found else []
-    _need = int(person)
-    _has_explicit_cleaners = bool(_cleaners)
-    _auto_shift_ok = False
-    _pre_shift = {}
-    # v8.13：查無班表/人數不足時，預設不自動勾檸檬人，必須客服明確勾選才會執行。
-    if (not _slot_found or (_has_explicit_cleaners and len(_cleaners) < _need)) and allow_auto_lemon_shift:
-        _short = _need - len(_cleaners) if _slot_found and _has_explicit_cleaners else _need
-        _pre_shift = ensure_lemon_cleaner_shifts(
-            session=session, base_url=base_url,
-            service_date=date_s, period_s=period_s,
-            person_count=str(_short),
-        )
-        _auto_shift_ok = bool(_pre_shift.get("success"))
-        time.sleep(2)
-        _raw_section = get_section_raw(session, _base_data_check, token_for_section, _slot)
-        _slot_found = slot_exists_in_section_response(_raw_section, _slot)
-        _cleaners = extract_cleaners_from_section_response(_raw_section, _slot) if _slot_found else []
-        _has_explicit_cleaners = bool(_cleaners)
-
-    if not _slot_found or not _has_explicit_cleaners or len(_cleaners) < _need:
-        # v2026.07.07：加上診斷資訊——地址審核期間解析出的 area_id/company_id，
-        # 以及 get_section 實際回傳內容的前 300 字。之前只顯示「0人可指派」，
-        # 但排班頁明明看得到人，無法判斷是查詢班表時用錯了 area_id/company_id
-        # （查到别的區域去了），還是 get_section 回傳格式跟解析邏輯對不上，
-        # 這樣至少能比對排班頁畫面上顯示的區域是否跟這裡解析出來的一致。
-        raise Exception(
-            f"查無班表或人數不足（需要 {_need} 人，目前排班頁只有 {len(_cleaners)} 人可指派），"
-            f"依規定人數不足不能成單，請先確認/補足班表後再建單。"
-            f"\n🔧 除錯：area_id={area_id}　company_id={company_id}　country_id={country_id}"
-            f"\nget_section 原始回應前300字：{str(_raw_section)[:300]}"
-        )
-
-    # Step 5: POST /booking/single
-    post_data = {
-        "_token": csrf,
-        "clean_type_id": clean_type_id,
-        "phone": phone,
-        "name": name,
-        "email": email,
-        "tel": tel,
-        "line": line,
-        "fbName": "",
-        "fb": "",
-        "memoProcess": "",
-        "memoFinance": "",
-        "addressId": address_id,
-        "last_area": "",
-        "country_id": country_id,
-        "address": address_for_submit,
-        "ping": ping,
-        "serviceType": service_type,
-        "room": str(customer.get("room", "")),
-        "bathroom": str(customer.get("bathroom", "")),
-        "balcony": str(customer.get("balcony", "")),
-        "livingroom": str(customer.get("livingroom", "")),
-        "kitchen": str(customer.get("kitchen", "")),
-        "window": str(customer.get("window", "")),
-        "shutter": str(customer.get("shutter", "")),
-        "clothes": str(customer.get("clothes", "0")),
-        "dyson": str(customer.get("dyson", "0")),
-        "refrigerator": str(customer.get("refrigerator", "0")),
-        "disinfection": str(customer.get("disinfection", "0")),
-        "go_abord": str(customer.get("go_abord", "0")),
-        "home_move": str(customer.get("home_move", "0")),
-        "storage": str(customer.get("storage", "0")),
-        "cabinet": str(customer.get("cabinet", "0")),
-        "quintuple": str(customer.get("quintuple", "0")),
-        "hour": hour,
-        "price": str(price_with_tax),
-        "price_vvip": "0",
-        "person": person,
-        "date_s": "",
-        "period_s": period_s,
-        "cycle": "1",
-        "fare": "0",
-        "datePeriod": date_period,
-        "period": "",
-        "memo": memo,
-        "notice": notice,
-        "period": actual_time,   # 簡訊實際服務時間
-        "discount_code": "",
-        "payway": payway_code,
-        "invoice_type": invoice_type,
-        "donate_code": "",
-        "carrier_type_id": carrier_type_id,
-        "carrier_info": carrier_info,
-        "company_title": company_title,
-        "company_no": company_no,
-        "is_backend": is_backend,
-        "member_id": member_id,
-        "company_id": company_id,
-        "area_id": area_id,
-        "lat": lat,
-        "lng": lng,
-    }
-
-    # 後台表單的縣市/區域由 country_id 下拉承接，address 欄只送路街巷號樓。
-    post_data["address"] = address_for_submit
-
-    # 依付款方式選 endpoint 和欄位
-    if payway_code == "4":  # 儲值金
-        booking_endpoint = f"{base_url}/booking/stored_value_routine"
-        # 儲值金不帶付款/發票欄位
-        for _k in ["payway", "invoice_type", "donate_code", "carrier_type_id",
-                   "carrier_info", "company_title", "company_no"]:
-            post_data.pop(_k, None)
-    else:  # 信用卡=1, ATM=2
-        booking_endpoint = f"{base_url}/booking/single"
-
-    resp = session.post(
-        booking_endpoint,
-        data=post_data,
-        headers={**HEADERS, "Content-Type": "application/x-www-form-urlencoded",
-                 "Referer": booking_endpoint},
-        allow_redirects=True,
-    )
-
-    # 建單後統一從回應和 /purchase 列表取訂單號
-    order_no = ""
-
-    # 先試從回應內容取（HTML redirect 含訂單號）
-    order_no_m = re.search(r"(TT\d{8}|LC\d{9})", resp.url + resp.text[:5000])
-    if order_no_m:
-        order_no = order_no_m.group(1)
-
-    # 若回應是 JSON（儲值金流程：{"count":1} 或餘額不足）
-    if not order_no:
-        try:
-            _resp_json = resp.json()
-            if isinstance(_resp_json, dict):
-                # 餘額不足
-                if _resp_json.get("stored_value_balance") is not None and _resp_json.get("count", 1) == 0:
-                    balance = _resp_json.get("stored_value_balance", 0)
-                    raise Exception(f"儲值金餘額不足（目前餘額：{balance} 元），無法建單")
-                # 建單成功（count > 0）
-                if _resp_json.get("count", 0) > 0:
-                    pass  # 繼續往下從 /purchase 撈
-        except Exception as _je:
-            if "儲值金餘額不足" in str(_je):
-                raise
-
-    # 等後台完成，再從訂單列表撈最新訂單
-    if not order_no:
-        time.sleep(3)
-        blocks = _fetch_purchase_blocks_for_phone(session, phone, name=name)
-        # 取最新一筆（blocks 已依時間倒序）
-        if blocks:
-            order_no = blocks[0].get("order_no", "")
-
-    if not order_no:
-        raise Exception(
-            f"建單後無法取得訂單編號（HTTP {resp.status_code}）\n"
-            f"請至後台訂單管理確認電話 {phone} 是否已有新訂單，若有請直接使用該訂單號碼。"
-        )
-
-    # 勾選「自動補檸檬人」不只是補出可成單的時段；成單後還必須
-    # 實際把這張訂單的人員換成檸檬人。只修改本單，且補班底層會
-    # 跳過當日已有班別的專員，不動其他客人的已配班專員。
-    lemon_assignment = {}
-    if allow_auto_lemon_shift:
-        lemon_assignment = assign_lemon_cleaners_to_order(
-            session=session, base_url=base_url, order_no_a=order_no,
-            service_date=date_s, period_s=period_s, person_count=str(person),
-            allow_auto_lemon_shift=True,
-        )
-        if lemon_assignment.get("success"):
-            time.sleep(1)
-
-    # v8.6：補齊 build_line_message 需要的欄位（date/period/region/fare/service_amount/
-    # actual_period），避免呼叫端組 LINE 訊息時因缺少欄位而 KeyError 或漏掉地址所屬區域。
-    _region_computed = get_region_by_address(address, ACCOUNTS) or "台北"
-
-    # v8.7：建單後回查後台實際金額，與人時公式（600平日/700週末，不含車馬費）算出的
-    # price_with_tax 比對；若後台實際金額不同（例如後台依坪數/房間數等另行計價，
-    # 覆蓋掉我們送出的固定公式金額），加上警示訊息，方便客服在畫面上立即發現。
-    # v8.9：同一次回查也順便比對地址——若後台實際地址跟我們送出的地址不同
-    # （例如後台自動判斷區域時加了不正確的市/區前綴），一併加上警示。
-    # 查詢失敗不影響建單結果，只是無法附上警示。
-    price_mismatch_warning = ""
-    backend_actual_amount = None
-    address_mismatch_warning = ""
-    backend_actual_address = ""
+    1. 先用 Google 座標 + /ajax/check_contain。
+    2. 查不到再用後台頁面原生「查詢地址」按鈕（由後台自己定位）。
+    回傳 (area_dict, reply, errors)。
+    """
+    member = (member_payload or {}).get("member", {}) or {}
+    member_id = str(member.get("member_id") or "")
+    errors = []
+    lat, lng = geocode_address(address)
     try:
-        _verify_block = _fetch_purchase_block_for_order_no(session, order_no)
-        _verify_joined = "\n".join(_verify_block.get("lines", []))
-        _verify_fare = _extract_fare_line(_verify_joined) or "0"
-        _verify_amount = _service_amount_from_block(_verify_joined, _verify_fare)
-        if _verify_amount:
-            backend_actual_amount = int(round(float(str(_verify_amount).replace(",", ""))))
-            if backend_actual_amount != price_with_tax:
-                price_mismatch_warning = (
-                    f"⚠️ 後台實際金額為 {backend_actual_amount} 元，"
-                    f"與人時公式算出的 {price_with_tax} 元（{unit_price}元×{ph}人時，{day_type}）不同，"
-                    f"請至後台確認訂單 {order_no} 的實際金額是否正確。"
-                )
-        _verify_addr = _extract_address_line(_verify_block.get("lines", []))
-        if _verify_addr:
-            backend_actual_address = _verify_addr
-            _norm_submitted = normalize_addr_for_match(address)
-            _norm_backend = normalize_addr_for_match(_verify_addr)
-            if _norm_submitted and _norm_backend and _norm_submitted != _norm_backend:
-                address_mismatch_warning = (
-                    f"⚠️ 後台實際地址為「{_verify_addr}」，與送出的「{address}」不同"
-                    f"（很可能是後台自動判斷區域時加了不正確的市/區前綴，屬於後台端行為，"
-                    f"非本系統送出的資料有誤），請至後台手動確認/修正訂單 {order_no} 的地址。"
-                )
-    except Exception:
-        pass
-
-    # v2026.07.09：補上成單後的實際專員名字，跟舊客快速建單一致。
-    # 優先用 fetch_order_meta_by_order_no 撈後台實際配班結果（後台可能依
-    # 班表自動配到跟建單前查詢當下不同的人），查不到才退回用建單前查到的
-    # 排班候選人（_cleaners）當備援顯示。
+        reply = check_contain(session, member_id, address, lat, lng, token, clean_type_id)
+        area = _area_from_check_reply(reply)
+        if area:
+            area = dict(area)
+            area.setdefault("lat", lat or "")
+            area.setdefault("lng", lng or "")
+            if not area.get("lat"):
+                area["lat"] = lat or ""
+            if not area.get("lng"):
+                area["lng"] = lng or ""
+            return area, reply, errors
+        errors.append("查詢地址未回傳服務區域" + ("" if lat else "（無座標）"))
+    except Exception as exc:
+        errors.append(f"查詢地址：{exc}")
     try:
-        _meta = fetch_order_meta_by_order_no(session, order_no)
-    except Exception:
-        _meta = {}
-    _staff_fallback = format_staff_from_cleaners(_cleaners, people=person) if _cleaners else "（無班表資料）"
-    staff_display = _meta.get("服務人員") or _staff_fallback
-    lemon_assignment_ok = (not allow_auto_lemon_shift) or bool(lemon_assignment.get("success"))
-    if allow_auto_lemon_shift and lemon_assignment.get("success") and lemon_assignment.get("assigned"):
-        staff_display = " X ".join(lemon_assignment["assigned"])
-    lemon_assignment_warning = ""
-    if allow_auto_lemon_shift and not lemon_assignment_ok:
-        lemon_assignment_warning = (
-            f"⚠️ 訂單 {order_no} 已建立，但檸檬人置換失敗："
-            f"{lemon_assignment.get('message', '無法取得足夠檸檬人')}。請先人工確認配班，不要發確認信。"
-        )
-
-    # v8.13：建單成功後檢查此訂單編號是否重複對應到多張訂單卡片
-    _is_dup, _dup_count = _check_order_no_duplicate(session, order_no)
-    _dup_warning = (
-        f"⚠️ 訂單編號重複警示：訂單編號 {order_no} 目前查詢到 {_dup_count} 張不同的訂單卡片，"
-        f"這是後台偶發的訂單編號重複問題，請務必至後台人工確認，避免訂單資料互相搞混或覆蓋！"
-        if _is_dup else ""
-    )
-
-    return {
-        "order_no": order_no,
-        "member_id": member_id,
-        "address": address,
-        "date_s": date_s,
-        "date": date_s,
-        "period_s": period_s,
-        "period": period_s,
-        "actual_period": actual_time,
-        "hour": hour,
-        "person": person,
-        "staff": staff_display,
-        "lemon_assignment": lemon_assignment,
-        "lemon_assignment_ok": lemon_assignment_ok,
-        "lemon_assignment_warning": lemon_assignment_warning,
-        "price_with_tax": price_with_tax,
-        "service_amount": price_with_tax,
-        "backend_actual_amount": backend_actual_amount,
-        "price_mismatch_warning": price_mismatch_warning,
-        "backend_actual_address": backend_actual_address,
-        "address_mismatch_warning": address_mismatch_warning,
-        "order_no_duplicated": _is_dup, "order_no_duplicate_count": _dup_count,
-        "duplicate_order_warning": _dup_warning,
-        "existing_member_warning": existing_member_warning,
-        "fare": "0",
-        "payway": payway,
-        "clean_type_id": str(clean_type_id),
-        "region": _region_computed,
-        "day_type": day_type,
-        "session": session,
-    }
+        from backend_address_form import query_native_address
+        reply = query_native_address(session, orders.BASE_URL, member_id, address, clean_type_id)
+        area = _area_from_check_reply(reply)
+        if area:
+            return dict(area), reply, errors
+        errors.append("後台原生查詢地址未回傳服務區域")
+    except Exception as exc:
+        errors.append(f"後台原生查詢地址：{exc}")
+    return {}, {}, errors
 
 
 def resolve_backend_booking_address(session, member_payload, address, token, clean_type_id):
-    """新客、舊客、批次及查班表共用後台地址查詢；不自行判定服務區域。"""
-    member = (member_payload or {}).get("member", {}) or {}
+    """組出成單地址資料（新客、舊客新地址、舊客既有地址共用）。
+
+    - 會員既有地址已存服務區域：直接沿用，不另外查詢。
+    - 新客／建了會員但沒成單／舊客新地址：沒有可用區域時，比照後台手動
+      成單按「查詢地址」，補上 area_id、company_id、lat、lng，送單時後台
+      會以新地址建立。
+    - 查不到服務區域就停止並說明原因，不會用預設區域亂成單。
+    """
     best_addr = dict(pick_best_address_info(member_payload, address) or {})
-    selected_address = str(best_addr.get("address") or address).strip()
+    selected_address = str(address).strip()
+    best_addr["address"] = selected_address
     address_parts = _split_booking_address(selected_address)
     # country_id 是後台縣市區下拉值，與服務區域 area_id 不同。
     best_addr["country_id"] = address_parts.get("country_id") or best_addr.get("country_id", "")
-    if best_addr.get("lat") and best_addr.get("lng"):
-        addr_check = check_contain(
-            session, member.get("member_id", ""), selected_address,
-            best_addr["lat"], best_addr["lng"], token, clean_type_id,
+    has_area = all(str(best_addr.get(k) or "").strip() for k in ("area_id", "company_id", "lat", "lng"))
+    if has_area:
+        return best_addr, address_parts, {}
+    lookup_address = address_parts.get("full") or selected_address
+    area, reply, errors = _lookup_backend_service_area(
+        session, member_payload, lookup_address, token, clean_type_id,
+    )
+    if not area:
+        if str(best_addr.get("addressId") or "").strip():
+            # 會員既有地址查詢失敗時，沿用原本存好的資料交給後台判斷。
+            return best_addr, address_parts, {}
+        raise Exception(
+            f"地址查不到服務區域，尚未查班表：{selected_address}。"
+            + "；".join(errors)
+            + "。請確認地址是否在服務範圍，或到後台按「查詢地址」確認。"
         )
-    else:
-        from backend_address_form import query_native_address
-        addr_check = query_native_address(
-            session, orders.BASE_URL, member.get("member_id", ""), selected_address, clean_type_id,
-        )
-    addr_check = addr_check if isinstance(addr_check, dict) else {}
-    code = addr_check.get("return_code")
-    if code not in (None, "", "0000"):
-        message = addr_check.get("description") or addr_check.get("message") or str(code)
-        raise Exception(f"後台地址查詢回覆：{message}")
-    area = addr_check.get("area")
-    if isinstance(area, dict):
-        for field in ("area_id", "company_id", "lat", "lng"):
-            if area.get(field) not in (None, "", 0, "0"):
-                best_addr[field] = area[field]
-    # 查詢未提供區域時保留會員既有值，未存的欄位留空交由後台驗證。
-    # 由後台原生按鈕定位及判定區域，不指定預設區域，也不改寫客戶地址。
-    return best_addr, address_parts, addr_check
+    for key in ("area_id", "company_id", "lat", "lng"):
+        if not str(best_addr.get(key) or "").strip() and str(area.get(key) or "").strip():
+            best_addr[key] = area.get(key)
+    return best_addr, address_parts, reply if isinstance(reply, dict) else {}
 
 
 def _query_booking_slot_with_lemon_retry(session, base_url, payway, data, token, slot, allow_auto_lemon_shift):

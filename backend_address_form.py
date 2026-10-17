@@ -64,7 +64,7 @@ def query_native_address(session, base_url, member_id, address, clean_type_id):
                 raise RuntimeError('後台地址查詢登入已失效')
             for selector, value in (('#member_id', member_id), ('#clean_type_id', clean_type_id), ('#address', address)):
                 page.locator(selector).evaluate('(el, value) => { el.value = value; }', str(value))
-            page.wait_for_function("typeof google !== 'undefined' && google.maps && google.maps.Geocoder")
+            page.wait_for_function("() => typeof google !== 'undefined' && !!google.maps && typeof google.maps.Geocoder === 'function'")
             try:
                 with page.expect_response(lambda r: urlparse(r.url).hostname == hostname and urlparse(r.url).path == '/ajax/check_contain', timeout=30000) as pending:
                     page.locator('.check_contain').click()

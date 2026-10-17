@@ -753,15 +753,25 @@ def pick_best_address_info(member_payload, target_address):
     for item in member_address_list:
         item_addr = str(item.get("address", "")).strip()
         if normalize_addr_for_match(item_addr) == target_norm:
+            purchase = item.get("purchase") if isinstance(item.get("purchase"), dict) else {}
+
+            def saved_field(address_key, purchase_key):
+                # get_member 的地址外層可能是 0；同一地址的 purchase 才存有
+                # 有效區域與座標。只沿用已匹配地址的資料，不借用其他地址。
+                for value in (item.get(address_key), purchase.get(purchase_key)):
+                    if value is not None and str(value).strip() not in ("", "0", "0.0"):
+                        return value
+                return ""
+
             return {
                 "addressId": str(item.get("id", "")).strip(),
-                "country_id": item.get("countryId", ""),
-                "area_id": item.get("areaId", ""),
+                "country_id": saved_field("countryId", "country_id"),
+                "area_id": saved_field("areaId", "area_id"),
                 "address": item_addr,
-                "lat": item.get("lat", ""),
-                "lng": item.get("lng", ""),
-                "company_id": item.get("companyId", ""),
-                "purchase": item.get("purchase", {}) if isinstance(item.get("purchase"), dict) else {},
+                "lat": saved_field("lat", "lat"),
+                "lng": saved_field("lng", "lng"),
+                "company_id": saved_field("companyId", "company_id"),
+                "purchase": purchase,
             }
 
     return {}
@@ -1611,74 +1621,14 @@ def process_one_group(session, rows_with_idx, token, gcal_service, region, backe
     stored_value = int(float(member_payload.get("storedValue", 0) or 0))
 
     target_address = str(row0["地址"]).strip().split(",")[0]
-    best_addr = pick_best_address_info(member_payload, target_address)
-    if not best_addr:
-        raise Exception("找不到對應地址資料")
-    if not str(best_addr.get("addressId", "")).strip():
-        raise Exception(f"地址存在但未選到下拉地址，缺少 addressId：{target_address}")
-
-    selected_address = str(best_addr.get("address") or target_address).strip()
-
-    geo_lat, geo_lng = geocode_address(selected_address)
-    if geo_lat and geo_lng:
-        best_addr["lat"] = geo_lat
-        best_addr["lng"] = geo_lng
-
-    addr_check = check_contain(
-        session,
-        member.get("member_id", ""),
-        selected_address,
-        best_addr.get("lat", ""),
-        best_addr.get("lng", ""),
-        token,
-        clean_type_id,
+    # 與新客／舊客單筆共用地址流程；由後台決定區域與是否可成單。
+    from quick_order import resolve_backend_booking_address
+    best_addr, address_parts, addr_check = resolve_backend_booking_address(
+        session, member_payload, target_address, token, clean_type_id,
     )
-    if not addr_check and not str(best_addr.get("area_id", "")).strip():
-        # v2026.07.07 修正重大邏輯錯誤：這裡原本只要 check_contain 失敗就直接
-        # 擋單，但手動在後台操作證實——選「已存在的下拉地址」時，畫面本來就
-        # 是直接沿用會員資料裡存好的 areaId/lat/lng（changeMemberAddress），
-        # 就算後續 check_contain 沒成功也照樣送得出訂單，因為 area_id 早就從
-        # 下拉選單帶進來了，check_contain 只是順便再確認一次、不是必要條件。
-        # 之前的程式碼把 check_contain 當成每次都要成功的硬性條件，導致明明
-        # 是已知、能正常服務的地址，也會被誤擋下來。現在改成：只有在
-        # best_addr 本身完全沒有 area_id（代表這筆地址真的資料不全，不是已知
-        # 下拉地址）時，才需要 check_contain 成功；已知地址則不因
-        # check_contain 失敗而擋單，直接沿用 best_addr 原本的資料繼續。
-        _debug_resp = session.post(
-            CHECK_CONTAIN_URL,
-            data={
-                "memberId": member.get("member_id", ""),
-                "cleanTypeId": clean_type_id,
-                "address": selected_address,
-                "lat": best_addr.get("lat", "") or "",
-                "lng": best_addr.get("lng", "") or "",
-                "_token": token,
-            },
-            headers=HEADERS,
-            allow_redirects=True,
-        )
-        raise Exception(
-            f"查詢地址/地區失敗：{selected_address}"
-            f"\n🔧 除錯：HTTP狀態碼={_debug_resp.status_code}　"
-            f"lat={best_addr.get('lat', '')}　lng={best_addr.get('lng', '')}"
-            f"\n回應內容前300字：{_debug_resp.text[:300]}"
-        )
-
-    # 確認是否真的有模擬按下「查詢地址」
-    print("[DEBUG] check_contain raw =", addr_check)
-    try:
-        if st is not None:
-            st.write("check_contain raw =", addr_check)
-    except Exception:
-        pass
-
-    area_info = addr_check.get("area") if isinstance(addr_check, dict) and isinstance(addr_check.get("area"), dict) else {}
-    purchase_info = addr_check.get("purchase") if isinstance(addr_check, dict) and isinstance(addr_check.get("purchase"), dict) else {}
-
-    if area_info:
-        best_addr["area_id"] = area_info.get("area_id", best_addr.get("area_id"))
-        best_addr["company_id"] = area_info.get("company_id", best_addr.get("company_id"))
-        best_addr["country_id"] = area_info.get("country_id", best_addr.get("country_id"))
+    selected_address = str(best_addr.get("address") or target_address).strip()
+    area_info = addr_check.get("area") if isinstance(addr_check.get("area"), dict) else {}
+    purchase_info = addr_check.get("purchase") if isinstance(addr_check.get("purchase"), dict) else {}
 
     # 注意：check_contain 回傳的 purchase 通常是付款/發票資訊，
     # 不是「下拉地址前一次訂單」的客服備註來源。
@@ -1732,15 +1682,17 @@ def process_one_group(session, rows_with_idx, token, gcal_service, region, backe
         mapped,
     )
 
+    base_data["address"] = selected_address
+
     # 強制套用查詢地址後取得的區域/車馬費資料
     base_data["fare"] = first_nonzero(best_addr.get("fare"), base_data.get("fare"), default="0")
     base_data["notice"] = str(best_addr.get("notice") or base_data.get("notice") or "")
-    base_data["area_id"] = str(best_addr.get("area_id") or base_data.get("area_id") or "")
-    base_data["company_id"] = str(best_addr.get("company_id") or base_data.get("company_id") or "")
-    base_data["country_id"] = str(best_addr.get("country_id") or base_data.get("country_id") or "")
-    base_data["addressId"] = str(best_addr.get("addressId") or base_data.get("addressId") or "")
-    base_data["lat"] = str(best_addr.get("lat") or base_data.get("lat") or "")
-    base_data["lng"] = str(best_addr.get("lng") or base_data.get("lng") or "")
+    base_data["area_id"] = str(best_addr.get("area_id") or "")
+    base_data["company_id"] = str(best_addr.get("company_id") or "")
+    base_data["country_id"] = str(best_addr.get("country_id") or "")
+    base_data["addressId"] = str(best_addr.get("addressId") or "")
+    base_data["lat"] = str(best_addr.get("lat") or "")
+    base_data["lng"] = str(best_addr.get("lng") or "")
 
     print("[DEBUG] address check result =", {
         "addressId": base_data.get("addressId"),
@@ -3388,16 +3340,6 @@ def _booking_backend_response(resp, action):
 
 
 def _checked_booking_sections_response(resp, order_data):
-    """缺少服務區域時的空回應不能用來判定人力不足。"""
-    result = _booking_backend_response(resp, "查詢班表")
-    if result == []:
-        missing = [key for key in ("area_id", "company_id")
-                   if str(order_data.get(key) or "").strip() in ("", "0")]
-        if missing:
-            raise Exception(
-                "後台班表回覆 []；本次查詢未帶入服務區域欄位："
-                + "、".join(missing)
-                + "。無法據此判定人數不足，未執行補檸檬人。"
-                + "請先完成後台查詢地區，取得其回傳值後再查班表。"
-            )
+    """只依後台回覆處理班表，不額外檢查區域或座標。"""
+    _booking_backend_response(resp, "查詢班表")
     return resp.text
