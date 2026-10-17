@@ -76,6 +76,56 @@ class YearRootSwitchTest(unittest.TestCase):
         self.assertEqual((config["spreadsheet_id"], config["gid"]), ("NEW", None))
 
 
+class WorksheetByNameTest(unittest.TestCase):
+    class Sheet:
+        def __init__(self, tabs):
+            self.tabs = tabs  # {title: id}
+
+        def worksheet(self, title):
+            if title not in self.tabs:
+                import gspread
+                raise gspread.exceptions.WorksheetNotFound(title)
+            return ("ws", title)
+
+        def worksheets(self):
+            from types import SimpleNamespace
+            return [SimpleNamespace(id=i, title=t) for t, i in self.tabs.items()]
+
+        def get_worksheet(self, index):
+            return ("first", index)
+
+        def get_worksheet_by_id(self, gid):
+            return next((("ws", t) for t, i in self.tabs.items() if i == gid), None)
+
+    def test_change_order_prefers_tab_name_over_gid(self):
+        sheet = self.Sheet({"其他": 1, "清潔異動": 2})
+        client = type("C", (), {"open_by_key": lambda self, key: sheet})()
+        with patch.object(c, "_sheet_config", lambda region: {"spreadsheet_id": "X", "gid": 1, "worksheet_title": "清潔異動"}), \
+             patch.object(c, "_get_gspread_client", lambda: client):
+            self.assertEqual(c.get_worksheet("台北"), ("ws", "清潔異動"))
+
+    def test_change_order_missing_tab_raises(self):
+        sheet = self.Sheet({"其他": 1})
+        client = type("C", (), {"open_by_key": lambda self, key: sheet})()
+        with patch.object(c, "_sheet_config", lambda region: {"spreadsheet_id": "X", "gid": 5, "worksheet_title": "清潔異動"}), \
+             patch.object(c, "_get_gspread_client", lambda: client):
+            with self.assertRaises(RuntimeError):
+                c.get_worksheet("台北")
+
+    def test_atm_prefers_tab_name_then_gid(self):
+        cfg = {"spreadsheet_id": "X", "gid": 9, "worksheet_title": "ATM"}
+        with patch.object(atm, "_atm_sheet_config", lambda region: cfg), \
+             patch.object(atm, "get_atm_spreadsheet", lambda sid: self.Sheet({"ATM": 3, "舊": 9})):
+            self.assertEqual(atm.get_atm_worksheet("台北"), ("ws", "ATM"))
+        with patch.object(atm, "_atm_sheet_config", lambda region: cfg), \
+             patch.object(atm, "get_atm_spreadsheet", lambda sid: self.Sheet({"改名的ATM": 9})):
+            self.assertEqual(atm.get_atm_worksheet("台北"), ("ws", "改名的ATM"))
+        with patch.object(atm, "_atm_sheet_config", lambda region: cfg), \
+             patch.object(atm, "get_atm_spreadsheet", lambda sid: self.Sheet({"其他": 1})):
+            with self.assertRaises(ValueError):
+                atm.get_atm_worksheet("台北")
+
+
 class WeekdayPricingTest(unittest.TestCase):
     def test_national_holiday_on_weekday_is_weekday_price(self):
         # 2026-10-09（週五）國慶連假補假日：價格仍算平日

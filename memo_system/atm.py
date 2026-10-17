@@ -327,15 +327,19 @@ def _atm_sheet_config(region: str) -> Dict:
 def get_atm_worksheet(region: str):
     config = _atm_sheet_config(region)
     sh = get_atm_spreadsheet(config["spreadsheet_id"])
-    if config["gid"] is not None:
-        try:
-            worksheet = sh.get_worksheet_by_id(config["gid"])
-        except gspread.exceptions.WorksheetNotFound:
-            worksheet = None
-        if worksheet is not None:
-            return worksheet
-        # GID 對不到（例如換了年度檔）時改用分頁名稱
-    return sh.worksheet(config["worksheet_title"])
+    # 檔案依年度根目錄設定找到後，分頁一律先依名稱找（預設「ATM」）；名稱找不到才用 GID
+    try:
+        return sh.worksheet(config["worksheet_title"])
+    except gspread.exceptions.WorksheetNotFound:
+        if config["gid"] is None:
+            raise
+    try:
+        worksheet = sh.get_worksheet_by_id(config["gid"])
+    except gspread.exceptions.WorksheetNotFound:
+        worksheet = None
+    if worksheet is None:
+        raise ValueError(f"找不到「{region}」ATM 分頁「{config['worksheet_title']}」（gid={config['gid']}）")
+    return worksheet
 
 
 # -----------------------------------------------------------------------------
