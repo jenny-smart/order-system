@@ -310,13 +310,17 @@ def _atm_sheet_config(region: str) -> Dict:
             ).strip() or worksheet_title
         except Exception:
             pass
-    if not spreadsheet_id:
-        raise ValueError(f"找不到「{region}」ATM 試算表設定")
     try:
         gid = int(gid_text) if gid_text else None
     except ValueError as exc:
         raise ValueError(f"Secrets 的「{region}」ATM GID 必須是整數") from exc
-    spreadsheet_id = _year_root_id("ATM", region, spreadsheet_id)
+    # 年度根目錄「根目錄」模式：沒有原設定 ID 也能直接用根目錄找到的年度檔
+    resolved = _year_root_id("ATM", region, spreadsheet_id)
+    if not resolved:
+        raise ValueError(f"找不到「{region}」ATM 試算表設定，年度根目錄也找不到")
+    if resolved != spreadsheet_id:
+        gid = None  # 換到別的年度檔時 GID 不同，改用分頁名稱
+    spreadsheet_id = resolved
     return {"spreadsheet_id": spreadsheet_id, "gid": gid, "worksheet_title": worksheet_title}
 
 
@@ -324,10 +328,13 @@ def get_atm_worksheet(region: str):
     config = _atm_sheet_config(region)
     sh = get_atm_spreadsheet(config["spreadsheet_id"])
     if config["gid"] is not None:
-        worksheet = sh.get_worksheet_by_id(config["gid"])
-        if worksheet is None:
-            raise ValueError(f"找不到「{region}」ATM 分頁 gid={config['gid']}")
-        return worksheet
+        try:
+            worksheet = sh.get_worksheet_by_id(config["gid"])
+        except gspread.exceptions.WorksheetNotFound:
+            worksheet = None
+        if worksheet is not None:
+            return worksheet
+        # GID 對不到（例如換了年度檔）時改用分頁名稱
     return sh.worksheet(config["worksheet_title"])
 
 

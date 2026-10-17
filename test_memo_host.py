@@ -44,6 +44,38 @@ class MemoHostFallbackTest(unittest.TestCase):
         self.assertIsNone(host.lookup_service_account())
 
 
+class YearRootSwitchTest(unittest.TestCase):
+    def test_root_mode_without_configured_id(self):
+        with patch.object(c, "_secret_value", lambda key, default="": default), \
+             patch.object(host, "region_sheet", None), \
+             patch.object(c, "_year_root_id", lambda kind, region, sid: sid or "ROOT-2027"):
+            self.assertEqual(c._sheet_config("台北")["spreadsheet_id"], "ROOT-2027")
+
+    def test_switched_file_drops_old_gid(self):
+        secrets = {"CHANGE_ORDER_TAIPEI_SPREADSHEET_ID": "OLD", "CHANGE_ORDER_TAIPEI_GID": "123"}
+        with patch.object(c, "_secret_value", lambda key, default="": secrets.get(key, default)), \
+             patch.object(c, "_year_root_id", lambda kind, region, sid: "NEW"):
+            config = c._sheet_config("台北")
+        self.assertEqual((config["spreadsheet_id"], config["gid"]), ("NEW", None))
+        with patch.object(c, "_secret_value", lambda key, default="": secrets.get(key, default)), \
+             patch.object(c, "_year_root_id", lambda kind, region, sid: sid):
+            self.assertEqual(c._sheet_config("台北")["gid"], 123)
+
+    def test_missing_everywhere_raises(self):
+        with patch.object(c, "_secret_value", lambda key, default="": default), \
+             patch.object(host, "region_sheet", None), \
+             patch.object(c, "_year_root_id", lambda kind, region, sid: sid):
+            with self.assertRaises(ValueError):
+                c._sheet_config("台北")
+
+    def test_atm_switched_file_uses_title(self):
+        secrets = {"ATM_TAIPEI_SPREADSHEET_ID": "OLD", "ATM_TAIPEI_GID": "5"}
+        with patch.object(atm, "_secret_text", lambda key: secrets.get(key, "")), \
+             patch.object(atm, "_year_root_id", lambda kind, region, sid: "NEW"):
+            config = atm._atm_sheet_config("台北")
+        self.assertEqual((config["spreadsheet_id"], config["gid"]), ("NEW", None))
+
+
 class WeekdayPricingTest(unittest.TestCase):
     def test_national_holiday_on_weekday_is_weekday_price(self):
         # 2026-10-09（週五）國慶連假補假日：價格仍算平日
