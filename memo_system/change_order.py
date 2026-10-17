@@ -271,13 +271,17 @@ def _sheet_config(region: str) -> dict:
         spreadsheet_id = str(fallback.get("spreadsheet_id") or "").strip()
         gid_text = str(fallback.get("gid") or gid_text or "").strip()
         worksheet_title = fallback.get("worksheet_title") or worksheet_title
-    if not spreadsheet_id:
-        raise ValueError(f"Secrets 尚未設定「{region}」清潔異動試算表 ID")
     try:
         gid = int(gid_text) if gid_text else None
     except ValueError as exc:
         raise ValueError(f"Secrets 的「{region}」清潔異動 GID 必須是整數") from exc
-    spreadsheet_id = _year_root_id("CHANGE", region, spreadsheet_id)
+    # 年度根目錄「根目錄」模式：沒有原設定 ID 也能直接用根目錄找到的年度檔
+    resolved = _year_root_id("CHANGE", region, spreadsheet_id)
+    if not resolved:
+        raise ValueError(f"Secrets 尚未設定「{region}」清潔異動試算表 ID，年度根目錄也找不到")
+    if resolved != spreadsheet_id:
+        gid = None  # 換到別的年度檔時 GID 不同，改用分頁名稱
+    spreadsheet_id = resolved
     return {"spreadsheet_id": spreadsheet_id, "gid": gid, "worksheet_title": worksheet_title}
 
 
@@ -349,8 +353,8 @@ def supported_regions() -> list:
 def get_worksheet(region: str, tab_name: str = "清潔異動"):
     """
     依地區回傳對應的 gspread worksheet 物件。
-    優先用 gid（SHEET_GIDS）精準定位分頁；若該地區沒有設定 gid，
-    退而用 tab_name 嘗試找同名分頁，最後 fallback 用該試算表第一個分頁。
+    檔案依年度根目錄設定找到後，分頁一律先依名稱找（預設「清潔異動」）；
+    名稱找不到才用 GID；都找不到就報錯（不會改用第一個分頁，避免寫錯分頁）。
     """
     config = _sheet_config(region)
     client = _get_gspread_client()
@@ -361,16 +365,18 @@ def get_worksheet(region: str, tab_name: str = "清潔異動"):
             f"無法開啟「{region}」清潔異動試算表。請確認試算表 ID 正確，且已分享給目前的 Google 服務帳號（編輯者權限）。"
         ) from exc
 
+    try:
+        return sh.worksheet(config["worksheet_title"] or tab_name)
+    except gspread.exceptions.WorksheetNotFound:
+        pass
+
     gid = config["gid"]
     if gid is not None:
         for ws in sh.worksheets():
             if ws.id == gid:
                 return ws
-
-    try:
-        return sh.worksheet(config["worksheet_title"] or tab_name)
-    except gspread.exceptions.WorksheetNotFound:
-        return sh.get_worksheet(0)
+    title = config["worksheet_title"] or tab_name
+    raise RuntimeError(f"「{region}」清潔異動試算表找不到「{title}」分頁（gid={gid}），請確認分頁名稱")
 
 
 # ============================================================
