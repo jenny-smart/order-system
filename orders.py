@@ -1,10 +1,21 @@
 # ============================================================
 # 檔名：orders.py
-# 版本：v2026.08.19-4
+# 版本：v2026.10.17-1
 # 模組：批次建單核心引擎（Google Sheet → 後台訂單，供 ordersapp.py 呼叫）
-# 最後更新：2026-08-19
+# 最後更新：2026-10-17
 #
 # Change Log
+# v2026.10.17-1（移植 orders-system）
+# - 後台／Google 日曆雙向比對：以當月日曆人員為母名單；只接受同一人＋同地址＋
+#   同日期時段配對；日曆姓名後「-XXXX」視為地址標籤；後台同人同址同時段重複
+#   訂單另列異常；同一筆不一致不在兩個方向重複列出；姓名／電話／地址比對前先
+#   NFKC 正規化（全形數字、臺／台、電話分隔符號）；新增
+#   format_calendar_consistency_issue 統一顯示訂單編號／姓名／電話／地址；
+#   指定稽核帳號只能比對所屬區域（get_calendar_compare_allowed_region）。
+# - 儲值獎金備註：相同獎金行只保留一次（_merge_bonus_notice），改從 Vue purchase
+#   JSON 讀取客服備註，讀不到備註時不送出；已存在且已處理則不重複送出。
+# - prepare_base_order_data：country_id 不再退回 12（大安區），地址優先使用
+#   拆分後的 submit_address，避免批次建單錯加「大安區」前綴。
 # v2026.08.19-4
 # - 批次執行訊息改為每組摘要，只顯示 checkbox 結果及有／無單號結果。
 # v2026.08.19-3
@@ -252,6 +263,7 @@ import os
 import re
 import json
 import time
+import unicodedata
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 
@@ -1433,8 +1445,10 @@ def prepare_base_order_data(row, member_payload, address_info, clean_type_id, pe
         "memoProcess": str(member.get("memo_process") or ""),
         "memoFinance": str(member.get("memo_finance") or ""),
         "addressId": str(address_info.get("addressId") or ""),
-        "country_id": str(address_info.get("country_id") or pick("country_id", "12")),
-        "address": str(row["地址"]).strip(),
+        # 縣市／行政區由 country_id 下拉承接；address 只送路街巷號樓。
+        # 禁止退回 12（大安區），否則文山區等地址會被錯加「大安區」前綴。
+        "country_id": str(address_info.get("country_id") or ""),
+        "address": str(address_info.get("submit_address") or row["地址"]).strip(),
         "ping": str(pick("ping", "4")),
         "room": str(pick("room", "0")),
         "bathroom": str(pick("bathroom", "0")),
@@ -2706,6 +2720,58 @@ def _order_edit_line_url_is_blank(session, order_no, edit_id=None):
     return not str(line_input.get("value") or "").strip()
 
 
+def _purchase_json_from_edit_html(html):
+    """讀取 Vue 的 purchase 資料，不依賴 JSON 後方的樣板排版。"""
+    soup = BeautifulSoup(html, "html.parser")
+    for script in soup.find_all("script"):
+        source = script.get_text()
+        for match in re.finditer(r'\bpurchase\s*:\s*(?=\{)', source):
+            try:
+                value, _ = json.JSONDecoder().raw_decode(source[match.end():])
+            except ValueError:
+                continue
+            if isinstance(value, dict):
+                return value
+    return {}
+
+
+def _notice_from_edit_html(html, purchase_json):
+    # JSON 的空值也是真實值，不能退回 Vue 尚未渲染的 textarea 樣板。
+    if "notice" in purchase_json:
+        return str(purchase_json["notice"] or "").strip()
+    soup = BeautifulSoup(html, "html.parser")
+    notice = soup.find("textarea", attrs={"name": "notice"}) or soup.find("input", attrs={"name": "notice"})
+    if notice is None:
+        return None
+    value = notice.get("value") if notice.name == "input" else notice.get_text()
+    value = str(value or "").strip()
+    return None if "{{" in value else value
+
+
+def _merge_bonus_notice(old_notice, bonus_names):
+    """相同獎金行只保留一次；其他備註與不同的獎金行原樣保留。"""
+    bonus_line = "獎金：" + "X".join(bonus_names)
+
+    def bonus_key(line):
+        match = re.fullmatch(r"\s*獎金\s*[:：]\s*(.*?)\s*", line)
+        if not match:
+            return None
+        return tuple(n.strip() for n in re.split(r"[XxＸ]", match.group(1)))
+
+    target = bonus_key(bonus_line)
+    lines = []
+    found = False
+    for line in old_notice.splitlines():
+        if bonus_key(line) == target:
+            if found:
+                continue
+            found = True
+        lines.append(line)
+    if not found:
+        lines.append(bonus_line)
+    return "\n".join(lines)
+
+
 def _fetch_order_edit_notice(session, order_no, edit_id=None):
     edit_id = edit_id or _fetch_order_edit_id(session, order_no) or _purchase_edit_id_from_order_no(order_no)
     if not edit_id:
@@ -2713,12 +2779,7 @@ def _fetch_order_edit_notice(session, order_no, edit_id=None):
     resp = session.get(f"{BASE_URL}/purchase/edit/{edit_id}", headers=HEADERS, allow_redirects=True)
     if resp.status_code != 200:
         return None
-    soup = BeautifulSoup(resp.text, "html.parser")
-    notice = soup.find("textarea", attrs={"name": "notice"}) or soup.find("input", attrs={"name": "notice"})
-    if notice is None:
-        return None
-    value = notice.get("value") if notice.name == "input" else notice.get_text()
-    return str(value or "").strip()
+    return _notice_from_edit_html(resp.text, _purchase_json_from_edit_html(resp.text))
 
 
 def add_bonus_note_to_order(session, base_url, order_no, bonus_names, edit_id=None):
@@ -2769,14 +2830,7 @@ def add_bonus_note_to_order(session, base_url, order_no, bonus_names, edit_id=No
             existing[m2.group(1)] = m2.group(2).strip()
 
         # 用頁面內嵌的 purchase JSON 蓋掉容易被靜態 HTML 解析錯的欄位
-        json_m = re.search(r'purchase:\s*(\{.*?\})\s*\n?\s*\}\s*\n?\s*\}', get_resp.text, re.S)
-        if json_m:
-            try:
-                purchase_json = json.loads(json_m.group(1))
-            except Exception:
-                purchase_json = {}
-        else:
-            purchase_json = {}
+        purchase_json = _purchase_json_from_edit_html(get_resp.text)
 
         _json_backed_fields = [
             "isCharge", "chargeDate", "chargePayment", "chargeInvoiceDate",
@@ -2790,9 +2844,12 @@ def add_bonus_note_to_order(session, base_url, order_no, bonus_names, edit_id=No
                 val = purchase_json.get(key)
                 existing[key] = "" if val is None else str(val)
 
-        bonus_line = "獎金：" + "X".join(bonus_names)
-        old_notice = str(purchase_json.get("notice") or existing.get("notice", "") or "").strip()
-        new_notice = f"{old_notice}\n{bonus_line}" if old_notice else bonus_line
+        old_notice = _notice_from_edit_html(get_resp.text, purchase_json)
+        if old_notice is None:
+            return False, "無法讀取目前客服備註，未送出修改"
+        new_notice = _merge_bonus_notice(old_notice, bonus_names)
+        if new_notice == old_notice and existing.get("progress") == "1":
+            return True, new_notice
 
         existing["_token"] = csrf
         existing.pop("_method", None)
@@ -2949,20 +3006,86 @@ def _calchk_address_from_lines(lines):
     return ""
 
 
-def _calchk_phone_from_lines(lines):
-    for line in lines:
-        if re.fullmatch(r"09\d{8}", str(line).strip()):
-            return str(line).strip()
+def _calchk_address_key(address):
+    """只統一文字格式，不查地圖或推測地址。"""
+    return normalize_addr_for_match(unicodedata.normalize("NFKC", str(address or ""))).replace("臺", "台")
+
+
+def _calchk_phone_line(line):
+    text = unicodedata.normalize("NFKC", str(line or "")).strip()
+    if re.fullmatch(r"09[\d\s()\-]+", text):
+        phone = normalize_phone(text)
+        if re.fullmatch(r"09\d{8}", phone):
+            return phone
     return ""
+
+
+def _calchk_phone_from_lines(lines):
+    return next((phone for line in lines if (phone := _calchk_phone_line(line))), "")
 
 
 def _calchk_name_from_lines(lines):
-    """訂購人姓名固定緊接在電話號碼那一行之前（比照 weekend_reminders._name_
-    phone 的判斷方式）。"""
+    """姓名緊接在電話行之前；電話格式與電話解析採相同規則。"""
     for idx, line in enumerate(lines):
-        if re.fullmatch(r"09\d{8}", str(line).strip()):
+        if _calchk_phone_line(line):
             return str(lines[idx - 1]).strip() if idx else ""
     return ""
+
+
+def _calchk_duplicate_groups(orders):
+    """同一人同一服務分組，缺電話時只接受無歧義的姓名配對。"""
+    slots = defaultdict(list)
+    seen = set()
+    for order in orders:
+        if order["order_no"] in seen:
+            continue
+        seen.add(order["order_no"])
+        key = (order["region"], _calchk_address_key(order["address"]),
+               order["service_date"], order["service_time"])
+        slots[key].append(order)
+    groups = []
+    for slot in slots.values():
+        by_person = defaultdict(list)
+        unnamed_phone = []
+        for order in slot:
+            phone = normalize_phone(order.get("phone") or "")
+            if phone:
+                by_person[("phone", phone)].append(order)
+            else:
+                unnamed_phone.append(order)
+        for order in unnamed_phone:
+            name = normalize_text_for_parse(order.get("name") or "").lower()
+            if not name:
+                continue
+            candidates = [key for key, group in by_person.items()
+                          if key[0] == "phone" and any(
+                              normalize_text_for_parse(item.get("name") or "").lower() == name
+                              for item in group)]
+            key = candidates[0] if len(candidates) == 1 else ("name", name)
+            by_person[key].append(order)
+        groups.extend(group for group in by_person.values() if len(group) > 1)
+    return groups
+
+
+def format_calendar_consistency_issue(item):
+    """統一顯示後台／Google 日曆雙向比對異常的必要資料。"""
+    order_nos = item.get("order_nos") or []
+    order_no = item.get("order_no") or "、".join(str(value) for value in order_nos if value)
+    return (
+        f"訂單編號：{order_no or '查無對應後台訂單'}｜"
+        f"姓名：{item.get('name') or '未提供'}｜"
+        f"電話：{item.get('phone') or '未提供'}｜"
+        f"地址：{item.get('address') or '未提供'}\n"
+        f"異常：{item.get('issue') or '未知異常'}"
+    )
+
+
+def get_calendar_compare_allowed_region(backend_email):
+    """指定稽核帳號只能讀取所屬區域的日曆。"""
+    return {
+        "jenny@lemonclean.com.tw": "台北",
+        "jenny.tc@lemonclean.com.tw": "台中",
+    }.get(str(backend_email or "").strip().lower())
 
 
 def _calchk_service_date_time_from_lines(lines):
@@ -3066,6 +3189,12 @@ def run_backend_calendar_consistency_check(env_name, backend_email, backend_pass
         GET_SECTION_URL, MAIL_SUCCESS_URL,
     ) = compute_env_url_tuple(env_name)
 
+    allowed_region = get_calendar_compare_allowed_region(backend_email)
+    if allowed_region:
+        if region and region != allowed_region:
+            raise Exception(f"此登入帳號只能比對{allowed_region}區")
+        region = allowed_region
+
     if region and region not in GOOGLE_CALENDAR_MAP:
         raise Exception(f"{region} 尚未設定 Google Calendar ID，無法比對")
     regions_to_check = [region] if region else list(GOOGLE_CALENDAR_MAP.keys())
@@ -3113,9 +3242,13 @@ def run_backend_calendar_consistency_check(env_name, backend_email, backend_pass
     tz = timezone(timedelta(hours=8))
     day_start = datetime.strptime(date_range_start, "%Y-%m-%d").replace(tzinfo=tz)
     day_end = datetime.strptime(date_range_end, "%Y-%m-%d").replace(tzinfo=tz) + timedelta(days=1)
+    roster_start = day_start.replace(day=1)
+    roster_end_month = datetime.strptime(date_range_end, "%Y-%m-%d").replace(tzinfo=tz, day=1)
+    roster_end = (roster_end_month + timedelta(days=32)).replace(day=1)
 
     calendar_events_by_region = {}
     all_events_by_region = {}
+    roster_events_by_region = {}
     for r in regions_to_check:
         calendar_id = GOOGLE_CALENDAR_MAP[r]
         events = service.events().list(
@@ -3128,6 +3261,14 @@ def run_backend_calendar_consistency_check(env_name, backend_email, backend_pass
         ).execute().get("items", [])
         all_events_by_region[r] = events
         calendar_events_by_region[r] = [e for e in events if str(e.get("colorId", "")) == COLOR_YELLOW]
+        roster_events_by_region[r] = service.events().list(
+            calendarId=calendar_id,
+            timeMin=roster_start.isoformat(),
+            timeMax=roster_end.isoformat(),
+            singleEvents=True,
+            orderBy="startTime",
+            maxResults=2500,
+        ).execute().get("items", [])
 
     def _event_local_range(event):
         start_raw = event.get("start", {}).get("dateTime") or event.get("start", {}).get("date")
@@ -3160,19 +3301,53 @@ def run_backend_calendar_consistency_check(env_name, backend_email, backend_pass
             event.get("location", "") or "",
         ]))
 
+    def _event_name_phone(event):
+        """解析姓名與電話；姓名後的「-XXXX」是地址標籤，不屬於姓名。"""
+        blob = " ".join([event.get("summary", "") or "", event.get("description", "") or ""])
+        phone_m = re.search(r"(09\d{8})", blob)
+        phone = phone_m.group(1) if phone_m else ""
+        name = ""
+        if phone_m:
+            before = blob[:phone_m.start()]
+            name_m = re.search(
+                r"([\u4e00-\u9fffA-Za-z]+?)(?:[-－—][^,，\s]+)?[,，]?\s*$",
+                before,
+            )
+            name = name_m.group(1) if name_m else ""
+        return name, phone
+
+    def _event_address_label(event):
+        """例：陳靜萱-文山區,0919... 中的「文山區」。"""
+        blob = " ".join([event.get("summary", "") or "", event.get("description", "") or ""])
+        phone_m = re.search(r"09\d{8}", blob)
+        before = blob[:phone_m.start()] if phone_m else blob
+        label_m = re.search(r"[-－—]([^,，\s]+)[,，]?\s*$", before)
+        return label_m.group(1).strip() if label_m else ""
+
     def _event_phone_match(order_phone, event):
         phone_norm = normalize_phone(order_phone) if order_phone else ""
         return bool(phone_norm) and phone_norm in _event_blob(event)
 
     def _event_addr_core_match(order_address, event):
-        blob = normalize_addr_for_match(" ".join([
+        blob = _calchk_address_key(" ".join([
             event.get("summary", "") or "",
             event.get("description", "") or "",
             event.get("location", "") or "",
         ]))
-        addr_norm = normalize_addr_for_match(order_address)
-        core = addr_norm[:10] if len(addr_norm) >= 10 else addr_norm
-        return bool(core) and core in blob
+        addr_norm = _calchk_address_key(order_address)
+        label_norm = _calchk_address_key(_event_address_label(event))
+        return bool(addr_norm) and (
+            addr_norm in blob or (bool(label_norm) and label_norm in addr_norm)
+        )
+
+    def _event_person_match(order, event):
+        event_name, event_phone = _event_name_phone(event)
+        order_phone = normalize_phone(order.get("phone", ""))
+        if order_phone and event_phone:
+            return order_phone == normalize_phone(event_phone)
+        order_name = re.sub(r"\s+", "", str(order.get("name", ""))).lower()
+        event_name = re.sub(r"\s+", "", str(event_name or "")).lower()
+        return bool(order_name and event_name and order_name == event_name)
 
     def _phone_in_any_event(phone, events):
         phone_norm = normalize_phone(phone) if phone else ""
@@ -3187,8 +3362,41 @@ def run_backend_calendar_consistency_check(env_name, backend_email, backend_pass
             counts[name] = counts.get(name, 0) + 1
         return "、".join(f"{name}x{n}" for name, n in counts.items())
 
+    # 以該月份日曆曾出現的人員為母名單；非日曆管理客戶不列入後台反查。
+    backend_orders = [
+        order for order in backend_orders
+        if any(_event_person_match(order, event)
+               for event in roster_events_by_region.get(order["region"], []))
+    ]
+
     matched_event_ids = set()
-    result = {"backend_missing_in_calendar": [], "calendar_missing_in_backend": []}
+    reported_event_ids = set()
+    result = {
+        "backend_missing_in_calendar": [],
+        "calendar_missing_in_backend": [],
+        "backend_duplicates": [],
+    }
+
+    # 同一人、同一地址、同一日期時段若後台有多筆，本身即屬異常。
+    duplicate_order_nos = set()
+    for group in _calchk_duplicate_groups(backend_orders):
+        first = group[0]
+        order_nos = [item["order_no"] for item in group]
+        duplicate_order_nos.update(order_nos)
+        result["backend_duplicates"].append({
+            "order_nos": order_nos,
+            "name": first["name"],
+            "phone": first["phone"],
+            "address": first["address"],
+            "region": first["region"],
+            "service_date": first["service_date"],
+            "service_time": first["service_time"],
+            "issue": (
+                f"後台同一人／地址／日期／時段有 {len(group)} 筆訂單："
+                f"{', '.join(order_nos)}（{first['name'] or first['phone'] or '人員不明'}，"
+                f"{first['address']}，{first['service_date']} {first['service_time']}）。"
+            ),
+        })
 
     # ---------- 方向一：後台有、日曆沒有 ----------
     # v2026.08.14：改成兩階段配對。這個系統很多訂單共用同一組標準時段
@@ -3199,65 +3407,51 @@ def run_backend_calendar_consistency_check(env_name, backend_email, backend_pass
     # 同時段其實有好幾筆顏色、時段都正確的候選事件，只是被同時段其他訂單
     # 先搶走）。
     #
-    # 第一輪：優先用「電話」鎖定配對——實測日曆事件內容通常是
-    # 「<已確認>姓名,電話」，並不包含完整地址，用地址核對反而常常對不上；
-    # 電話是精確、不會誤判的識別碼，找到就直接鎖定，絕不會被之後任何訂單
-    # 搶走。地址核心片段吻合也一併當作可信配對（保留給日曆內容真的有寫
-    # 地址的情況）。
+    # 僅接受同一人＋同一地址＋同一日期時段，且維持一對一配對。
     for order in backend_orders:
         for event in calendar_events_by_region.get(order["region"], []):
             event_id = event.get("id")
             if event_id in matched_event_ids:
                 continue
-            if _event_time_match(order, event) and (
-                _event_phone_match(order["phone"], event)
-                or _event_addr_core_match(order["address"], event)
-            ):
+            if (_event_time_match(order, event)
+                    and _event_person_match(order, event)
+                    and _event_addr_core_match(order["address"], event)):
                 matched_event_ids.add(event_id)
                 order["_matched"] = True
                 break
 
-    # 第二輪：電話／地址都核對不上（或事件內容完全沒有可辨識資訊）的訂單，
-    # 才用「同時段還沒被配走的事件」補配——此時才可能發生名不符實的配對，
-    # 但至少不會搶走第一輪已經確認電話／地址相符的配對。
     for order in backend_orders:
-        if order.get("_matched"):
+        if order.get("_matched") or order["order_no"] in duplicate_order_nos:
             continue
-        candidates = [
+
+        same_time_yellow = [
             e for e in calendar_events_by_region.get(order["region"], [])
-            if e.get("id") not in matched_event_ids and _event_time_match(order, e)
+            if (e.get("id") not in matched_event_ids
+                and e.get("id") not in reported_event_ids
+                and _event_time_match(order, e))
         ]
-        if candidates:
-            matched_event_ids.add(candidates[0].get("id"))
-            continue
-
-        # v2026.08.14：後台有這筆訂單，但這支電話整段期間內完全沒出現在該區域
-        # 日曆的任何一筆事件裡（不限時段、不限顏色）——代表這位客人根本不是走
-        # 日曆管理流程（例如電話沒登記進日曆、或這類客人本來就不會排進這個
-        # 日曆），不列入比對範圍，避免誤報成「日曆沒有」。
-        if not _phone_in_any_event(order["phone"], all_events_by_region.get(order["region"], [])):
-            continue
-
-        # v2026.08.14：找不到黃色事件時，額外查同時段／同區域是否有「其他顏色
-        # （或根本沒設色）」的事件——這樣才分得出「日曆真的完全沒排」跟
-        # 「其實有排、只是顏色沒被標成黃色」這兩種不同狀況。顏色只彙總計數
-        # （例如「香蕉黃x6、葡萄紫x1」），不逐筆列出，避免同時段候選一多，
-        # 訊息裡出現同一個顏色名稱重複好幾次、反而不好讀。
-        same_time_any_color = [
-            e for e in all_events_by_region.get(order["region"], [])
-            if _event_time_match(order, e)
-        ]
-        if same_time_any_color:
-            yellow_events = [e for e in same_time_any_color if str(e.get("colorId", "")) == COLOR_YELLOW]
-            other_events = [e for e in same_time_any_color if str(e.get("colorId", "")) != COLOR_YELLOW]
-            parts = []
-            if yellow_events:
-                parts.append(f"{len(yellow_events)} 筆是黃色，但同時段訂單數比黃色事件數多，已被其他訂單配走")
-            if other_events:
-                parts.append(f"{len(other_events)} 筆顏色不是黃色（{_color_breakdown(other_events)}）")
-            extra = f"同時段在日曆上共找到 {len(same_time_any_color)} 筆事件：" + "；".join(parts) + "。"
+        same_person_event = next((e for e in same_time_yellow if _event_person_match(order, e)), None)
+        same_address_event = next((e for e in same_time_yellow
+                                   if _event_addr_core_match(order["address"], e)), None)
+        if same_person_event:
+            calendar_label = _event_address_label(same_person_event) or "未標示地址"
+            reason = (
+                f"後台訂單 {order['order_no']} 是 {order['service_date']} {order['service_time']}；"
+                f"同一人、同日期時段，但地址不同：日曆標示「{calendar_label}」，"
+                f"後台地址是「{order['address']}」。"
+            )
+            reported_event_ids.add(same_person_event.get("id"))
+        elif same_address_event:
+            reason = (
+                f"後台訂單 {order['order_no']} 是 {order['service_date']} {order['service_time']}；"
+                "同地址、同日期時段，但日曆是其他客人。"
+            )
+            reported_event_ids.add(same_address_event.get("id"))
         else:
-            extra = "同時段在日曆上完全找不到任何事件。"
+            reason = (
+                f"後台訂單 {order['order_no']} 是 {order['service_date']} {order['service_time']}，"
+                "日曆找不到同一人、同地址、相同日期與時段的黃色事件。"
+            )
         result["backend_missing_in_calendar"].append({
             "order_no": order["order_no"],
             "name": order["name"],
@@ -3266,31 +3460,13 @@ def run_backend_calendar_consistency_check(env_name, backend_email, backend_pass
             "region": order["region"],
             "service_date": order["service_date"],
             "service_time": order["service_time"],
-            "issue": (
-                f"後台訂單 {order['order_no']}（{order['name'] or '姓名不明'}，"
-                f"{order['phone'] or '電話不明'}，{order['region']}，服務日期 "
-                f"{order['service_date']} {order['service_time']}）在 Google 日曆找不到"
-                f"對應的黃色事件。{extra}請確認日曆是否漏排或顏色不對。"
-            ),
+            "issue": reason,
         })
-
-    def _event_name_phone(event):
-        """從日曆事件的 summary／description 解析出姓名／電話。實測事件內容
-        常見格式是「<已確認>姓名,電話」，姓名緊接在電話前面。"""
-        blob = " ".join([event.get("summary", "") or "", event.get("description", "") or ""])
-        phone_m = re.search(r"(09\d{8})", blob)
-        phone = phone_m.group(1) if phone_m else ""
-        name = ""
-        if phone_m:
-            before = blob[:phone_m.start()]
-            name_m = re.search(r"([\u4e00-\u9fffA-Za-z]+)[,，]?\s*$", before)
-            name = name_m.group(1) if name_m else ""
-        return name, phone
 
     # ---------- 方向二：日曆有、後台沒有 ----------
     for r, events in calendar_events_by_region.items():
         for event in events:
-            if event.get("id") in matched_event_ids:
+            if event.get("id") in matched_event_ids or event.get("id") in reported_event_ids:
                 continue
             start_local, end_local = _event_local_range(event)
             service_date = start_local.strftime("%Y-%m-%d") if start_local else ""
@@ -3300,21 +3476,38 @@ def run_backend_calendar_consistency_check(env_name, backend_email, backend_pass
             )
             summary = event.get("summary", "") or "（無標題）"
             event_name, event_phone = _event_name_phone(event)
+            same_time_orders = [order for order in backend_orders
+                                if order["region"] == r and _event_time_match(order, event)]
+            same_person_orders = [order for order in same_time_orders if _event_person_match(order, event)]
+            same_address_orders = [order for order in same_time_orders
+                                   if _event_addr_core_match(order["address"], event)]
+            related_order = (same_person_orders or same_address_orders or [None])[0]
+            if same_person_orders:
+                backend_address = same_person_orders[0]["address"]
+                calendar_label = _event_address_label(event) or "未標示地址"
+                reason = (
+                    f"同一人、同日期時段，但地址不同：日曆標示「{calendar_label}」，"
+                    f"後台地址是「{backend_address}」。"
+                )
+            elif same_address_orders:
+                reason = "同地址、同日期時段，但日曆是其他客人。"
+            else:
+                reason = "找不到同一人／地址／日期時段完全相符的後台訂單。"
+            calendar_address = event.get("location", "") or _event_address_label(event)
             result["calendar_missing_in_backend"].append({
+                "order_no": related_order.get("order_no", "") if related_order else "",
                 "event_summary": summary,
                 "name": event_name,
                 "phone": event_phone,
-                "address": event.get("location", "") or "",
+                "address": calendar_address,
                 "region": r,
                 "service_date": service_date,
                 "service_time": service_time,
                 "event_link": event.get("htmlLink", ""),
                 "issue": (
-                    f"{r}日曆有一筆黃色事件「{summary}」"
+                    f"{reason} {r}日曆黃色事件「{summary}」"
                     f"（{event_name or '姓名不明'}，{event_phone or '電話不明'}，"
-                    f"{service_date} {service_time}），"
-                    f"但後台這段期間的已付款訂單裡找不到服務日期／時段相符的訂單，"
-                    f"請確認是否漏成單或日期時段對不上。"
+                    f"{service_date} {service_time}）。"
                 ),
             })
 

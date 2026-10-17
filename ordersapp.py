@@ -1,9 +1,14 @@
 # ============================================================
 # 檔名：ordersapp.py
-# 版本：v8.78
+# 版本：v8.79
 # 模組：服務訂單系統主畫面／統一功能選單
-# 最後更新：2026-08-19
+# 最後更新：2026-10-17
 #
+# v8.79
+# - 功能選單分類標題改依功能名稱放置（比照 orders-system），修正「取消訂單」
+#   被歸到 A 類的問題。
+# - 修正 Streamlit 更新後仍快取舊版 orders.py 時，功能頁直接匯入新函式而啟動失敗：
+#   缺少必要函式時自動重載 orders.py；若部署檔案確實不完整，顯示缺少的函式名稱。
 # v8.78
 # - 新增「檸檬人換正式專員」通用入口，適用所有含檸檬人占位的訂單。
 # - 功能選單增加 mode 唯一化保護，避免同一功能因後續合併意外重複顯示。
@@ -15,10 +20,59 @@
 # - VIP Calendar patch 改由單一 patch bundle 套用。
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.78"
+__version__ = "8.79"
+
+import importlib
 
 import streamlit as st
 from datetime import date, timedelta
+
+try:
+    import orders as orders_core
+except Exception as e:
+    st.error(f"orders.py 載入失敗：{type(e).__name__}: {e}")
+    st.stop()
+
+# 功能頁（function/*.py）在匯入時以 from orders import ... 取用的函式。
+_REQUIRED_ORDERS_NAMES = [
+    "run_process_web",
+    "get_region_by_address",
+    "run_standalone_consistency_check",
+    "run_backend_calendar_consistency_check",
+    "format_calendar_consistency_issue",
+    "get_calendar_compare_allowed_region",
+    "find_orders_without_line_link",
+    "find_pending_stored_value_orders",
+    "add_bonus_note_to_order",
+    "apply_bonus_notes",
+    "load_worksheet",
+    "fetch_member_edit_page",
+    "submit_member_preferences",
+    "fetch_recent_service_records",
+]
+
+# Streamlit 可能在 GitHub 更新後沿用記憶體中的舊版 orders 模組。只有在偵測到
+# 函式不完整時才重載一次，避免功能頁因直接 from-import 新函式而啟動失敗。
+_missing_orders_names = [
+    name for name in _REQUIRED_ORDERS_NAMES if not hasattr(orders_core, name)
+]
+if _missing_orders_names:
+    try:
+        orders_core = importlib.reload(orders_core)
+    except Exception as e:
+        st.error(f"orders.py 重新載入失敗：{type(e).__name__}: {e}")
+        st.stop()
+    _missing_orders_names = [
+        name for name in _REQUIRED_ORDERS_NAMES if not hasattr(orders_core, name)
+    ]
+
+if _missing_orders_names:
+    st.error(
+        "orders.py 目前版本不完整，請確認 Streamlit 已部署 GitHub main 最新版本。"
+        + "\n缺少："
+        + "、".join(_missing_orders_names)
+    )
+    st.stop()
 
 from env import GOOGLE_CALENDAR_MAP
 from accounts import ACCOUNTS
@@ -157,20 +211,22 @@ _MEMO_SECTION_MAP = {
     "服務異動": "🔄 服務異動",
 }
 
-_CATEGORY_HEADERS_BY_INDEX = {
-    0: "A. 建單／成單流程",
-    9: "B. 訂單附屬功能",
-    16: "C. 稽核比對工具",
-    19: "D. LINE 通知／提醒",
-    22: "E. 會員／客戶管理",
-    25: "F. 財務功能",
+# 分類標題依功能名稱放置（比照 orders-system），避免增刪選單項目後
+# 依索引放置的標題錯位（例如「取消訂單」被歸到 A 類）。
+_CATEGORY_HEADERS_BY_FEATURE = {
+    "批次建單（Google Sheet）": "A. 建單／成單流程",
+    "取消訂單": "B. 訂單附屬功能",
+    "雙向訂單檢查": "C. 稽核比對工具",
+    "LINE 通知產生器": "D. LINE 通知／提醒",
+    "會員喜好設定": "E. 會員／客戶管理",
+    "台北/台中區對帳": "F. 財務功能",
 }
 _menu_display_options = []
 _menu_option_targets = []
 _menu_counter = 0
 for _opt_idx, _opt in enumerate(FUNCTION_OPTIONS):
-    if _opt_idx in _CATEGORY_HEADERS_BY_INDEX:
-        _menu_display_options.append(f"── {_CATEGORY_HEADERS_BY_INDEX[_opt_idx]} ──")
+    if _opt[2] in _CATEGORY_HEADERS_BY_FEATURE:
+        _menu_display_options.append(f"── {_CATEGORY_HEADERS_BY_FEATURE[_opt[2]]} ──")
         _menu_option_targets.append(None)
     _menu_counter += 1
     _menu_display_options.append(f"{_menu_counter}. {_opt[0]}")

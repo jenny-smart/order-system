@@ -20,7 +20,13 @@
 # - 訂單轉換、混合配班與共用建單核心在寫入前會再次查核；
 #   後台登入失效、占用查詢失敗或找不到目標訂單時一律停止，
 #   不送出建單／換班 POST。
-# （v8.63／v8.64 為 LINE 通知產生器變更，不在本次移植範圍）
+# v8.64
+# - 多筆合併訂單若有不同服務地址，改為在每筆服務時間下方顯示
+#   該筆地址，不再停止產生訊息，也不再只顯示第一筆地址。
+# v8.63
+# - LINE 通知產生器合併多筆訂單前，先逐筆核對服務地址。若地址
+#   不同，停止產生合併訊息並列出每筆訂單的地址，避免誤用第一筆
+#   訂單地址；客服確認後可改為每行一筆，分別產生通知。
 # v8.62
 # - 修正合併多個不同服務日期的儲值金／VIP 訂單 LINE 通知：combined_period
 #   已包含每筆完整日期，訊息範本不再額外加上第一筆日期，避免第一行日期重複。
@@ -2412,7 +2418,8 @@ def build_line_message(order_result):
     address = order_result["address"]
     order_no = order_result["order_no"]
     multi_date = order_result.get("multi_date", False)
-    if multi_date and combined_period:
+    multi_address = order_result.get("multi_address", False)
+    if (multi_date or multi_address) and combined_period:
         service_time_line = f"服務時間 :\n{period}"
     else:
         service_time_line = f"服務時間 : {date_disp}  {period}"
@@ -2421,6 +2428,7 @@ def build_line_message(order_result):
     # 時間），由呼叫端組好整段文字傳進來。
     if order_result.get("merged_service_time_line"):
         service_time_line = order_result["merged_service_time_line"]
+    standalone_address_line = "" if multi_address else f"服務地址：{address}"
     # v2026.07.10：訂單轉換的合併訂單 LINE 訊息不需要「服務金額」這行
     # （新訂單本身是用優惠券折抵成 0，顯示金額反而容易讓客人誤會），
     # 只有信用卡分支才有獨立的「服務金額」行，ATM 分支本來就是用
@@ -2463,7 +2471,7 @@ def build_line_message(order_result):
             stored_value_service_time_line = f"服務時間：{date_disp} {period}"
         return f"""感謝您預約檸檬家事【{service_label}】服務
 {stored_value_service_time_line}
-服務地址：{address}
+{standalone_address_line}
 
 {vip_fare_line}檸檬家事專員會於現場再溝通服務需求，
 以於系統估算時間內可以完的服務項目為主。
@@ -2505,7 +2513,7 @@ VIP若取消/異動服務日期，需於服務日前4個工作天上班時間(�
 """
         return f"""感謝您於 檸檬家事 預約【{service_label}】服務！
 {service_time_line}
-{amount_line_text}{card_fare_line}服務地址：{address}
+{amount_line_text}{card_fare_line}{standalone_address_line}
 {deadline_line}
 
 {common_footer}
@@ -2526,11 +2534,16 @@ VIP若取消/異動服務日期，需於服務日前4個工作天上班時間(�
             extra_note = ""
         atm_pay_title = "▲請您依下列匯款帳戶資訊繳費，謝謝！" if region == "台北" else "請您依下列匯款帳戶資訊繳費，謝謝！"
         extra_note_block = f"\n{extra_note}" if extra_note else ""
-        service_lines = (
-            f"{service_time_line}\n{taipei_atm_fare_line}服務地址：{address}"
-            if region == "台北"
-            else f"{service_time_line}\n服務地址：{address}{taichung_atm_fare_line}"
-        )
+        if region == "台北":
+            service_lines = "\n".join(
+                part for part in [service_time_line, taipei_atm_fare_line.rstrip(), standalone_address_line]
+                if part
+            )
+        else:
+            service_lines = "\n".join(
+                part for part in [service_time_line, standalone_address_line, taichung_atm_fare_line.strip()]
+                if part
+            )
         if fully_covered:
             atm_deadline_line = "本次費用已由優惠券全額折抵，無需另行匯款。"
             pay_section = ""
@@ -3247,7 +3260,19 @@ def build_combined_line_message_from_order_nos(env_name, backend_email, backend_
         raise Exception(f"合併的訂單服務類型不同（{', '.join(service_labels)}），請分開輸入分別產生通知。")
     unique_dates = sorted({o["service_date"] for o in orders_info})
     all_same_date = len(unique_dates) == 1
-    if all_same_date:
+    normalized_addresses = {
+        re.sub(r"\s+", "", str(o.get("address") or "")) for o in orders_info
+    }
+    multi_address = len(normalized_addresses) > 1
+    if multi_address:
+        period_lines = []
+        for o in orders_info:
+            d = o["service_date"].replace("-", "/")
+            p_str = _format_period_display(str(o["period_s"] or "").replace(" ", ""), str(o["person"] or ""), display_override=str(o["actual_period"] or "").replace(" ", ""))
+            period_lines.extend([f"{d} {p_str}", o["address"]])
+        combined_period = "\n".join(period_lines)
+        multi_date = not all_same_date
+    elif all_same_date:
         combined_period = _build_combined_period_display([{"period_s": o["period_s"], "actual_period": o["actual_period"], "person": o["person"]} for o in orders_info])
         multi_date = False
     else:
@@ -3280,7 +3305,7 @@ def build_combined_line_message_from_order_nos(env_name, backend_email, backend_
         "address": first["address"], "date": first["service_date"],
         "period": first["period_s"], "period_s": first["period_s"],
         "actual_period": first["actual_period"], "combined_period": combined_period,
-        "multi_date": multi_date, "person": first["person"],
+        "multi_date": multi_date, "multi_address": multi_address, "person": first["person"],
         "service_amount": amount_display, "price_with_tax": str(total_amount),
         "fare": str(total_fare) if total_fare else "0", "payway": first["payway"],
         "region": first["region"], "service_label": first["service_label"],
