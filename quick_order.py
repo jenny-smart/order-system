@@ -460,6 +460,8 @@ from shared.env_config import apply_env
 BOOKING_ENDPOINT_MAP = {"信用卡": "/booking/single", "ATM": "/booking/single", "儲值金": "/booking/stored_value_routine"}
 
 
+from service_pricing import account_balance, customer_tier, unit_price as service_unit_price, apply_booking_price, load_config
+
 TAX_RATE = 1.05
 
 
@@ -1008,7 +1010,7 @@ def quick_create_order(
     date_s, period_s, hour, person="2", fallback_fare="0", discount_code="",
     payment_type="", carrier_info="", company_no="", company_title="",
     invoice_type_override="", carrier_type_id_override="",
-    extra_fields=None, allow_auto_lemon_shift=False,
+    extra_fields=None, allow_auto_lemon_shift=False, pricing_balance=None,
 ):
     payway = normalize_booking_payway(payway)
     base_url = _configure_environment(env_name)
@@ -1094,6 +1096,10 @@ def quick_create_order(
     calc_fields = extract_calc_fields(calc_result, fallback_hours=base_data["hour"], fallback_fare=best_addr.get("fare", "0"))
     base_data["price"] = str(calc_fields.get("price") or "0")
     base_data["price_vvip"] = str(calc_fields.get("price_vvip") or "0")
+    pricing_config = load_config()
+    if pricing_config["enabled"]:
+        balance = pricing_balance if pricing_balance is not None else account_balance(member_payload)
+        apply_booking_price(base_data, customer_tier("existing", balance), pricing_config)
     base_data["fare"] = first_nonzero(calc_fields.get("fare"), best_addr.get("fare"), default="0")
     if base_data["price"] in ("", "0", "0.0") and payway != "儲值金":
         raise Exception("計算時數後金額為 0，請確認坪數/時數設定是否正確")
@@ -2143,7 +2149,7 @@ def convert_order_stage2_create_new_orders(stage1_result, new_orders):
 
         try:
             _day_type_new = _day_type_from_date(new_date_s)
-            _unit_price_new = 700 if _day_type_new == "週末" else 600
+            _unit_price_new = service_unit_price(new_date_s, customer_tier("existing", account_balance(member_payload)) if load_config()["enabled"] else "regular")
             _person_hours_new = int(new_person) * int(float(new_hour))
             price_with_tax = _unit_price_new * _person_hours_new
             if price_with_tax <= 0 and payway_a != "儲值金":
@@ -3403,22 +3409,24 @@ def get_stored_value(env_name, backend_email, backend_password, phone, clean_typ
     try:
         data = ajax.json()
     except Exception:
-        return 0, None
+        raise ValueError("會員儲值金（含購物金）查詢失敗")
     if data.get("return_code") == "0000":
-        sv = int(data.get("storedValue") or 0)
+        sv = int(account_balance(data))
         member = data.get("member", {})
         return sv, member
-    return 0, None
+    raise ValueError("會員儲值金（含購物金）查詢失敗")
 
 
 
 
 
 
-def calc_stored_value_plan(sv, new_service_price=None, day_type="平日", total_person_hours=None, zero_total_stored_order=True):
+def calc_stored_value_plan(sv, new_service_price=None, day_type="平日", total_person_hours=None, zero_total_stored_order=True, service_date=None):
     import math
     sv = int(float(sv or 0))
-    unit_price = 700 if str(day_type or "").strip() == "週末" else 600
+    if load_config()["enabled"] and service_date is None:
+        raise ValueError("自訂價格需提供服務日期")
+    unit_price = service_unit_price(service_date, customer_tier("existing", sv)) if service_date else (700 if day_type == "週末" else 600)
     try:
         ph = int(float(total_person_hours or 0))
     except Exception:
@@ -3458,13 +3466,12 @@ def _stored_value_makeup_context(
         sv = int(float(balance_override))
     else:
         sv, _ = get_stored_value(env_name, backend_email, backend_password, phone, clean_type_id)
-    if sv <= 0 and not allow_zero_balance:
-        raise Exception("查無儲值金或儲值金餘額為 0")
+    sv = max(sv, 0)
     try:
         total_ph = int(float(person)) * int(float(hour))
     except Exception:
         total_ph = 0
-    plan = calc_stored_value_plan(sv, None, day_type=day_type, total_person_hours=total_ph, zero_total_stored_order=True)
+    plan = calc_stored_value_plan(sv, None, day_type=day_type, total_person_hours=total_ph, zero_total_stored_order=True, service_date=service_date)
     lookup = quick_lookup_member(env_name, backend_email, backend_password, phone, clean_type_id)
     member_payload = lookup.get("member_payload")
     if not member_payload:
@@ -3487,11 +3494,21 @@ def stored_value_makeup_create_stored_order(
     allow_auto_lemon_shift=False,
 ):
     ctx = _stored_value_makeup_context(env_name, backend_email, backend_password, phone, clean_type_id, service_date, period_s, hour, person, address, region, coupon_prefix_base, coupon_valid_days)
+    if ctx['balance'] <= 0:
+        return {
+            'stage': 'stored_order', 'balance': 0, 'plan': ctx['plan'], 'day_type': ctx['day_type'],
+            'stored_order': {}, 'coupon_a': {}, 'skipped_stored_order': True,
+            'lemon_result': {'success': True, 'message': '餘額為0，略過儲值金清零單；第二段按非VIP金額建立客付單。'},
+            'address': ctx['address'], 'region': ctx['region'], 'phone': phone,
+            'clean_type_id': clean_type_id, 'service_date': service_date, 'period_s': period_s,
+            'hour': str(hour), 'person': str(person), 'coupon_prefix_base': coupon_prefix_base or phone,
+            'coupon_valid_days': coupon_valid_days,
+        }
     regions = [ctx["region"]] if ctx.get("region") else list(COUPON_COMPANY_ID_MAP.keys())
     services = ["居家清潔", "裝修細清"]
     coupon_a = create_coupon(env_name, backend_email, backend_password, title=f"儲值金清零-{phone}", discount=ctx["plan"]["coupon_a"], date_s=ctx["today_str"], date_e=ctx["date_e"], prefix=ctx["prefix_a"], piece="1", regions=regions, service_items=services)
     code_a = coupon_a.get("coupon_code") or coupon_a.get("coupon_prefix") or ctx["prefix_a"]
-    stored_order = quick_create_order(env_name=env_name, payway="儲值金", region=ctx["region"], lookup_result=ctx["lookup"], address=ctx["address"], clean_type_id=clean_type_id, date_s=service_date, period_s=period_s, hour=str(hour), person=str(person), discount_code=code_a, allow_auto_lemon_shift=bool(allow_auto_lemon_shift))
+    stored_order = quick_create_order(env_name=env_name, payway="儲值金", region=ctx["region"], lookup_result=ctx["lookup"], address=ctx["address"], clean_type_id=clean_type_id, date_s=service_date, period_s=period_s, hour=str(hour), person=str(person), discount_code=code_a, pricing_balance=ctx["balance"], allow_auto_lemon_shift=bool(allow_auto_lemon_shift))
     lemon_result = assign_lemon_cleaners_to_order(session=stored_order["session"], base_url=_configure_environment(env_name), order_no_a=stored_order["order_no"], service_date=service_date, period_s=period_s, person_count=str(person), allow_auto_lemon_shift=bool(allow_auto_lemon_shift))
     note = (f"儲值金補價差第一段：儲值金折抵單 {stored_order['order_no']}，{ctx['day_type']}單價 {ctx['plan']['unit_price']} × {ctx['plan']['total_person_hours']}人時 = {ctx['plan']['dummy_price']}，優惠券A折抵 {ctx['plan']['coupon_a']} 元，剩餘 {ctx['plan']['stored_value_applied']} 元扣儲值金後總額應為 0，檸檬人勿動。")
     _update_order_note(stored_order["session"], _configure_environment(env_name), stored_order["order_no"], note)
@@ -3507,14 +3524,17 @@ def stored_value_makeup_create_paid_order(
 ):
     ctx = _stored_value_makeup_context(env_name, backend_email, backend_password, phone, clean_type_id, service_date, period_s, hour, person, address, region, coupon_prefix_base, coupon_valid_days, balance_override=balance_override)
     if balance_override not in (None, ""):
-        ctx["balance"] = int(float(balance_override))
+        ctx["balance"] = max(int(float(balance_override)), 0)
         ctx["plan"]["coupon_b"] = ctx["balance"]
     regions = [ctx["region"]] if ctx.get("region") else list(COUPON_COMPANY_ID_MAP.keys())
     services = ["居家清潔", "裝修細清"]
-    coupon_b = create_coupon(env_name, backend_email, backend_password, title=f"儲值金補價差客付-{phone}", discount=ctx["plan"]["coupon_b"], date_s=ctx["today_str"], date_e=ctx["date_e"], prefix=ctx["prefix_b"], piece="1", regions=regions, service_items=services)
-    code_b = coupon_b.get("coupon_code") or coupon_b.get("coupon_prefix") or ctx["prefix_b"]
+    coupon_b = {}
+    code_b = ""
+    if ctx["balance"] > 0:
+        coupon_b = create_coupon(env_name, backend_email, backend_password, title=f"儲值金補價差客付-{phone}", discount=ctx["plan"]["coupon_b"], date_s=ctx["today_str"], date_e=ctx["date_e"], prefix=ctx["prefix_b"], piece="1", regions=regions, service_items=services)
+        code_b = coupon_b.get("coupon_code") or coupon_b.get("coupon_prefix") or ctx["prefix_b"]
     invoice = _invoice_payload(invoice_mode, member_email=ctx["member"].get("email") or "", mobile_carrier=mobile_carrier, company_title=company_title, company_no=company_no)
-    paid_order = quick_create_order(env_name=env_name, payway=customer_payway, region=ctx["region"], lookup_result=ctx["lookup"], address=ctx["address"], clean_type_id=clean_type_id, date_s=service_date, period_s=period_s, hour=str(hour), person=str(person), discount_code=code_b, allow_auto_lemon_shift=bool(allow_auto_lemon_shift), **invoice)
+    paid_order = quick_create_order(env_name=env_name, payway=customer_payway, region=ctx["region"], lookup_result=ctx["lookup"], address=ctx["address"], clean_type_id=clean_type_id, date_s=service_date, period_s=period_s, hour=str(hour), person=str(person), discount_code=code_b, pricing_balance=ctx["balance"], allow_auto_lemon_shift=bool(allow_auto_lemon_shift), **invoice)
     pair = f"儲值折抵單 {stored_order_no} + 客付補價差單 {paid_order['order_no']}" if stored_order_no else f"客付補價差單 {paid_order['order_no']}"
     note = f"儲值金補價差第二段：{pair}，客付單使用優惠券B折抵原儲值金餘額 {ctx['balance']} 元。"
     _update_order_note(paid_order["session"], _configure_environment(env_name), paid_order["order_no"], note)
@@ -3849,9 +3869,7 @@ def quick_create_new_customer_order(env_name, backend_email, backend_password, c
     tel = str(customer.get("tel", "")).strip()
     line = str(customer.get("line", "")).strip()
     address = str(customer["address"]).strip()
-    # 2026-07-08：移除 geocode 猜行政區。
-    # 之前地址缺少行政區時可能猜成大安區，導致新單區域錯誤；現在只修正既有行政區順序，不再補猜。
-    address = _fix_address_district_order(address, fallback_district="")
+    # 成單保留使用者輸入的地址，不自動補猜或改寫（移植 orders-system 34d40d2）。
     address_parts = _split_booking_address(address)
     _assert_address_region_resolved(address_parts, address, context="新客地址")
     address_for_lookup = address_parts["full"]

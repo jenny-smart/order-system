@@ -58,7 +58,7 @@ class LemonRetryTest(unittest.TestCase):
                 refresh.assert_called_once_with('s', 'base', payway)
 
     def test_makeup_orders_forward_auto_shift_switch_to_shared_order(self):
-        ctx = {'region': '台北', 'lookup': {}, 'address': '地址', 'member': {},
+        ctx = {'balance': 100, 'region': '台北', 'lookup': {}, 'address': '地址', 'member': {},
                'plan': {'coupon_a': 100, 'coupon_b': 100}, 'today_str': '2026-09-14',
                'date_e': '2026-10-14', 'prefix_a': 'a', 'prefix_b': 'b'}
         for fn in (q.stored_value_makeup_create_stored_order, q.stored_value_makeup_create_paid_order):

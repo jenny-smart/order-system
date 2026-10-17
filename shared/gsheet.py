@@ -7,7 +7,6 @@ import json
 import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
-from googleapiclient.discovery import build
 
 from env import GOOGLE_SHEET_ID, GOOGLE_SERVICE_ACCOUNT_FILE
 
@@ -54,7 +53,8 @@ def build_gsheet_client():
     ]
     service_account_info = get_service_account_info()
     creds = Credentials.from_service_account_info(service_account_info, scopes=scopes)
-    return gspread.authorize(creds)
+    from shared.sheets_quota import QuotaHTTPClient
+    return gspread.authorize(creds, http_client=QuotaHTTPClient)
 
 
 def load_worksheet(sheet_name):
@@ -122,13 +122,6 @@ def set_customer_notice_clip_style(ws, headers=None, row_numbers=None):
         col_index = headers.index("客服備註")  # 0-based
         sheet_id = ws.id
 
-        service_account_info = get_service_account_info()
-        creds = Credentials.from_service_account_info(
-            service_account_info,
-            scopes=["https://www.googleapis.com/auth/spreadsheets"],
-        )
-        service = build("sheets", "v4", credentials=creds)
-
         requests_body = [
             {
                 "repeatCell": {
@@ -169,10 +162,7 @@ def set_customer_notice_clip_style(ws, headers=None, row_numbers=None):
                     }
                 )
 
-        service.spreadsheets().batchUpdate(
-            spreadsheetId=GOOGLE_SHEET_ID,
-            body={"requests": requests_body},
-        ).execute()
+        ws.spreadsheet.batch_update({"requests": requests_body})
 
     except Exception as e:
         print(f"設定客服備註欄位自動裁剪失敗: {e}")

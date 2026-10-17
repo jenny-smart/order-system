@@ -21,6 +21,7 @@ from function.ui_common import (
 from shared.execution_log_service import log_execution
 
 import quick_order as qo
+from service_pricing import unit_price
 
 _REQUIRED_QUICK_ORDER_NAMES = [
     "quick_lookup_member",
@@ -806,7 +807,7 @@ def render_new_customer(backend_email, backend_password, env):
         with sd4:
             _nc_hour = PERIOD_HOUR_MAP.get(_nc_period, 3)
             _day_type_nc = "週末" if _nc_date.weekday() >= 5 else "平日"
-            _unit_nc = 700 if _day_type_nc == "週末" else 600
+            _unit_nc = unit_price(_nc_date, "regular")
             _total_nc = int(_nc_person) * _nc_hour * _unit_nc
             st.markdown(f"**{_nc_hour}小時 / {_day_type_nc}**")
             st.markdown(f"預估：**{_total_nc:,}元**")
@@ -1378,7 +1379,8 @@ def render_topup_diff(backend_email, backend_password, env):
         sv_person_hours = int(sv_svc_person) * int(sv_svc_hour)
         st.markdown(f"<br><b>{sv_svc_hour} 小時</b><br><span style='color:#8E8E93;font-size:13px;'>人時：{sv_person_hours}</span>", unsafe_allow_html=True)
     with sd4:
-        sv_unit_price = 700 if sv_day_type_auto == "週末" else 600
+        sv_unit_price = unit_price(sv_svc_date, "vip")
+        st.caption("VIP試算；實際依查詢餘額判定")
         st.markdown(f"<br><b>{sv_unit_price} 元 / 人時</b><br><span style='color:#8E8E93;font-size:13px;'>儲值金單目標金額：{sv_unit_price * sv_person_hours}</span>", unsafe_allow_html=True)
     st.markdown("<hr>", unsafe_allow_html=True)
     step("4", "客付訂單付款與發票")
@@ -1457,11 +1459,14 @@ def render_topup_diff(backend_email, backend_password, env):
         st.caption(f"計算式：{plan['dummy_price']} - {stored_stage['balance']} = {plan['coupon_a']}；剩餘 {plan.get('stored_value_applied', stored_stage['balance'])} 扣儲值金。")
         c4.metric("儲值金單", so.get("order_no", "—"))
         ca = stored_stage.get("coupon_a", {})
-        st.success(
-            f"✅ 第一段完成：儲值金清零訂單 {so.get('order_no', '—')}；"
-            f"優惠券A {ca.get('coupon_code') or ca.get('coupon_prefix')}，面額 {plan['coupon_a']} 元。　"
-            f"👤 專員：{so.get('staff') or '（無班表資料）'}"
-        )
+        if stored_stage.get('skipped_stored_order'):
+            st.info('餘額為0：略過儲值金清零單及優惠券，第二段依非VIP價格建單。')
+        else:
+            st.success(
+                f"✅ 第一段完成：儲值金清零訂單 {so.get('order_no', '—')}；"
+                f"優惠券A {ca.get('coupon_code') or ca.get('coupon_prefix')}，面額 {plan['coupon_a']} 元。　"
+                f"👤 專員：{so.get('staff') or '（無班表資料）'}"
+            )
         if so.get("order_no_duplicated"):
             show_duplicate_order_warning(so.get("order_no"), so.get("order_no_duplicate_count", 2), dedup_key=f"sv_stored_{so.get('order_no')}")
         lemon_r = stored_stage.get("lemon_result", {})

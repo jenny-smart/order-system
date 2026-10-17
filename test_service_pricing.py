@@ -21,9 +21,6 @@ def configured():
     return config
 
 
-# order-system 移植說明：quick_order 的儲值金／舊客價格整合（依 service_pricing）
-# 尚未移植到 order-system（不屬於 memo 第二批），相關 quick_order 測試先移除；
-# memo_system 與 service_pricing 本身的測試全部保留。
 class PricingTest(unittest.TestCase):
     def test_all_twelve_prices(self):
         config = configured()
@@ -84,9 +81,28 @@ class PricingTest(unittest.TestCase):
             self.assertEqual(sent['price'], '4952')
             self.assertEqual(sent['fare'], '100')
 
+    def test_existing_order_uses_balance_not_payment(self):
+        import quick_order as q
+        for balance, expected in [(0, '7238'), (20, '4952')]:
+            for payway in ['信用卡', 'ATM', '儲值金']:
+                with patch.dict(os.environ, {'SERVICE_PRICING_JSON': json.dumps(configured())}), \
+                     patch.object(q, '_configure_environment', return_value='https://example.invalid'), \
+                     patch.object(q, '_get_booking_token_for_payway', return_value='token'), \
+                     patch.object(q, 'resolve_backend_booking_address', return_value=({'address':'test'}, {}, {})), \
+                     patch.object(q, 'calculate_hour', return_value={'data': {'price': 1}}), \
+                     patch.object(q, '_query_booking_slot_with_lemon_retry', side_effect=RuntimeError('stop')) as query:
+                    with self.assertRaisesRegex(RuntimeError, 'stop'):
+                        q.quick_create_order('dev', payway, '', {'session': Mock(), 'phone':'0900000000', 'member_payload': {'member': {'member_id':'1'}, 'storedValue': balance}}, 'test', '1', '2027-01-02', '08:00-12:00', '4')
+                    self.assertEqual(query.call_args.args[3]['price'], expected)
+
     def test_makeup_and_time_changes_use_period(self):
+        import quick_order as q
         from memo_system import change_order as c
         with patch.dict(os.environ, {'SERVICE_PRICING_JSON': json.dumps(configured())}):
+            plan = q.calc_stored_value_plan(100, total_person_hours=8, service_date='2027-01-02')
+            self.assertEqual(plan['dummy_price'], 5200)
+            self.assertEqual(plan['coupon_a'], 5100)
+            self.assertEqual(plan['coupon_b'], 100)
             for balance, rate in [('0', 950), ('1', 650)]:
                 result = c.calc_time_change_fee(date(2027,1,2), 1.5, 2, order={'pricing_balance':balance})
                 self.assertEqual(result['amount'], rate * 3)
@@ -99,6 +115,15 @@ class PricingIntegrationTest(unittest.TestCase):
             for days, expected in [(4, 0), (3, 2280), (2, 2280), (1, 3800), (0, 3800)]:
                 with patch.object(c, '_count_workdays_before', return_value=days):
                     self.assertEqual(c.calc_change_fee(order, date(2027,1,2))['change_fee'], expected)
+
+    def test_zero_balance_skips_stored_order(self):
+        import quick_order as q
+        ctx = dict(balance=0, plan={}, day_type='週末', address='test', region='台北')
+        with patch.object(q, '_stored_value_makeup_context', return_value=ctx), patch.object(q, 'create_coupon') as coupon, patch.object(q, 'quick_create_order') as create:
+            result = q.stored_value_makeup_create_stored_order('dev', '', '', '0900000000', '1', '2027-01-02', '08:00-12:00', 4, 2)
+            self.assertTrue(result['skipped_stored_order'])
+            coupon.assert_not_called()
+            create.assert_not_called()
 
     def test_settings_form_has_twelve_rates_and_saves(self):
         from streamlit.testing.v1 import AppTest
