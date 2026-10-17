@@ -271,13 +271,17 @@ def _sheet_config(region: str) -> dict:
         spreadsheet_id = str(fallback.get("spreadsheet_id") or "").strip()
         gid_text = str(fallback.get("gid") or gid_text or "").strip()
         worksheet_title = fallback.get("worksheet_title") or worksheet_title
-    if not spreadsheet_id:
-        raise ValueError(f"Secrets 尚未設定「{region}」清潔異動試算表 ID")
     try:
         gid = int(gid_text) if gid_text else None
     except ValueError as exc:
         raise ValueError(f"Secrets 的「{region}」清潔異動 GID 必須是整數") from exc
-    spreadsheet_id = _year_root_id("CHANGE", region, spreadsheet_id)
+    # 年度根目錄「根目錄」模式：沒有原設定 ID 也能直接用根目錄找到的年度檔
+    resolved = _year_root_id("CHANGE", region, spreadsheet_id)
+    if not resolved:
+        raise ValueError(f"Secrets 尚未設定「{region}」清潔異動試算表 ID，年度根目錄也找不到")
+    if resolved != spreadsheet_id:
+        gid = None  # 換到別的年度檔時 GID 不同，改用分頁名稱
+    spreadsheet_id = resolved
     return {"spreadsheet_id": spreadsheet_id, "gid": gid, "worksheet_title": worksheet_title}
 
 
