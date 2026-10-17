@@ -18,13 +18,42 @@ def test_routes_categories(monkeypatch):
     calls = []
     monkeypatch.setattr(year_roots, "choose_file_id",
                         lambda cat, area, cid, file_index=0: calls.append((cat, area, file_index)) or cid)
-    change_order._year_root_id("CHANGE", "桃園", "A")
-    change_order._year_root_id("CHANGE", "台北", "B")
     from memo_system import atm
     atm._year_root_id("ATM", "新竹", "C")
     atm._year_root_id("ATM", "高雄", "D")
-    assert calls == [("服務異動", "桃園", 0), ("內勤工作表單", "台北", 0),
-                     ("名冊薪資", "新竹", 1), ("內勤工作表單", "高雄", 0)]
+    assert calls == [("名冊薪資", "新竹", 1), ("內勤工作表單", "高雄", 0)]
+    assert change_order._change_root_category("桃園") == "服務異動"
+    assert change_order._change_root_category("台北") == "內勤工作表單"
+
+
+def test_locate_ignores_mode_and_reports(monkeypatch):
+    header = [["t"], ["d"], ["類別"]]
+    row = ["內勤工作表單", "台北", "R", "", "{YYYY}x", "", "{YYYY}台北內勤工作表單｜{YYYY}舊名", "2026", "", "", "原設定", ""]
+    written = []
+    roots = year_roots.YearRoots(header + [row], lambda: "drive", lambda r, t: written.append((r, t)))
+    monkeypatch.setattr(year_roots, "resolve", lambda drive, rule, year, area, idx: ("ID", "2027x/2027台北內勤工作表單"))
+    assert roots.locate("內勤工作表單", "台北", 2027) == "ID"
+    assert "使用根目錄" in written[-1][1]
+    import pytest
+    with pytest.raises(FileNotFoundError):
+        roots.locate("內勤工作表單", "火星", 2027)
+
+
+def test_resolve_tries_alternative_names():
+    class Drive:
+        pass
+    rule = year_roots.parse_rules([["t"], ["d"], ["類別"],
+        ["服務異動", "桃園", "R", "", "{YYYY}f", "03.桃園", "{YYYY}服務異動-桃園｜{YYYY}桃園退款及儲值金異動", "2026"]])[0]
+    tree = {("R", "2026f"): "F1", ("F1", "03.桃園"): "F2", ("F2", "2026桃園退款及儲值金異動"): "FILE"}
+
+    def child(drive, parent, name, folder):
+        if (parent, name) not in tree:
+            raise FileNotFoundError(name)
+        return {"id": tree[(parent, name)]}
+
+    import unittest.mock as m
+    with m.patch.object(year_roots, "_child", child):
+        assert year_roots.resolve(Drive(), rule, 2026, "桃園")[0] == "FILE"
 
 
 def test_no_settings_returns_configured(monkeypatch):
