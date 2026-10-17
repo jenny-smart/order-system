@@ -33,11 +33,16 @@ class MemoHostFallbackTest(unittest.TestCase):
         host.regions = lambda kind: ["台北", "台中", "火星"]
         self.assertEqual(c.supported_regions(), ["台北", "台中"])
 
-    def test_atm_uses_host_sheet(self):
-        host.region_sheet = lambda kind, region: {"spreadsheet_id": f"{kind}-{region}"} if kind == "ATM" else None
-        with patch.object(atm, "_secret_text", lambda key: ""), \
-             patch.object(atm, "_year_root_id", lambda kind, region, sid: sid):
-            self.assertEqual(atm._atm_sheet_config("台中")["spreadsheet_id"], "ATM-台中")
+    def test_atm_ignores_secrets_and_uses_root(self):
+        host.region_sheet = lambda kind, region: {"spreadsheet_id": "host", "gid": 3}
+        calls = []
+        with patch.object(atm, "_secret_text", lambda key: "secret"), \
+             patch("year_roots.root_file_id",
+                   lambda cat, area, file_index=0: calls.append((cat, area, file_index)) or f"ROOT-{area}"):
+            config = atm._atm_sheet_config("台中")
+            atm._atm_sheet_config("桃園")
+        self.assertEqual(config, {"spreadsheet_id": "ROOT-台中", "gid": None, "worksheet_title": "ATM"})
+        self.assertEqual(calls, [("內勤工作表單", "台中", 0), ("名冊薪資", "桃園", 1)])
 
     def test_host_errors_are_ignored(self):
         def boom(*_):
@@ -46,15 +51,6 @@ class MemoHostFallbackTest(unittest.TestCase):
         host.service_account = boom
         self.assertIsNone(host.lookup_region_sheet("CHANGE", "台北"))
         self.assertIsNone(host.lookup_service_account())
-
-
-class YearRootSwitchTest(unittest.TestCase):
-    def test_atm_switched_file_uses_title(self):
-        secrets = {"ATM_TAIPEI_SPREADSHEET_ID": "OLD", "ATM_TAIPEI_GID": "5"}
-        with patch.object(atm, "_secret_text", lambda key: secrets.get(key, "")), \
-             patch.object(atm, "_year_root_id", lambda kind, region, sid: "NEW"):
-            config = atm._atm_sheet_config("台北")
-        self.assertEqual((config["spreadsheet_id"], config["gid"]), ("NEW", None))
 
 
 class WorksheetByNameTest(unittest.TestCase):
@@ -98,18 +94,20 @@ class WorksheetByNameTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):  # 兩個候選分頁時不猜
             self._get({"2026訂單金流異動表": 1, "2027訂單金流異動表": 2})
 
-    def test_atm_prefers_tab_name_then_gid(self):
-        cfg = {"spreadsheet_id": "X", "gid": 9, "worksheet_title": "ATM"}
-        with patch.object(atm, "_atm_sheet_config", lambda region: cfg), \
-             patch.object(atm, "get_atm_spreadsheet", lambda sid: self.Sheet({"ATM": 3, "舊": 9})):
-            self.assertEqual(atm.get_atm_worksheet("台北"), ("ws", "ATM"))
-        with patch.object(atm, "_atm_sheet_config", lambda region: cfg), \
-             patch.object(atm, "get_atm_spreadsheet", lambda sid: self.Sheet({"改名的ATM": 9})):
-            self.assertEqual(atm.get_atm_worksheet("台北"), ("ws", "改名的ATM"))
-        with patch.object(atm, "_atm_sheet_config", lambda region: cfg), \
-             patch.object(atm, "get_atm_spreadsheet", lambda sid: self.Sheet({"其他": 1})):
-            with self.assertRaises(ValueError):
-                atm.get_atm_worksheet("台北")
+    def test_atm_tab_by_name(self):
+        cfg = {"spreadsheet_id": "X", "gid": None, "worksheet_title": "ATM"}
+
+        def get(tabs):
+            sheet = self.Sheet(tabs)
+            sheet.title = "測試檔"
+            with patch.object(atm, "_atm_sheet_config", lambda region: cfg), \
+                 patch.object(atm, "get_atm_spreadsheet", lambda sid: sheet):
+                return atm.get_atm_worksheet("台北").title
+
+        self.assertEqual(get({"富邦ATM": 1, "ATM": 3}), "ATM")
+        self.assertEqual(get({"元大ATM": 2, "富邦ATM": 1, "2026.04ATM": 9}), "富邦ATM")
+        with self.assertRaises(ValueError):
+            get({"其他": 0, "2026.04ATM": 9})
 
 
 class WeekdayPricingTest(unittest.TestCase):

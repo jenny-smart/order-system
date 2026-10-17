@@ -80,50 +80,18 @@ def _secret_text(key: str) -> str:
     return str(os.getenv(key, "") or "").strip()
 
 
-def _year_root_id(kind: str, region: str, spreadsheet_id: str) -> str:
-    """依主控表「年度根目錄設定」的模式切換年度檔；原設定／比對時回傳原本的 ID。"""
-    try:
-        from year_roots import choose_file_id
-    except Exception:
-        return spreadsheet_id
-    if kind == "ATM":
-        category, index = ("名冊薪資", 1) if region in ("桃園", "新竹") else ("內勤工作表單", 0)
-    else:
-        category, index = ("服務異動", 0) if region in ("桃園", "新竹") else ("內勤工作表單", 0)
-    return choose_file_id(category, region, spreadsheet_id, file_index=index)
-
-
 def _sheet_config(region: str) -> Dict:
-    if region not in REGION_SECRET_PREFIX:
-        raise ValueError(f"不支援的地區：{region}")
-    prefix = REGION_SECRET_PREFIX[region]
-    spreadsheet_id = _secret_text(f"ATM_{prefix}_SPREADSHEET_ID")
-    gid_text = _secret_text(f"ATM_{prefix}_GID")
-    worksheet_title = _secret_text(f"ATM_{prefix}_WORKSHEET_TITLE")
-    if not spreadsheet_id:
-        raise ValueError(f"Secrets 尚未設定「{region}」付款比對試算表 ID")
-    try:
-        gid = int(gid_text) if gid_text else None
-    except ValueError as exc:
-        raise ValueError(f"Secrets 的「{region}」GID 必須是整數") from exc
-    if gid is None and not worksheet_title:
-        if region in {"台北", "台中"}:
-            worksheet_title = WORKSHEET_TITLE
-        else:
-            raise ValueError(f"Secrets 尚未設定「{region}」付款比對分頁 GID 或名稱")
-    spreadsheet_id = _year_root_id("ATM", region, spreadsheet_id)
-    return {"spreadsheet_id": spreadsheet_id, "gid": gid, "worksheet_title": worksheet_title}
+    """與 ATM 同一個分頁：依年度根目錄找檔（不讀 secrets 的試算表 ID／GID）。"""
+    from .atm import _atm_sheet_config
+
+    return _atm_sheet_config(region)
 
 
 def get_worksheet(region: str):
+    from .atm import find_atm_tab
+
     config = _sheet_config(region)
-    spreadsheet = _client().open_by_key(config["spreadsheet_id"])
-    if config["gid"] is not None:
-        worksheet = spreadsheet.get_worksheet_by_id(int(config["gid"]))
-        if worksheet is None:
-            raise ValueError(f"找不到「{region}」指定分頁 gid={config['gid']}")
-        return worksheet
-    return spreadsheet.worksheet(config["worksheet_title"])
+    return find_atm_tab(_client().open_by_key(config["spreadsheet_id"]), region)
 
 
 def extract_purchase_list(html: str) -> Optional[Dict]:
