@@ -23,6 +23,7 @@ class BookingResultTest(unittest.TestCase):
         mock('check_contain', return_value={'area': {'area_id': '34', 'company_id': '1'}})
         mock('calculate_hour', return_value={'data': {'hour': 2, 'price': 2286, 'fare': 0}})
         mock('_query_booking_slot_with_lemon_retry', return_value=('[]', 'token', {}))
+        mock('_assert_booking_staff_unassigned')
         mock('list_order_numbers_for_phone', side_effect=[{'OLD'}] + [set(candidates) | {'OLD'}] * 4)
         mock('_fetch_purchase_blocks_for_phone', return_value=[{'order_no': n, 'lines': ['測試地址']} for n in candidates])
         mock('_parse_service_date_time_loose', return_value=('2026-09-20', '09:00-11:00'))
