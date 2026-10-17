@@ -6,6 +6,11 @@
 #
 # Change Log
 # v2026.10.17-1（移植 orders-system）
+# - 批次建單防呆（第五批，取代 orders-system 的 monkeypatch）：should_process_row／
+#   should_create_order 狀態正規化（已有訂單編號仍做後續同步，空白訂單只建「未安排」）；
+#   stage_calendar_color 遇「每月確認」事件不改日曆並回傳狀態「待確認」；
+#   fetch_order_meta_by_order_no 先以 orderNo 精確查詢（shared/batch_recovery_meta.py），
+#   查不到才退回訂單列表頁比對。
 # - 後台／Google 日曆雙向比對：以當月日曆人員為母名單；只接受同一人＋同地址＋
 #   同日期時段配對；日曆姓名後「-XXXX」視為地址標籤；後台同人同址同時段重複
 #   訂單另列異常；同一筆不一致不在兩個方向重複列出；姓名／電話／地址比對前先
@@ -407,12 +412,30 @@ def get_region_by_address(address, accounts_config):
     return None
 
 
+def _row_scalar(value):
+    """工作表有重複欄名時 row.get 會拿到 Series；一律取第一個欄位值。"""
+    if isinstance(value, pd.Series):
+        return value.iloc[0] if len(value) else ""
+    if isinstance(value, (list, tuple)):
+        return value[0] if value else ""
+    return value
+
+
+def normalize_status_text(value) -> str:
+    """狀態欄比對前去除不換行空白、BOM、零寬字元與所有空白。"""
+    text = str(_row_scalar(value) or "").replace("\u00a0", " ").replace("\ufeff", "").replace("\u200b", "")
+    return re.sub(r"\s+", "", text)
+
+
 def should_process_row(row):
-    return str(row.get("狀態", "")).strip() == "未安排" and is_blank(row.get("訂單編號", ""))
+    # 已有訂單編號的列仍需後續同步（寄信／日曆）；空白訂單只處理 I 欄「未安排」。
+    order_no = str(_row_scalar(row.get("訂單編號", "")) or "").strip()
+    return bool(order_no) or normalize_status_text(row.get("狀態", "")) == "未安排"
 
 
 def should_create_order(row):
-    return str(row.get("狀態", "")).strip() == "未安排" and is_blank(row.get("訂單編號", ""))
+    order_no = str(_row_scalar(row.get("訂單編號", "")) or "").strip()
+    return not order_no and normalize_status_text(row.get("狀態", "")) == "未安排"
 
 
 # =========================
@@ -1053,6 +1076,15 @@ def _extract_service_date_time(lines):
 
 
 def fetch_order_meta_by_order_no(session, order_no):
+    """先以 orderNo 精確查詢後台訂單（中斷復原／回填用）；查不到才退回訂單列表頁比對。"""
+    from shared.batch_recovery_meta import exact_fetch_order_meta
+    meta = exact_fetch_order_meta(session, order_no)
+    if meta is not None:
+        return meta
+    return _fetch_order_meta_from_purchase_list(session, order_no)
+
+
+def _fetch_order_meta_from_purchase_list(session, order_no):
     resp = session.get(PURCHASE_URL, headers=HEADERS, allow_redirects=True)
     if resp.status_code != 200:
         return {
@@ -1498,6 +1530,30 @@ def stage_send_confirmation(order_no, session):
         return {"確認信": f"發送失敗: {e}"}
 
 
+def is_monthly_confirm_event(event) -> bool:
+    text = " ".join([
+        str((event or {}).get("summary") or ""),
+        str((event or {}).get("description") or ""),
+    ])
+    return "每月確認/自行預約" in text or "每月確認" in text
+
+
+def _find_row_calendar_event(row, gcal_service, calendar_id):
+    if gcal_service is None or not calendar_id:
+        return None
+    try:
+        return find_matching_calendar_event(
+            gcal_service,
+            calendar_id,
+            str(row.get("地址", "")).strip(),
+            row.get("日期"),
+            str(row.get("開始時間", "")).strip(),
+            str(row.get("結束時間", "")).strip(),
+        )
+    except Exception:
+        return None
+
+
 def stage_calendar_color(row, gcal_service, region):
     calendar_id = GOOGLE_CALENDAR_MAP.get(region)
     if not calendar_id:
@@ -1506,6 +1562,19 @@ def stage_calendar_color(row, gcal_service, region):
             "日曆改色原因": f"找不到區域 {region} 的日曆設定",
             "日曆原色": "",
             "日曆新色": "",
+        }
+
+    # 每月確認事件：不動 Google 日曆，只把 Sheet 狀態交給回填層改成「待確認」
+    # （移植 orders-system batch_booking_safety 的 sheet guard）。
+    event = _find_row_calendar_event(row, gcal_service, calendar_id)
+    if event and is_monthly_confirm_event(event):
+        old_color = color_name_from_id(event.get("colorId", ""))
+        return {
+            "日曆改色結果": "未改",
+            "日曆改色原因": "每月確認：保留 Google 日曆原狀；表單狀態改為待確認",
+            "日曆原色": old_color,
+            "日曆新色": old_color,
+            "狀態": "待確認",
         }
 
     try:

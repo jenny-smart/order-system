@@ -11,7 +11,8 @@ from datetime import date, timedelta
 
 import streamlit as st
 
-from orders import get_region_by_address, load_worksheet, run_process_web
+from orders import get_region_by_address, load_worksheet
+from shared.hybrid_batch_runner import run_process_web_direct_single
 from accounts import ACCOUNTS
 from function.ui_common import (
     step, info_panel, copy_button, show_duplicate_order_warning, auto_lemon_checkbox,
@@ -166,6 +167,7 @@ def render_batch(backend_email, backend_password, env):
     selected_actions = st.multiselect("執行項目", options=["建單", "寄確認信", "改 Google 日曆"], default=default_actions, label_visibility="collapsed")
     st.markdown('<div class="hint-box">可自由組合，例如只寄確認信、只改日曆，或全流程一起跑。</div>', unsafe_allow_html=True)
     batch_allow_auto_lemon = auto_lemon_checkbox("batch_allow_auto_lemon")
+    st.caption("指定範圍及自動篩選可包含失敗列；調整後可直接重試，不必清空 N 欄結果。")
     auto_no_slot_rows = st.checkbox("自動篩選：狀態未安排＋訂單編號空白＋無班表", value=False, key="auto_no_slot_rows")
     auto_missing_o_rows = st.checkbox("自動篩選：狀態未安排＋訂單編號空白＋O欄找不到訂單編號", value=False, key="auto_missing_o_rows")
     st.markdown("<hr>", unsafe_allow_html=True)
@@ -214,9 +216,11 @@ def render_batch(backend_email, backend_password, env):
         total_processed = 0
         with st.spinner("執行中，請稍候…"):
             row_label = "、".join(map(str, target_rows))
-            ui_log(f"▶ 一次送入指定列 {row_label}，先依姓名／電話／地址／人數時數分組…")
+            ui_log(f"▶ 指定列 {row_label}，依列號逐筆單筆成單，不分組…")
             try:
-                result = run_process_web(
+                # 原「批次建單」固定走單筆 runner（移植 orders-system batch_ui_consistency）：
+                # 先反查後台復原中斷列，再逐列建單、每列完成立即回填。
+                result = run_process_web_direct_single(
                     env_name=env, region=region,
                     backend_email=backend_email.strip(), backend_password=backend_password.strip(),
                     sheet_name=sheet_name.strip(), start_row=min(target_rows), end_row=max(target_rows),

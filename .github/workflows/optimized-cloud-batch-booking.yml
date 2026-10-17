@@ -1,0 +1,81 @@
+name: Optimized Cloud Batch Booking
+on:
+  workflow_dispatch:
+    inputs:
+      sheet_name:
+        description: Sheet tab name
+        required: true
+        type: string
+      chunk_size:
+        description: Rows per batch
+        required: false
+        default: "50"
+        type: string
+      max_rows:
+        description: Maximum rows, zero means all
+        required: false
+        default: "0"
+        type: string
+      filter_mode:
+        description: all / no_schedule / missing_order / both
+        required: false
+        default: "all"
+        type: string
+      region:
+        description: Region, blank means infer from address
+        required: false
+        default: ""
+        type: string
+      pricing_json:
+        description: Service pricing snapshot
+        required: false
+        default: ""
+        type: string
+      allow_auto_lemon:
+        description: Allow adding idle Lemon staff when no schedule exists
+        required: false
+        default: "false"
+        type: string
+      retry_failed:
+        description: Confirm adjustments and retry failed rows
+        required: false
+        default: "false"
+        type: boolean
+concurrency:
+  group: optimized-cloud-batch-booking-prod
+  cancel-in-progress: false
+jobs:
+  booking:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Run optimized cloud batch booking
+        env:
+          SERVICE_PRICING_JSON: ${{ inputs.pricing_json }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          TAIPEI_EMAIL: ${{ secrets.TAIPEI_EMAIL }}
+          TAIPEI_PASSWORD: ${{ secrets.TAIPEI_PASSWORD }}
+          TAICHUNG_EMAIL: ${{ secrets.TAICHUNG_EMAIL }}
+          TAICHUNG_PASSWORD: ${{ secrets.TAICHUNG_PASSWORD }}
+          TAOYUAN_EMAIL: ${{ secrets.TAOYUAN_EMAIL }}
+          TAOYUAN_PASSWORD: ${{ secrets.TAOYUAN_PASSWORD }}
+          HSINCHU_EMAIL: ${{ secrets.HSINCHU_EMAIL }}
+          HSINCHU_PASSWORD: ${{ secrets.HSINCHU_PASSWORD }}
+          KAOHSIUNG_EMAIL: ${{ secrets.KAOHSIUNG_EMAIL }}
+          KAOHSIUNG_PASSWORD: ${{ secrets.KAOHSIUNG_PASSWORD }}
+          GOOGLE_MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
+        run: >-
+          python -m shared.cloud_batch_booking
+          --sheet "${{ inputs.sheet_name }}"
+          --chunk-size "${{ inputs.chunk_size }}"
+          --max-rows "${{ inputs.max_rows }}"
+          --filter-mode "${{ inputs.filter_mode }}"
+          --region "${{ inputs.region }}"
+          --allow-auto-lemon "${{ inputs.allow_auto_lemon }}"
+          --retry-failed "${{ inputs.retry_failed }}"
