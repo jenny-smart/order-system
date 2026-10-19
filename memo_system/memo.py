@@ -417,48 +417,19 @@ def apply_sheet_presentation(ws, updated_rows: List[int]):
 
 
 def login(ui_logger=None):
+    """登入檸檬後台（共用 shared.lemon_backend_login；程式結束時自動登出）。"""
+    from shared.lemon_backend_login import login as backend_login
+
     log = make_logger(ui_logger)
-
-    email = RUNTIME_EMAIL
-    password = RUNTIME_PASSWORD
-
-    if not email or not password:
-        raise RuntimeError("缺少 Email / Password")
-
     s = requests.Session()
     s.headers.update({
         "User-Agent": "Mozilla/5.0",
         "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
     })
-
-    r = session_get(s, LOGIN_URL)
-    r.raise_for_status()
-    soup = BeautifulSoup(r.text, "html.parser")
-
-    token_el = soup.select_one("input[name=_token]")
-    if not token_el:
-        raise RuntimeError("登入頁找不到 _token")
-
-    token = token_el.get("value", "")
-
-    resp = session_post(
-        s,
-        LOGIN_URL,
-        data={
-            "_token": token,
-            "email": email,
-            "password": password,
-        },
-        allow_redirects=True,
-    )
-    resp.raise_for_status()
-
-    check = session_get(s, PURCHASE_URL, allow_redirects=True)
-    check.raise_for_status()
-
-    if "/login" in check.url:
-        raise RuntimeError("登入失敗，請確認帳密")
-
+    try:
+        backend_login(s, RUNTIME_EMAIL, RUNTIME_PASSWORD, login_url=LOGIN_URL, check_url=PURCHASE_URL)
+    except RuntimeError as exc:
+        raise RuntimeError(f"登入失敗，請確認帳密：{exc}") from exc
     log("[登入] 已登入")
     return s
 

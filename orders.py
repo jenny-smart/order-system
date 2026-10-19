@@ -525,26 +525,15 @@ from shared.gsheet import (
 # 後台 API
 # =========================
 def login(session, email, password):
-    resp = session.get(LOGIN_URL, headers=HEADERS, allow_redirects=True)
-    if resp.status_code != 200:
-        return False
+    """登入檸檬後台（共用 shared.lemon_backend_login；程式結束時自動登出）。成功回傳 True、失敗回傳 False（呼叫端沿用）。"""
+    from shared.lemon_backend_login import login as backend_login
 
-    soup = BeautifulSoup(resp.text, "html.parser")
-    token_input = soup.find("input", {"name": "_token"})
-    if not token_input:
+    try:
+        backend_login(session, email, password, login_url=LOGIN_URL, headers=HEADERS, timeout=60)
+    except Exception as exc:  # 原本任何失敗（含連線、HTTP 錯誤）都回傳 False，維持不變
+        print(f"[後台登入] {exc}")
         return False
-
-    token = token_input.get("value", "").strip()
-    if not token:
-        return False
-
-    resp = session.post(
-        LOGIN_URL,
-        data={"_token": token, "email": email, "password": password},
-        headers=HEADERS,
-        allow_redirects=True,
-    )
-    return resp.status_code == 200 and "login" not in resp.url.lower()
+    return True
 
 
 def get_csrf_token(session):
