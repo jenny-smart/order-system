@@ -76,17 +76,12 @@ class MemberClient:
         self.base = base_url.rstrip('/')
         self.cache = {}
         try:
-            page = self.session.get(self.base + '/login', timeout=30)
-            page.raise_for_status()
-            token = BeautifulSoup(page.text, 'html.parser').select_one('input[name="_token"]')
-            if not token:
-                raise ValueError('無法取得登入頁。')
-            response = self.session.post(self.base + '/login', data={
-                '_token': token.get('value', ''), 'email': email, 'password': password,
-            }, timeout=30)
-            response.raise_for_status()
-            if '/login' in urlparse(response.url).path:
-                raise ValueError('後台登入失敗。')
+            from shared.lemon_backend_login import login as backend_login
+
+            try:
+                backend_login(self.session, email, password, login_url=self.base + '/login', timeout=30)
+            except RuntimeError as exc:
+                raise ValueError(f'後台登入失敗。{exc}') from exc
         except Exception:
             self.session.close()
             raise
