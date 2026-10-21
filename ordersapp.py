@@ -256,6 +256,11 @@ if _selected_target is None:
 _selected_option = FUNCTION_OPTIONS[_selected_target]
 _system_key, mode = _selected_option[1], _selected_option[2]
 
+# 網頁上按下的每個功能都記一筆到主控表「order-system執行Log-年度」（執行／成功／失敗）
+from shared import unified_log as _unified_log
+
+_unified_log.install_streamlit_hooks(st, _selected_option[0], str(st.session_state.get("username", "") or ""))
+
 st.markdown("<hr>", unsafe_allow_html=True)
 
 if _system_key == "memo":

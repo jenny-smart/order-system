@@ -61,3 +61,65 @@ def write(*, repo: str = REPO, client=None, **fields: Any) -> None:
                                                   insert_data_option="INSERT_ROWS")
     except Exception as exc:  # Log 寫不進去不能影響主流程
         print(f"[unified_log] 寫入統一執行 Log 失敗（不影響主流程）: {exc}")
+
+
+# ── 網頁執行紀錄：按下按鈕寫「執行」，之後第一個成功訊息寫「成功」、錯誤寫「失敗」（最多 3 筆） ──
+MAX_ERRORS_PER_CLICK = 3
+
+
+def _ctx(st) -> dict:
+    """目前功能存在各自的 session（多人同時使用不互相混到）。"""
+    state = st.session_state
+    if "_unified_log_ctx" not in state:
+        state["_unified_log_ctx"] = {}
+    return state["_unified_log_ctx"]
+
+
+def report(st, level: str, message: Any) -> None:
+    try:
+        ctx = _ctx(st)
+        if not ctx.get("clicked"):
+            return
+        if level == "success" and not ctx.get("succeeded"):
+            ctx["succeeded"] = True
+            status = "成功"
+        elif level == "error" and ctx.get("errors", 0) < MAX_ERRORS_PER_CLICK:
+            ctx["errors"] = ctx.get("errors", 0) + 1
+            status = "失敗"
+        else:
+            return
+        write(function=f"{ctx.get('function', '')}／{ctx['clicked']}", run_type="手動", status=status,
+              message=message, operator=ctx.get("operator", ""))
+    except Exception:
+        pass
+
+
+def install_streamlit_hooks(st, function_name: str, operator: str = "") -> None:
+    """每次頁面重跑呼叫一次：記下目前功能，並包裝 st.button／st.success／st.error（只包一次）。"""
+    try:
+        _ctx(st).update(function=function_name, operator=operator, clicked="", succeeded=False, errors=0)
+    except Exception:
+        return
+    if getattr(st.button, "_unified_log", False):
+        return
+    original_button, original_success, original_error = st.button, st.success, st.error
+
+    def button(label, *args, **kwargs):
+        clicked = original_button(label, *args, **kwargs)
+        if clicked:
+            ctx = _ctx(st)
+            ctx.update(clicked=str(label).strip(), succeeded=False, errors=0)
+            write(function=f"{ctx['function']}／{ctx['clicked']}", run_type="手動", status="執行",
+                  operator=ctx.get("operator", ""))
+        return clicked
+
+    def success(body, *args, **kwargs):
+        report(st, "success", body)
+        return original_success(body, *args, **kwargs)
+
+    def error(body, *args, **kwargs):
+        report(st, "error", body)
+        return original_error(body, *args, **kwargs)
+
+    button._unified_log = True
+    st.button, st.success, st.error = button, success, error

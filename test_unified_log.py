@@ -24,3 +24,19 @@ def test_write_never_raises():
     client = MagicMock()
     client.open_by_key.side_effect = RuntimeError("no access")
     unified_log.write(client=client, function="測試")
+
+
+def test_web_click_logs_start_success_and_errors():
+    import types
+
+    st = types.SimpleNamespace(session_state={}, button=lambda label, **kw: label == "執行",
+                               success=lambda body, **kw: body, error=lambda body, **kw: body)
+    with patch.object(unified_log, "write") as write:
+        unified_log.install_streamlit_hooks(st, "批次成單", "Jenny")
+        unified_log.install_streamlit_hooks(st, "批次成單", "Jenny")
+        st.error("沒按按鈕不記")
+        st.button("執行")
+        st.success("完成")
+        st.success("不重複記")
+    assert [c.kwargs["status"] for c in write.call_args_list] == ["執行", "成功"]
+    assert write.call_args_list[0].kwargs["function"] == "批次成單／執行"
