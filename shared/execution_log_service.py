@@ -75,6 +75,14 @@ def log_execution(
     traceback_text: str = "",
 ) -> None:
     """記錄一筆執行 Log。絕不拋出例外——寫入失敗只印警告，不能影響原本流程。"""
+    from shared import unified_log
+
+    # 另同步一份到主控表「order-system執行Log-年度」（各系統統一格式）
+    unified_message = str(message or "")
+    if traceback_text:
+        unified_message = f"{unified_message}\n{traceback_text}".strip()
+    unified_log.write(function=function_name, run_type=run_type, area=area, period=date, target=target,
+                      status=_normalize_status(status), message=unified_message)
     try:
         client = build_gsheet_client()
         _ensure_sheet(client)
