@@ -302,29 +302,27 @@ def _parse_cleaner_rows(html: str) -> dict[str, dict]:
     return rows
 
 
+_TW_ID_PATTERN = re.compile(r"^[A-Z]([12])\d{8}$")
+
+
 def _gender_from_user_edit(html: str) -> str:
-    """專員詳細資料（/user/edit/{id}）的性別；讀不到回傳空字串。"""
+    """專員詳細資料（/user/edit/{id}）的性別：看身分證字號英文後第 1 個數字，1＝男、2＝女。
+
+    只用來判斷性別，身分證字號本身不顯示、不保存；讀不到回傳空字串。
+    """
     soup = BeautifulSoup(html or "", "html.parser")
-    for tag in soup.find_all("input", attrs={"type": "radio"}):
-        name = str(tag.get("name") or "")
-        if not re.search(r"gender|sex|性別", name, re.I) or not tag.has_attr("checked"):
-            continue
-        label = soup.find("label", attrs={"for": tag.get("id")}) if tag.get("id") else None
-        text = (label.get_text(strip=True) if label else "") or \
-            (tag.parent.get_text(strip=True) if tag.parent is not None else "") or str(tag.get("value") or "")
-        if "女" in text:
-            return "女"
-        if "男" in text:
-            return "男"
-    for select in soup.find_all("select"):
-        if not re.search(r"gender|sex|性別", str(select.get("name") or ""), re.I):
-            continue
-        option = select.find("option", selected=True)
-        text = option.get_text(strip=True) if option else ""
-        if "女" in text:
-            return "女"
-        if "男" in text:
-            return "男"
+    values = []
+    # 先找「身份證字號／身分證字號」標題後面的輸入框
+    for node in soup.find_all(string=re.compile(r"身[份分]證字號")):
+        field = node.find_next("input")
+        if field is not None:
+            values.append(str(field.get("value") or ""))
+    # 找不到標題時，退而找格式符合身分證字號的輸入框
+    values += [str(tag.get("value") or "") for tag in soup.find_all("input")]
+    for value in values:
+        match = _TW_ID_PATTERN.match(value.strip().upper())
+        if match:
+            return "男" if match.group(1) == "1" else "女"
     return ""
 
 
@@ -1087,7 +1085,7 @@ def render(backend_email: str, backend_password: str, env: str) -> None:
             "依服務日期搜尋含『檸檬人』的訂單；適用一般單與保留單。",
             "搜尋後讀取每筆訂單地址的區域編號（訂單修改頁地址下方），以及班表上當天該時段「未配班」的人員。",
             "只檢查未配班人員：居家專員詳細資料的區域含此編號才符合；推薦只從符合的未配班人員挑，已配班的人不動。",
-            "喜愛專員性別連同訂單上保留的專員一起判斷：限女＝全部女生、1女＝至少 1 位女生（男生同理）。",
+            "喜愛專員性別連同訂單上保留的專員一起判斷：限女＝全部女生、1女＝至少 1 位女生（男生同理）；專員性別看詳細資料的身分證字號（英文後第 1 碼 1＝男、2＝女）。",
             "表格會先自動套用同日同時段不衝突的 Top1~Top3 預設方案，讓你可直接批次勾選處理。",
             "按下批次寫入前仍需手動勾選確認；每筆送出前都會重新讀取後台，候選人若失效會停止該筆。",
         ],

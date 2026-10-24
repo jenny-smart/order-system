@@ -126,9 +126,11 @@ class LemonStaffReplacementTests(unittest.TestCase):
         html = ('<table><tr><th>區域</th><th>資料</th></tr><tr><td><a>21</a> , <a>25</a> , <a>44</a></td>'
                 '<td>何亮萱<br>居家專員<br>0912000000</td><td>5</td><td><a href="/user/edit/1342">詳細資料</a></td></tr></table>')
         self.assertEqual(_parse_cleaner_rows(html)["何亮萱"], {"areas": {"21", "25", "44"}, "user_id": "1342"})
-        page = '<input type="radio" name="gender" id="g1" value="1"><label for="g1">男</label>' \
-               '<input type="radio" name="gender" id="g2" value="2" checked><label for="g2">女</label>'
+        page = ('<label>生日</label><input name="birthday" value="1968-08-28">'
+                '<label>身份證字號</label><input name="idno" value="Q220458991">')
         self.assertEqual(_gender_from_user_edit(page), "女")
+        self.assertEqual(_gender_from_user_edit('<div>身分證字號</div><input value="a123456789">'), "男")
+        self.assertEqual(_gender_from_user_edit('<label>身份證字號</label><input value="">'), "")
         self.assertEqual(_gender_from_user_edit("<html></html>"), "")
 
     def test_period_overlap_detects_partial_overlap(self):
