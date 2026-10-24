@@ -17,6 +17,7 @@ from function.lemon_staff_replacement import (
     _parse_cleaner_rows,
     gender_rule_ok,
     parse_unassigned_names,
+    validate_manual_pick,
     build_assignment_plan,
     preferred_gender_label,
     _run_batch_replacements,
@@ -469,6 +470,59 @@ class LemonStaffReplacementTests(unittest.TestCase):
         self.assertEqual(results[1]["結果"], "失敗")
         self.assertIn("重疊", results[1]["原因"])
         self.assertEqual(results[2]["結果"], "成功")
+
+    def test_partial_slot_match_keeps_other_lemon(self):
+        slots = [{"檸檬人1(0)": "a", "蘇曉倩(5)": "s1"}, {"檸檬人2(0)": "b", "蘇曉倩(5)": "s2"}]
+        self.assertIsNone(_match_names_to_slots(["蘇曉倩"], slots, [0, 1]))
+        self.assertEqual(_match_names_to_slots(["蘇曉倩"], slots, [0, 1], allow_partial=True),
+                         {0: {"name": "蘇曉倩", "shift_id": "s1"}})
+
+    def _manual_order(self, label="不限"):
+        return {
+            "order_no": "LC00216914", "service_date": "2026-11-14", "period": "14:00-17:00",
+            "lemon_count": 2, "喜愛專員性別": label, "批次狀態": "班表解析/推薦失敗：符合的正式專員不足",
+            "可放入人員": [{"name": "蘇曉倩", "rating": 5, "gender": "女"}, {"name": "吳奭", "rating": 1, "gender": "男"}],
+            "保留專員": [],
+        }
+
+    def test_validate_manual_pick_rules(self):
+        order = self._manual_order()
+        self.assertEqual(validate_manual_pick(order, ["蘇曉倩"]), "")  # 2 個檸檬人先放 1 位，其餘留檸檬人
+        self.assertIn("未達 4 分", validate_manual_pick(order, ["吳奭"]))
+        self.assertIn("未達 4 分", validate_manual_pick(order, ["蘇曉倩", "吳奭"]))  # 平均 3 分
+        self.assertIn("不在可放入人員", validate_manual_pick(order, ["余世烽"]))
+        self.assertIn("只有 1 個檸檬人位置", validate_manual_pick(dict(order, lemon_count=1), ["蘇曉倩", "吳奭"]))
+        # 星等連同保留的正式專員一起算：(5+4)/2 ≥ 4
+        kept = dict(order, lemon_count=1, 保留專員=[{"name": "王宣婷", "rating": 4, "gender": "女"}])
+        self.assertEqual(validate_manual_pick(kept, ["蘇曉倩"]), "")
+        # 限女：一律檢查；1男：檸檬人位置放滿才檢查
+        only_female = self._manual_order("限女")
+        only_female["可放入人員"][1]["rating"] = 5
+        self.assertIn("限女", validate_manual_pick(only_female, ["蘇曉倩", "吳奭"]))
+        self.assertIn("限女", validate_manual_pick(only_female, ["吳奭"]))  # 限女：沒放滿也檢查
+        self.assertEqual(validate_manual_pick(self._manual_order("1男"), ["蘇曉倩"]), "")
+        both = self._manual_order("1男")
+        both["可放入人員"] = [{"name": "蘇曉倩", "rating": 5, "gender": "女"}, {"name": "女丙", "rating": 5, "gender": "女"}]
+        self.assertIn("1男", validate_manual_pick(both, ["蘇曉倩", "女丙"]))
+
+    def test_batch_manual_pick_writes_partial(self):
+        order = self._manual_order()
+        edited_df = pd.DataFrame([{"處理": True, "採用順位": ""}])
+        with patch("function.lemon_staff_replacement.replace_lemon_staff",
+                   return_value={"assigned": ["蘇曉倩"], "lemon_left": 1}) as mocked:
+            results = _run_batch_replacements("env", "e", "p", [order], edited_df, manual_picks={0: ["蘇曉倩"]})
+        self.assertEqual(mocked.call_args.kwargs["allow_partial"], True)
+        self.assertEqual(mocked.call_args.args[4], ["蘇曉倩"])
+        self.assertEqual(results[0]["結果"], "成功")
+        self.assertIn("仍有 1 個檸檬人位置待補", results[0]["原因"])
+
+    def test_batch_manual_pick_rejected_is_not_written(self):
+        edited_df = pd.DataFrame([{"處理": True, "採用順位": ""}])
+        with patch("function.lemon_staff_replacement.replace_lemon_staff") as mocked:
+            results = _run_batch_replacements("env", "e", "p", [self._manual_order()], edited_df, manual_picks={0: ["吳奭"]})
+        mocked.assert_not_called()
+        self.assertEqual(results[0]["結果"], "失敗")
+        self.assertIn("未達 4 分", results[0]["原因"])
 
     def test_missing_similarity_data_does_not_claim_complement(self):
         plans = build_assignment_plan(
