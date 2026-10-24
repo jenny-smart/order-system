@@ -16,6 +16,7 @@ from function.lemon_staff_replacement import (
     _gender_from_user_edit,
     _parse_cleaner_rows,
     gender_rule_ok,
+    parse_unassigned_names,
     build_assignment_plan,
     preferred_gender_label,
     _run_batch_replacements,
@@ -63,10 +64,13 @@ class LemonStaffReplacementTests(unittest.TestCase):
         order = {"order_no": "LC00217083", "service_date": "2026-11-04", "period": "08:30-12:30",
                  "staff": "王宣婷(5)X檸檬人2(0)", "current_staff": ["王宣婷(5)", "檸檬人2(0)"],
                  "purchase_id": "217083", "lemon_count": 1, "people_needed": 1}
-        slots = [{"王宣婷(5)": "1"}, {"檸檬人2(0)": "2", "余世烽(5)": "3", "劉士誠(5)": "4", "何亮萱(5)": "5"}]
+        slots = [{"王宣婷(5)": "1"}, {"檸檬人2(0)": "2", "余世烽(5)": "3", "劉士誠(5)": "4", "何亮萱(5)": "5",
+                                    "已配班甲(5)": "6"}]
         areas = {"余世烽": {"21", "25"}, "劉士誠": {"21", "25", "31"}, "何亮萱": {"21", "44"}}
+        # 已配班甲在排班修改下拉選得到，但不在未配班名單：不檢查、不推薦
         with patch("function.lemon_staff_replacement._get_schedule_edit_info", return_value=("csrf", ["o1", "o2"], slots)), \
              patch("function.lemon_staff_replacement._order_area_id", return_value="44"), \
+             patch("function.lemon_staff_replacement._unassigned_for_order", return_value=["余世烽", "劉士誠", "何亮萱"]), \
              patch("function.lemon_staff_replacement._staff_profile",
                    side_effect=lambda _s, _b, name, _c, need_gender=False: {"areas": areas[name], "gender": "", "error": ""}):
             context = _get_schedule_context(None, "", order)
@@ -95,12 +99,28 @@ class LemonStaffReplacementTests(unittest.TestCase):
         def run(label):
             with patch("function.lemon_staff_replacement._get_schedule_edit_info", return_value=("csrf", ["o1", "o2"], slots)), \
                  patch("function.lemon_staff_replacement._order_area_id", return_value="44"), \
+                 patch("function.lemon_staff_replacement._unassigned_for_order", return_value=["男甲", "女乙"]), \
                  patch("function.lemon_staff_replacement._staff_profile",
                        side_effect=lambda _s, _b, name, _c, need_gender=False: {"areas": {"44"}, "gender": gender[name], "error": ""}):
                 return _get_schedule_context(None, "", order, gender_label=label)
 
         self.assertEqual({r["display"] for r in run("1女")["recommendations"]}, {"男甲", "女乙"})
         self.assertEqual([r["display"] for r in run("限女")["recommendations"]], ["女乙"])
+
+    def test_parses_unassigned_box_on_schedule_page(self):
+        html = (
+            "<table><tr><th></th><th>08:30-12:30</th><th>14:00-16:00</th><th>14:00-18:00</th></tr>"
+            "<tr><td>11-04<br>(三)</td>"
+            "<td>10-08<br>邱巧宜 V<br>4王宣婷5 X<br>4檸檬人20</td>"
+            "<td>10-04<br>張莉莉 V<br>484魏思遠2 X<br>63周紹誠3"
+            "<div>未配班 3 人<br>48宋品鈞3<br>48吳季洋1<br>36黃柏維1</div></td>"
+            "<td>未配班 2 人<br>8謝孟諭3<br>8鄭淵湶5</td></tr>"
+            "<tr><td>11-05<br>(四)</td><td>未配班 1 人<br>8別天甲3</td><td></td><td></td></tr></table>"
+        )
+        self.assertEqual(parse_unassigned_names(html, "2026-11-04", "14:00-16:00"), ["宋品鈞", "吳季洋", "黃柏維"])
+        self.assertEqual(parse_unassigned_names(html, "2026-11-04", "14:00-18:00"), ["謝孟諭", "鄭淵湶"])
+        self.assertEqual(parse_unassigned_names(html, "2026-11-04", "08:30-12:30"), [])
+        self.assertIsNone(parse_unassigned_names(html, "2026-11-04", "19:00-21:00"))
 
     def test_parses_cleaner_list_and_user_gender(self):
         html = ('<table><tr><th>區域</th><th>資料</th></tr><tr><td><a>21</a> , <a>25</a> , <a>44</a></td>'
@@ -397,6 +417,7 @@ class LemonStaffReplacementTests(unittest.TestCase):
         with patch("function.lemon_staff_replacement._get_schedule_edit_info", side_effect=fake_get_schedule_edit_info), \
              patch("function.lemon_staff_replacement._resolve_member_context", side_effect=fake_member_context), \
              patch("function.lemon_staff_replacement._order_area_id", return_value="44"), \
+             patch("function.lemon_staff_replacement._unassigned_for_order", return_value=["王甲", "李乙"]), \
              patch("function.lemon_staff_replacement._staff_profile",
                    side_effect=lambda *a, **k: {"areas": {"44"}, "gender": "", "error": ""}):
             analyzed = analyze_lemon_orders(None, "", orders, member_token="token")

@@ -212,6 +212,57 @@ def find_lemon_orders(
             session.close()
 
 
+def _period_key(text) -> str:
+    return re.sub(r"\s+", "", str(text or ""))
+
+
+def parse_unassigned_names(html_text: str, service_date: str, period: str) -> list[str] | None:
+    """班表頁（/schedule?date=）中，該日期列、該時段欄「未配班 N 人」深灰框裡的人。
+
+    名單每行像「48宋品鈞3」（前面數字＋姓名＋星等），只取姓名；找不到該格回傳 None。
+    """
+    soup = BeautifulSoup(html_text or "", "html.parser")
+    mmdd = str(service_date or "")[5:]
+    target = _period_key(period)
+    for table in soup.find_all("table"):
+        rows = table.find_all("tr")
+        if not rows:
+            continue
+        header = [_period_key(c.get_text(" ", strip=True)) for c in rows[0].find_all(["th", "td"])]
+        if target not in header:
+            continue
+        col = header.index(target)
+        for row in rows[1:]:
+            cells = row.find_all(["th", "td"])
+            if len(cells) <= col or not cells[0].get_text(" ", strip=True).startswith(mmdd):
+                continue
+            lines = [x.strip() for x in cells[col].get_text("\n").split("\n") if x.strip()]
+            for i, line in enumerate(lines):
+                m = re.fullmatch(r"未配班\s*(\d+)\s*人", line)
+                if not m:
+                    continue
+                names = []
+                for entry in lines[i + 1:i + 1 + int(m.group(1))]:
+                    name = re.sub(r"\d+$", "", re.sub(r"^\d+", "", entry)).strip()
+                    if name:
+                        names.append(name)
+                return names
+            return []  # 有這一格但沒有未配班框：當天這時段沒有未配班的人
+    return None
+
+
+def _unassigned_for_order(session, base_url: str, order: dict, cache: dict) -> list[str] | None:
+    service_date = str(order.get("service_date") or "")
+    if service_date not in cache:
+        try:
+            resp = session.get(f"{base_url}/schedule", params={"date": service_date, "staffId": ""},
+                               headers=orders.HEADERS, allow_redirects=True)
+            cache[service_date] = resp.text if resp.status_code == 200 else ""
+        except Exception:
+            cache[service_date] = ""
+    return parse_unassigned_names(cache[service_date], service_date, order.get("period", ""))
+
+
 def _order_area_id(session, base_url: str, order: dict) -> str:
     """訂單地址的區域編號（訂單修改頁地址下方的編號，例如 44）。"""
     purchase_id = str(order.get("purchase_id") or "")
@@ -390,7 +441,7 @@ def _build_candidate_rows_and_names(slots: list[dict], target_indexes: list[int]
     if allowed_names is not None:
         candidate_labels = {k: v for k, v in candidate_labels.items() if k in set(allowed_names)}
     if len(candidate_labels) < len(target_indexes):
-        raise RuntimeError("目前該日期時段有空、且符合該地址資格的正式專員不足")
+        raise RuntimeError("當天該時段未配班、且符合該地址資格的正式專員不足")
     candidate_rows = [
         {"staff_id": name, "name": name, "rating": rating, "available": True}
         for name, rating in sorted(candidate_labels.items(), key=lambda item: (-item[1], item[0]))
@@ -466,7 +517,7 @@ def _batch_entry_conflicts(left: dict, right: dict) -> bool:
 
 
 def _get_schedule_context(session, base_url: str, order: dict, limit: int = 3, gender_label: str = "",
-                          staff_cache: dict | None = None) -> dict:
+                          staff_cache: dict | None = None, schedule_cache: dict | None = None) -> dict:
     try:
         csrf, origin_ids, slots = _get_schedule_edit_info(
             session, base_url, order["service_date"], order["purchase_id"]
@@ -508,6 +559,7 @@ def _get_schedule_context(session, base_url: str, order: dict, limit: int = 3, g
             "origin_ids": origin_ids,
         }
     staff_cache = {} if staff_cache is None else staff_cache
+    schedule_cache = {} if schedule_cache is None else schedule_cache
     area_id = ""
     qualified_names: list[str] = []
     unqualified_names: list[str] = []
@@ -517,7 +569,11 @@ def _get_schedule_context(session, base_url: str, order: dict, limit: int = 3, g
         area_id = _order_area_id(session, base_url, order)
         if not area_id:
             raise RuntimeError("讀不到訂單地址的區域編號（訂單修改頁地址下方），無法判斷專員地址資格")
-        for name in sorted(_available_names(slots, target_indexes)):
+        # 只看訂單當天、該時段「未配班」的人；已配班的人不動。
+        unassigned = _unassigned_for_order(session, base_url, order, schedule_cache)
+        if unassigned is None:
+            raise RuntimeError(f"讀不到班表 {order.get('service_date')} {order.get('period')} 的未配班名單")
+        for name in sorted(set(n for n in unassigned if "檸檬人" not in n)):
             profile = _staff_profile(session, base_url, name, staff_cache)
             if profile.get("areas") is None:
                 unknown_names.append(f"{name}（{profile.get('error') or '查不到區域'}）")
@@ -632,7 +688,7 @@ def _resolve_member_context(session, phone: str, member_token: str, member_cache
 
 def _build_qualification_text(candidate_names: list[str], unqualified_names: list[str], schedule_error: str = "",
                                member_error: str = "", area_id: str = "", unknown_names: list[str] | None = None) -> tuple[str, str]:
-    """符合＝該日期時段有空、且詳細資料區域含此地址編號；未符合＝有空但區域未含此編號。"""
+    """只看訂單當天該時段的未配班人員：符合＝詳細資料區域含此地址編號；未符合＝未含此編號。"""
     qualified_list = sorted(dict.fromkeys(str(x) for x in candidate_names if str(x)))
     unqualified_list = sorted(dict.fromkeys(str(x) for x in unqualified_names if str(x)))
     area_note = f"區域編號 {area_id}" if area_id else "此地址區域編號"
@@ -667,6 +723,7 @@ def analyze_lemon_orders(
 ) -> list[dict]:
     member_cache: dict[str, dict] = {}
     staff_cache: dict[str, dict] = {}
+    schedule_cache: dict[str, str] = {}
     analyzed: list[dict] = []
     for order in found_orders or []:
         row = dict(order)
@@ -674,7 +731,7 @@ def analyze_lemon_orders(
         schedule_context = _get_schedule_context(
             session, base_url, order, limit=limit,
             gender_label=member_context.get("preferred_gender_label", "") if member_context.get("ok") else "",
-            staff_cache=staff_cache,
+            staff_cache=staff_cache, schedule_cache=schedule_cache,
         )
 
         qualified_text, unqualified_text = _build_qualification_text(
@@ -1028,8 +1085,8 @@ def render(backend_email: str, backend_password: str, env: str) -> None:
         "操作流程",
         [
             "依服務日期搜尋含『檸檬人』的訂單；適用一般單與保留單。",
-            "搜尋後讀取每筆訂單地址的區域編號（訂單修改頁地址下方），以及排班修改頁該時段有空的正式專員。",
-            "符合該地址資格＝居家專員詳細資料的區域含此編號；只從符合資格且有空的人裡推薦。",
+            "搜尋後讀取每筆訂單地址的區域編號（訂單修改頁地址下方），以及班表上當天該時段「未配班」的人員。",
+            "只檢查未配班人員：居家專員詳細資料的區域含此編號才符合；推薦只從符合的未配班人員挑，已配班的人不動。",
             "喜愛專員性別連同訂單上保留的專員一起判斷：限女＝全部女生、1女＝至少 1 位女生（男生同理）。",
             "表格會先自動套用同日同時段不衝突的 Top1~Top3 預設方案，讓你可直接批次勾選處理。",
             "按下批次寫入前仍需手動勾選確認；每筆送出前都會重新讀取後台，候選人若失效會停止該筆。",
