@@ -25,7 +25,7 @@ class BookingResultTest(unittest.TestCase):
         mock('_query_booking_slot_with_lemon_retry', return_value=('[]', 'token', {}))
         mock('_assert_booking_staff_unassigned')
         mock('list_order_numbers_for_phone', side_effect=[{'OLD'}] + [set(candidates) | {'OLD'}] * 4)
-        mock('_fetch_purchase_blocks_for_phone', return_value=[{'order_no': n, 'lines': ['測試地址']} for n in candidates])
+        mock('_fetch_purchase_blocks_for_phone', side_effect=[[]] + [[{'order_no': n, 'lines': ['測試地址']} for n in candidates]] * 5)
         mock('_parse_service_date_time_loose', return_value=('2026-09-20', '09:00-11:00'))
         mock('_extract_payway_line', return_value=payway)
         mock('fetch_order_meta_by_order_no', return_value={})
@@ -33,7 +33,7 @@ class BookingResultTest(unittest.TestCase):
         mock('_check_order_no_duplicate', return_value=(False, 1))
         stack.enter_context(patch.object(q.time, 'sleep'))
         return q.quick_create_order('dev', payway, '',
-            {'session': session, 'phone': '', 'member_payload': {'member': {'member_id': '1'}}},
+            {'session': session, 'phone': '', 'member_payload': {'member': {'member_id': '1', 'email': 'member@example.com'}}},
             '測試地址', '1', '2026-09-20', '09:00-11:00', '2')
 
     def test_uses_backend_final_total(self):

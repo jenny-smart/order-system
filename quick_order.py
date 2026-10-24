@@ -432,6 +432,7 @@ import requests
 from bs4 import BeautifulSoup
 
 import orders
+from shared import booking_flow
 from orders import (
     login, get_csrf_token, get_member, pick_best_address_info,
     geocode_address, check_contain, calculate_hour, extract_calc_fields,
@@ -446,7 +447,7 @@ from shared.staff_section import (
 )
 from shared.text_parsing import (
     PAYWAY_MAP, CLEAN_TYPE_LABELS, PERIOD_DISPLAY_INFO,
-    normalize_booking_payway, _format_period_display, _extract_actual_service_time,
+    normalize_booking_payway, _read_payway, _format_period_display, _extract_actual_service_time,
     _extract_phone_from_block_lines, _parse_service_date_time_loose, _extract_money_line,
     _extract_total_amount_line, _extract_fare_line, _extract_person_hour_line, _count_staff_from_lines,
     _fix_address_district_order, _extract_district_from_address, _normalize_city_for_country_id,
@@ -457,7 +458,8 @@ from shared.text_parsing import (
 from accounts import ACCOUNTS
 from shared.env_config import apply_env
 
-BOOKING_ENDPOINT_MAP = {"信用卡": "/booking/single", "ATM": "/booking/single", "儲值金": "/booking/stored_value_routine"}
+BOOKING_ENDPOINT_MAP = {name: booking_flow.route_for(name).path for name in ("信用卡", "ATM", "儲值金")}
+
 
 
 from service_pricing import account_balance, customer_tier, unit_price as service_unit_price, apply_booking_price, load_config
@@ -532,7 +534,7 @@ def _configure_environment(env_name):
 
 
 def _booking_url_for_payway(base_url, payway):
-    return f"{base_url}{BOOKING_ENDPOINT_MAP.get(payway, '/booking/single')}"
+    return booking_flow.booking_url(base_url, payway)
 
 
 def _get_booking_token_for_payway(session, base_url, payway):
@@ -551,25 +553,7 @@ def _fetch_csrf_from_url(session, url):
 
 
 def _build_booking_submit_data(base_data, token, payway, slot):
-    data = {**base_data, "_token": token}
-    if payway in ("信用卡", "ATM"):
-        data["date_s"] = ""
-        data["datePeriod"] = slot
-    else:
-        # 儲值金訂單：v2026.07.10 修正——實際查看 /booking/stored_value_routine
-        # 頁面原始 HTML 後發現，這個頁面本身「有」payway 欄位，只是選項只有
-        # 一個「儲值金」（<option value="4">儲值金</option>），而且是 required
-        # 的必填 select。之前誤以為這個頁面不需要 payway 而整個拿掉，導致
-        # 後台收到的表單缺少必填欄位，這才是付款方式空白、訂單卡在待付款、
-        # 儲值金沒有真的被扣除的真正原因（不是先前懷疑的 token 來源問題）。
-        # 這個頁面也沒有發票相關欄位（invoice_type/carrier_type_id 等），
-        # 那幾個繼續拿掉是對的。
-        data["date_list[]"] = [slot]
-        data["payway"] = "4"
-        for _k in ("invoice_type", "carrier_type_id", "carrier_info",
-                   "company_title", "company_no", "donate_code"):
-            data.pop(_k, None)
-    return data
+    return booking_flow.build_submit_data(base_data, token, payway, slot)
 
 
 
@@ -943,6 +927,7 @@ def quick_check_available_slots(env_name, payway, lookup_result, address, clean_
     member = member_payload.get("member", {})
     best_addr, address_parts, addr_check = resolve_backend_booking_address(
         session, member_payload, address, token, clean_type_id,
+        phone=lookup_result.get("phone", ""),
     )
     selected_address_for_lookup = str(address).strip()
     selected_address_for_submit = str(best_addr.get("address") or address).strip()
@@ -1005,132 +990,68 @@ def quick_check_available_slots(env_name, payway, lookup_result, address, clean_
     return rows
 
 
+def _sections_on_date(raw, service_date):
+    """列出後台查詢班表回覆中，指定日期的所有時段（只讀取，不做判斷）。"""
+    try:
+        data = json.loads(str(raw or ""))
+    except Exception:
+        return ""
+    if isinstance(data, dict):
+        data = data.get("data") or data.get("result") or data.get("sections") or []
+    sections = []
+    for item in (data if isinstance(data, list) else []):
+        if not isinstance(item, dict) or str(item.get("date") or "").strip() != str(service_date):
+            continue
+        section = str(item.get("section") or "").strip()
+        cleaners = item.get("cleaner") or []
+        names = "、".join(str(x) for x in cleaners) if isinstance(cleaners, list) else str(cleaners)
+        if section:
+            sections.append(f"{section}（{names}）" if names else section)
+    return "；".join(sections)
+
+
 def quick_create_order(
     env_name, payway, region, lookup_result, address, clean_type_id,
     date_s, period_s, hour, person="2", fallback_fare="0", discount_code="",
     payment_type="", carrier_info="", company_no="", company_title="",
-    invoice_type_override="", carrier_type_id_override="",
+    invoice_type_override="", carrier_type_id_override="", donate_code_override="",
     extra_fields=None, allow_auto_lemon_shift=False, pricing_balance=None,
 ):
-    payway = normalize_booking_payway(payway)
-    base_url = _configure_environment(env_name)
-    session = lookup_result["session"]
-    token = _get_booking_token_for_payway(session, base_url, payway)
-    member_payload = lookup_result["member_payload"]
-    phone = lookup_result["phone"]
-    member_name = (member_payload.get("member", {}) or {}).get("name", "") if member_payload else ""
-    if not member_payload:
-        raise Exception("此電話查無會員資料，請先走新客人資訊收集流程建立會員後再建單")
-    member = member_payload.get("member", {})
-    best_addr, address_parts, addr_check = resolve_backend_booking_address(
-        session, member_payload, address, token, clean_type_id,
+    _ctx = _prepare_booking_data(
+        env_name, payway, lookup_result, address, clean_type_id, date_s, period_s, hour,
+        person=person, fallback_fare=fallback_fare, discount_code=discount_code,
+        payment_type=payment_type, carrier_info=carrier_info, company_no=company_no,
+        company_title=company_title, invoice_type_override=invoice_type_override,
+        carrier_type_id_override=carrier_type_id_override,
+        donate_code_override=donate_code_override, extra_fields=extra_fields,
+        pricing_balance=pricing_balance,
     )
-    address_for_lookup = str(best_addr.get("address") or address).strip()
-    address_for_submit = address_for_lookup
-    selected_address = address_for_lookup
-    area_info = addr_check.get("area") if isinstance(addr_check.get("area"), dict) else {}
-    purchase_info = addr_check.get("purchase") if isinstance(addr_check.get("purchase"), dict) else {}
-    fare_from_check = first_nonzero(
-        purchase_info.get("fare") if purchase_info else "",
-        purchase_info.get("car_fare") if purchase_info else "",
-        purchase_info.get("traffic_fee") if purchase_info else "",
-        area_info.get("fare") if area_info else "",
-        area_info.get("car_fare") if area_info else "",
-        area_info.get("traffic_fee") if area_info else "",
-        find_nested_value(addr_check, ["fare", "car_fare", "traffic_fee", "trafficFee", "車馬費"]),
-        best_addr.get("fare", ""),
-        default=str(fallback_fare or "0"),
-    )
-    best_addr["fare"] = fare_from_check
-    invoice_type = str(first_nonzero(invoice_type_override, purchase_info.get("invoiceType") if purchase_info else "", find_nested_value(addr_check, ["invoiceType", "invoice_type"]), default="2"))
-    carrier_type_id = str(first_nonzero(carrier_type_id_override, purchase_info.get("carrierTypeId") if purchase_info else "", default="1"))
-    carrier_info = str(first_nonzero(carrier_info, purchase_info.get("carrierInfo") if purchase_info else "", member.get("email") or "", default=""))
-    company_title = str(first_nonzero(company_title, purchase_info.get("companyTitle", "") if purchase_info else "", default=""))
-    company_no = str(first_nonzero(company_no, purchase_info.get("companyNo", "") if purchase_info else "", default=""))
-    donate_code = str(purchase_info.get("donateCode", "8585") if purchase_info else "8585")
-    old_purchase = best_addr.get("purchase", {}) if isinstance(best_addr.get("purchase"), dict) else {}
-
-    def pick(key, default=""):
-        value = old_purchase.get(key)
-        return value if value not in (None, "") else default
-
-    base_data = {
-        "clean_type_id": clean_type_id, "phone": phone,
-        "name": str(member.get("name") or "").strip(), "email": str(member.get("email") or "").strip(),
-        "tel": str(member.get("tel") or phone), "line": str(member.get("line") or ""),
-        "fbName": str(member.get("fb_name") or ""), "fb": str(member.get("fb") or ""),
-        "memoProcess": str(member.get("memo_process") or ""), "memoFinance": str(member.get("memo_finance") or ""),
-        "addressId": str(best_addr.get("addressId") or ""),
-        "country_id": str(address_parts.get("country_id") or best_addr.get("country_id") or pick("country_id", "")),
-        "address": address_for_submit, "ping": str(pick("ping", "4")),
-        "room": str(pick("room", "0")), "bathroom": str(pick("bathroom", "0")),
-        "balcony": str(pick("balcony", "0")), "livingroom": str(pick("livingroom", "0")),
-        "kitchen": str(pick("kitchen", "0")), "window": str(pick("window", "")),
-        "shutter": str(pick("shutter", "")), "clothes": str(pick("clothes", "0")),
-        "dyson": str(pick("dyson", "0")), "refrigerator": str(pick("refrigerator", "0")),
-        "disinfection": str(pick("disinfection", "0")), "go_abord": str(pick("go_abord", "0")),
-        "home_move": str(pick("home_move", "0")), "storage": str(pick("storage", "0")),
-        "cabinet": str(pick("cabinet", "0")), "quintuple": str(pick("quintuple", "0")),
-        "hour": str(int(float(hour))), "price": "", "price_vvip": "",
-        "person": str(person), "date_s": date_s, "period_s": period_s,
-        "period": "", "cycle": "1", "fare": "", "memo": "",
-        "notice": str(best_addr.get("notice") or old_purchase.get("notice") or ""),
-        "discount_code": str(discount_code or ""), "payment": str(payment_type or ""),
-        "carrierInfo": str(carrier_info or ""), "companyNo": str(company_no or ""),
-        "companyTitle": str(company_title or ""), "payway": PAYWAY_MAP.get(payway, "2"),
-        "invoice_type": invoice_type, "carrier_type_id": carrier_type_id,
-        "carrier_info": carrier_info, "company_title": company_title,
-        "company_no": company_no, "donate_code": donate_code, "is_backend": "477",
-        "member_id": str(member.get("member_id") or ""),
-        "company_id": str(best_addr.get("company_id") or best_addr.get("companyId") or pick("company_id", "")),
-        "area_id": str(best_addr.get("area_id") or best_addr.get("areaId") or pick("area_id", "")),
-        "lat": str(best_addr.get("lat") or pick("lat", "")),
-        "lng": str(best_addr.get("lng") or pick("lng", "")),
-    }
-    if extra_fields:
-        base_data.update(extra_fields)
-
-    calc_result = calculate_hour(session, base_data, token)
-    if not calc_result:
-        raise Exception("計算時數失敗")
-    calc_fields = extract_calc_fields(calc_result, fallback_hours=base_data["hour"], fallback_fare=best_addr.get("fare", "0"))
-    base_data["price"] = str(calc_fields.get("price") or "0")
-    base_data["price_vvip"] = str(calc_fields.get("price_vvip") or "0")
-    pricing_config = load_config()
-    if pricing_config["enabled"]:
-        balance = pricing_balance if pricing_balance is not None else account_balance(member_payload)
-        apply_booking_price(base_data, customer_tier("existing", balance), pricing_config)
-    base_data["fare"] = first_nonzero(calc_fields.get("fare"), best_addr.get("fare"), default="0")
-    if base_data["price"] in ("", "0", "0.0") and payway != "儲值金":
-        raise Exception("計算時數後金額為 0，請確認坪數/時數設定是否正確")
+    payway, base_url, session, token = _ctx["payway"], _ctx["base_url"], _ctx["session"], _ctx["token"]
+    base_data, phone, member_name = _ctx["base_data"], _ctx["phone"], _ctx["member_name"]
+    selected_address = _ctx["selected_address"]
     slot = f"{date_s}_{period_s}"
     raw_section, token, auto_shift_result = _query_booking_slot_with_lemon_retry(
         session, base_url, payway, base_data, token, slot, allow_auto_lemon_shift,
     )
+    # 與批次成單一致：以後台班表回傳的可勾選時段為準，不另外比對未配班名單。
     cleaners = extract_cleaners_from_section_response(raw_section, slot)
-    # 後台 get_section 偶爾會回傳已綁在其他訂單的人員。送單前
-    # 另查同日重疊訂單；有任何占用衝突就不 POST 建單。
-    _assert_booking_staff_unassigned(
-        session, base_url, date_s, period_s, cleaners, needed_people=person,
-    )
-    # v2026.07.10：修正重大 bug——前面 check_contain 若失敗，可能借用過
-    # /booking/single 頁面的 token（見上面 v8.5 的備援邏輯），並把 token
-    # 變數永久換成借來的那個。如果送出建單時仍沿用這個借來的 token，會導致
-    # 送到 /booking/stored_value_routine 的請求帶著 /booking/single 頁面
-    # 發出的 token，後台可能因此誤判成一般訂單處理，出現付款方式空白、
-    # 訂單卡在待付款、儲值金沒有真的被扣除的情況。這裡在正式送出建單前，
-    # 一律重新跟「這筆訂單實際要用的建單網址」要一個乾淨的 token，不管前面
-    # check_contain 階段借用過哪個網址的 token。
+    if callable(discount_code):
+        # 步驟 10：查到班表時段後才產生優惠代碼（例如訂單轉換的折價券）。
+        base_data["discount_code"] = str(discount_code() or "")
+    # 正式送出前一律向這筆訂單實際使用的建單網址取得最新 token。
     booking_url = _booking_url_for_payway(base_url, payway)
     _fresh_token = _fetch_csrf_from_url(session, booking_url)
     if _fresh_token:
         token = _fresh_token
     staff_display = format_staff_from_cleaners(cleaners, people=person)
-    before_order_nos = list_order_numbers_for_phone(session, phone, name=member_name)
-    # 貼近真正 POST 再查一次，縮小第一次檢查後被別筆訂單先占用的競態窗口。
-    _assert_booking_staff_unassigned(
-        session, base_url, date_s, period_s, cleaners, needed_people=person,
-    )
+    def _blocks_on_service_date():
+        # 第一頁依服務日期排序只有 20 筆；再依本次服務日期翻頁查，避免新單在後面頁數找不到。
+        merged = {b.get("order_no"): b for b in _fetch_purchase_blocks_for_phone(session, phone, name=member_name) if b.get("order_no")}
+        for b in _order_blocks_for_dates(session, phone, [date_s]):
+            merged.setdefault(b["order_no"], b)
+        return list(merged.values())
+
+    before_order_nos = {b["order_no"] for b in _blocks_on_service_date()} | set(list_order_numbers_for_phone(session, phone, name=member_name))
     booking_resp = session.post(booking_url, data=_build_booking_submit_data(base_data, token, payway, slot), headers=HEADERS, allow_redirects=True)
     display_period = display_period_text(period_s.split("-")[0], period_s.split("-")[1])
     after_order_nos = set()
@@ -1143,7 +1064,7 @@ def quick_create_order(
             break
 
     def _find_matching_order_after_submit():
-        blocks = _fetch_purchase_blocks_for_phone(session, phone, name=member_name)
+        blocks = _blocks_on_service_date()
         target_addr_norm = normalize_addr_for_match(selected_address)
         target_period_compact = str(period_s or "").replace(" ", "")
         target_display_compact = str(display_period or "").replace(" ", "")
@@ -1174,11 +1095,7 @@ def quick_create_order(
     order_no = _find_matching_order_after_submit()
     if not order_no:
         if payway == "儲值金":
-            try:
-                reply = booking_resp.json()
-                failed_count = int(reply["count"])
-            except (ValueError, TypeError, KeyError):
-                failed_count = 0
+            failed_count = booking_flow.stored_value_failed_count(booking_resp)
             if failed_count > 0:
                 raise Exception(f"後台回覆儲值金／購物金餘額不足，有 {failed_count} 筆無法成立訂單。")
         raise Exception("送單結果待確認：尚未找到唯一符合本次資料的新訂單。請先查後台訂單，避免重複送單。")
@@ -1224,7 +1141,7 @@ def quick_create_order(
         "order_no": order_no, "address": selected_address, "date": date_s,
         "period": display_period, "period_s": period_s, "person": str(person),
         "price": price_no_tax, "price_with_tax": price_with_tax, "service_amount": price_with_tax,
-        "order_total": order_total,
+        "order_total": order_total, "discount_code": base_data.get("discount_code", ""),
         "fare": base_data["fare"], "payway": payway, "region": region,
         "clean_type_id": str(clean_type_id),
         "staff": meta.get("服務人員") or staff_display, "service_status": meta.get("服務狀態", "未處理"),
@@ -1234,6 +1151,17 @@ def quick_create_order(
         "address_mismatch_warning": address_mismatch_warning,
         "env_name": env_name, "session": session,
     }
+
+
+def _coupon_title(member_or_payload, order_no="", fallback="", amount=""):
+    """優惠券標題＝訂購人姓名＋原訂單末4碼－面額；沒有原訂單時用 fallback（手機）末4碼。"""
+    data = member_or_payload or {}
+    member = data.get("member", data) if isinstance(data, dict) else {}
+    name = str((member or {}).get("name") or "").strip()
+    tail = str(order_no or fallback or "").strip()[-4:]
+    title = f"{name}{tail}" if name else tail
+    amount_text = str(amount if amount not in (None, "") else "").strip()
+    return f"{title}-{amount_text}" if amount_text else title
 
 
 # =========================================================
@@ -1934,17 +1862,17 @@ def convert_order(
     today_str = date.today().strftime("%Y-%m-%d")
     coupon_prefix = order_no_a[-4:]
     coupon_discount = int(float(str(service_amount_a).replace(",", "")))
+    token_booking = get_csrf_token(session)
+    member_payload = get_member(session, phone_a, token_booking, clean_type_id)
+    if not member_payload:
+        raise Exception(f"電話 {phone_a} 查無會員資料")
     coupon_code = _build_coupon_via_session(
-        session, base_url, title=f"訂單轉換-{order_no_a}",
+        session, base_url, title=_coupon_title(member_payload, order_no_a, phone_a, coupon_discount),
         discount=coupon_discount, date_s=today_str, date_e=service_date_a,
         prefix=coupon_prefix, piece=2, regions=["台北", "台中"], service_items=["居家清潔", "裝修細清"],
     )
     if not coupon_code or coupon_code == coupon_prefix:
         raise Exception(f"折價券建立失敗，請至後台確認")
-    token_booking = get_csrf_token(session)
-    member_payload = get_member(session, phone_a, token_booking, clean_type_id)
-    if not member_payload:
-        raise Exception(f"電話 {phone_a} 查無會員資料")
     lookup_result = {"session": session, "token": token_booking, "phone": phone_a, "member_payload": member_payload, "base_url": base_url, "env_name": env_name}
     order_b_result = quick_create_order(
         env_name=env_name, payway=payway_a, region=region_a, lookup_result=lookup_result,
@@ -2158,29 +2086,38 @@ def convert_order_stage2_create_new_orders(stage1_result, new_orders):
             coupon_prefix = f"c{order_no_a[-3:]}{idx+1}{datetime.now().strftime('%H%M%S')}"
             coupon_discount = min(price_with_tax, remaining_coupon_budget)
             coupon_code = ""
-            if coupon_discount > 0:
-                coupon_code = _build_coupon_via_session(
+
+            # 折價券是成單步驟 10（優惠代碼），查到班表時段後才建立；
+            # 查無時段時不建券，避免留下沒用到的折價券。
+            def _make_coupon(idx=idx, coupon_prefix=coupon_prefix, coupon_discount=coupon_discount, new_date_s=new_date_s):
+                if coupon_discount <= 0:
+                    return ""
+                code = _build_coupon_via_session(
                     session, base_url,
-                    title=f"訂單轉換-{order_no_a}-B{idx+1}",
+                    title=_coupon_title(member_payload, order_no_a, amount=coupon_discount),
                     discount=coupon_discount,
                     date_s=today_str, date_e=new_date_s,
                     prefix=coupon_prefix, piece=1,
                     regions=[region_a] if region_a else ["台北", "台中"],
                     service_items=["居家清潔", "裝修細清"],
                 )
-                if not coupon_code:
+                if not code:
                     raise Exception(
                         f"折價券建立失敗：prefix={coupon_prefix}，折抵金額={coupon_discount}。"
                         "已停止建立新訂單，避免後台 /booking/single 因無效優惠碼回 500。"
                     )
-                remaining_coupon_budget -= coupon_discount
+                return code
+
             order_result = quick_create_order(
                 env_name=env_name, payway=payway_a, region=region_a,
                 lookup_result=lookup_result, address=address_a,
                 clean_type_id=clean_type_id, date_s=new_date_s, period_s=new_period_s,
-                hour=new_hour, person=new_person, discount_code=coupon_code,
+                hour=new_hour, person=new_person, discount_code=_make_coupon,
                 allow_auto_lemon_shift=bool(new_order.get("allow_lemon", False)),
             )
+            coupon_code = order_result.get("discount_code", "")
+            if coupon_code:
+                remaining_coupon_budget -= coupon_discount
             new_order_nos.append(order_result["order_no"])
 
             service_due = _service_due_after_fare(session, order_result["order_no"])
@@ -2224,9 +2161,9 @@ def convert_order_stage2_create_new_orders(stage1_result, new_orders):
             new_order_results.append({
                 "index": idx + 1, "date_s": new_date_s, "period_s": new_period_s,
                 "hour": new_hour, "person": new_person, "order_no": None,
-                "error": (
-                    f"{e}\n"
-                    f"🔧 第二段B{idx+1}：payway={payway_a}，coupon_prefix={locals().get('coupon_prefix', '')}，"
+                "error": str(e),
+                "debug": (
+                    f"第二段B{idx+1}：payway={payway_a}，coupon_prefix={locals().get('coupon_prefix', '')}，"
                     f"coupon_code={locals().get('coupon_code', '')}，coupon_discount={locals().get('coupon_discount', '')}，"
                     f"price_with_tax={locals().get('price_with_tax', '')}，remaining_coupon_budget={remaining_coupon_budget}"
                 ),
@@ -3443,8 +3380,15 @@ def calc_stored_value_plan(sv, new_service_price=None, day_type="平日", total_
     return {"unit_price": unit_price, "dummy_price": dummy_price, "coupon_a": coupon_a, "coupon_b": coupon_b, "customer_pays": customer_pays, "n": n, "total_person_hours": ph or n, "stored_value_applied": min(sv, dummy_price), "stored_order_total_after_coupon": max(dummy_price - coupon_a - sv, 0), "zero_total_stored_order": bool(zero_total_stored_order)}
 
 
-def _invoice_payload(invoice_mode, member_email="", mobile_carrier="", company_title="", company_no=""):
+def _invoice_payload(
+    invoice_mode, member_email="", mobile_carrier="", company_title="", company_no="",
+    donate_code="8585",
+):
     mode = str(invoice_mode or "會員載具").strip()
+    if mode in ("捐贈", "捐贈發票"):
+        if not str(donate_code or "").strip():
+            raise Exception("捐贈發票需填寫捐贈碼")
+        return {"invoice_type_override": "1", "carrier_type_id_override": "", "carrier_info": "", "company_title": "", "company_no": "", "donate_code_override": str(donate_code).strip(), "payment_type": "B2C"}
     if mode == "手機載具":
         if not str(mobile_carrier or "").strip().startswith("/"):
             raise Exception("手機載具需以 / 開頭")
@@ -3453,6 +3397,10 @@ def _invoice_payload(invoice_mode, member_email="", mobile_carrier="", company_t
         if not str(company_title or "").strip() or not str(company_no or "").strip():
             raise Exception("三聯式發票需填寫抬頭與統編")
         return {"invoice_type_override": "3", "carrier_type_id_override": "1", "carrier_info": "", "company_title": str(company_title).strip(), "company_no": str(company_no).strip(), "payment_type": "B2B"}
+    if mode in ("紙本", "索取實體紙本"):
+        return {"invoice_type_override": "2", "carrier_type_id_override": "4", "carrier_info": "", "company_title": "", "company_no": "", "payment_type": "B2C"}
+    if not str(member_email or "").strip():
+        raise Exception("會員載具需有 Email")
     return {"invoice_type_override": "2", "carrier_type_id_override": "1", "carrier_info": str(member_email or "").strip(), "company_title": "", "company_no": "", "payment_type": "B2C"}
 
 
@@ -3506,13 +3454,34 @@ def stored_value_makeup_create_stored_order(
         }
     regions = [ctx["region"]] if ctx.get("region") else list(COUPON_COMPANY_ID_MAP.keys())
     services = ["居家清潔", "裝修細清"]
-    coupon_a = create_coupon(env_name, backend_email, backend_password, title=f"儲值金清零-{phone}", discount=ctx["plan"]["coupon_a"], date_s=ctx["today_str"], date_e=ctx["date_e"], prefix=ctx["prefix_a"], piece="1", regions=regions, service_items=services)
-    code_a = coupon_a.get("coupon_code") or coupon_a.get("coupon_prefix") or ctx["prefix_a"]
-    stored_order = quick_create_order(env_name=env_name, payway="儲值金", region=ctx["region"], lookup_result=ctx["lookup"], address=ctx["address"], clean_type_id=clean_type_id, date_s=service_date, period_s=period_s, hour=str(hour), person=str(person), discount_code=code_a, pricing_balance=ctx["balance"], allow_auto_lemon_shift=bool(allow_auto_lemon_shift))
-    lemon_result = assign_lemon_cleaners_to_order(session=stored_order["session"], base_url=_configure_environment(env_name), order_no_a=stored_order["order_no"], service_date=service_date, period_s=period_s, person_count=str(person), allow_auto_lemon_shift=bool(allow_auto_lemon_shift))
+    coupon_a = {}
+
+    def _make_coupon_a():
+        # 步驟 10：查到班表時段後才建立優惠券A，查無時段不留下沒用到的券。
+        coupon_a.update(create_coupon(env_name, backend_email, backend_password, title=_coupon_title(ctx["member"], "", phone, ctx["plan"]["coupon_a"]), discount=ctx["plan"]["coupon_a"], date_s=ctx["today_str"], date_e=ctx["date_e"], prefix=ctx["prefix_a"], piece="1", regions=regions, service_items=services) or {})
+        return coupon_a.get("coupon_code") or coupon_a.get("coupon_prefix") or ctx["prefix_a"]
+
+    stored_order = quick_create_order(env_name=env_name, payway="儲值金", region=ctx["region"], lookup_result=ctx["lookup"], address=ctx["address"], clean_type_id=clean_type_id, date_s=service_date, period_s=period_s, hour=str(hour), person=str(person), discount_code=_make_coupon_a, pricing_balance=ctx["balance"], allow_auto_lemon_shift=bool(allow_auto_lemon_shift))
+    # 儲值金清零單一律要換成檸檬人（與訂單轉換第一段相同）：排班頁沒有檸檬人時，
+    # 先到專員班表補檸檬人班再換；只補檸檬人，不動其他客人已配班專員。
+    lemon_result = assign_lemon_cleaners_to_order(session=stored_order["session"], base_url=_configure_environment(env_name), order_no_a=stored_order["order_no"], service_date=service_date, period_s=period_s, person_count=str(person), allow_auto_lemon_shift=True)
     note = (f"儲值金補價差第一段：儲值金折抵單 {stored_order['order_no']}，{ctx['day_type']}單價 {ctx['plan']['unit_price']} × {ctx['plan']['total_person_hours']}人時 = {ctx['plan']['dummy_price']}，優惠券A折抵 {ctx['plan']['coupon_a']} 元，剩餘 {ctx['plan']['stored_value_applied']} 元扣儲值金後總額應為 0，檸檬人勿動。")
     _update_order_note(stored_order["session"], _configure_environment(env_name), stored_order["order_no"], note)
     return {"stage": "stored_order", "balance": ctx["balance"], "plan": ctx["plan"], "day_type": ctx["day_type"], "coupon_a": coupon_a, "stored_order": stored_order, "lemon_result": lemon_result, "note": note, "address": ctx["address"], "region": ctx["region"], "phone": phone, "clean_type_id": clean_type_id, "service_date": service_date, "period_s": period_s, "hour": str(hour), "person": str(person), "coupon_prefix_base": coupon_prefix_base or phone, "coupon_valid_days": coupon_valid_days}
+
+
+def stored_value_makeup_retry_lemon(env_name, backend_email, backend_password, stored_stage):
+    """第一段儲值金單已成立但未換成檸檬人時，重新換檸檬人（會先補檸檬人班）。"""
+    base_url = _configure_environment(env_name)
+    session = requests.Session()
+    if not login(session, backend_email, backend_password):
+        raise Exception("後台登入失敗")
+    return assign_lemon_cleaners_to_order(
+        session=session, base_url=base_url,
+        order_no_a=stored_stage["stored_order"]["order_no"],
+        service_date=stored_stage["service_date"], period_s=stored_stage["period_s"],
+        person_count=str(stored_stage["person"]), allow_auto_lemon_shift=True,
+    )
 
 
 def stored_value_makeup_create_paid_order(
@@ -3529,12 +3498,16 @@ def stored_value_makeup_create_paid_order(
     regions = [ctx["region"]] if ctx.get("region") else list(COUPON_COMPANY_ID_MAP.keys())
     services = ["居家清潔", "裝修細清"]
     coupon_b = {}
-    code_b = ""
-    if ctx["balance"] > 0:
-        coupon_b = create_coupon(env_name, backend_email, backend_password, title=f"儲值金補價差客付-{phone}", discount=ctx["plan"]["coupon_b"], date_s=ctx["today_str"], date_e=ctx["date_e"], prefix=ctx["prefix_b"], piece="1", regions=regions, service_items=services)
-        code_b = coupon_b.get("coupon_code") or coupon_b.get("coupon_prefix") or ctx["prefix_b"]
+
+    def _make_coupon_b():
+        # 步驟 10：查到班表時段後才建立優惠券B。
+        if ctx["balance"] <= 0:
+            return ""
+        coupon_b.update(create_coupon(env_name, backend_email, backend_password, title=_coupon_title(ctx["member"], stored_order_no, phone, ctx["plan"]["coupon_b"]), discount=ctx["plan"]["coupon_b"], date_s=ctx["today_str"], date_e=ctx["date_e"], prefix=ctx["prefix_b"], piece="1", regions=regions, service_items=services) or {})
+        return coupon_b.get("coupon_code") or coupon_b.get("coupon_prefix") or ctx["prefix_b"]
+
     invoice = _invoice_payload(invoice_mode, member_email=ctx["member"].get("email") or "", mobile_carrier=mobile_carrier, company_title=company_title, company_no=company_no)
-    paid_order = quick_create_order(env_name=env_name, payway=customer_payway, region=ctx["region"], lookup_result=ctx["lookup"], address=ctx["address"], clean_type_id=clean_type_id, date_s=service_date, period_s=period_s, hour=str(hour), person=str(person), discount_code=code_b, pricing_balance=ctx["balance"], allow_auto_lemon_shift=bool(allow_auto_lemon_shift), **invoice)
+    paid_order = quick_create_order(env_name=env_name, payway=customer_payway, region=ctx["region"], lookup_result=ctx["lookup"], address=ctx["address"], clean_type_id=clean_type_id, date_s=service_date, period_s=period_s, hour=str(hour), person=str(person), discount_code=_make_coupon_b, pricing_balance=ctx["balance"], allow_auto_lemon_shift=bool(allow_auto_lemon_shift), **invoice)
     pair = f"儲值折抵單 {stored_order_no} + 客付補價差單 {paid_order['order_no']}" if stored_order_no else f"客付補價差單 {paid_order['order_no']}"
     note = f"儲值金補價差第二段：{pair}，客付單使用優惠券B折抵原儲值金餘額 {ctx['balance']} 元。"
     _update_order_note(paid_order["session"], _configure_environment(env_name), paid_order["order_no"], note)
@@ -3824,6 +3797,21 @@ def parse_new_customer_text(text):
     # 有統編但無抬頭 → 旗標，讓呼叫方去查抬頭
     result["need_lookup_title"] = bool(result.get("company_no") and not result.get("company_title"))
 
+    # 捐贈／紙本發票；捐贈碼沒寫時由後台預設捐贈碼帶入
+    result["invoice_mode"] = ""
+    result["donate_code"] = ""
+    if "捐贈" in _invoice_raw:
+        result["invoice_mode"] = "捐贈"
+        _donate_m = _re.search(r"(\d{3,7})", _invoice_raw)
+        result["donate_code"] = _donate_m.group(1) if _donate_m else ""
+        result["carrier"] = ""
+        result["company_no"] = ""
+    elif "紙本" in _invoice_raw:
+        result["invoice_mode"] = "紙本"
+        result["carrier"] = ""
+
+    result["discount_code"] = _find([r"(?:優惠代碼|優惠碼|折扣碼)\s*[：:]\s*(\S+)"], raw_text) or ""
+
     # ---------- 姓名 fallback（無標籤格式）----------
     # 排除掉已辨識為電話/Email/地址/坪數/付款方式的行，以及看起來像「標籤：內容」的行，
     # 剩下第一個非空行視為姓名。
@@ -3920,7 +3908,16 @@ def quick_create_new_customer_order(env_name, backend_email, backend_password, c
         payway_code = "1"  # 預設信用卡
 
     # 發票設定
-    if company_no:
+    invoice_mode = str(customer.get("invoice_mode", "")).strip()
+    donate_code = str(customer.get("donate_code", "")).strip() or "8585"
+    discount_code = str(customer.get("discount_code", "")).strip()
+    if invoice_mode in ("捐贈", "捐贈發票", "紙本", "索取實體紙本"):
+        _inv = _invoice_payload(invoice_mode, donate_code=donate_code)
+        invoice_type = _inv["invoice_type_override"]
+        carrier_type_id = _inv["carrier_type_id_override"]
+        carrier_info = ""
+        company_no = company_title = ""
+    elif company_no:
         # 有統編 → 三聯式發票
         invoice_type = "3"
         carrier_type_id = "1"
@@ -3983,7 +3980,7 @@ def quick_create_new_customer_order(env_name, backend_email, backend_password, c
         f"⚠️ 這支電話（{phone}）其實已經是舊客會員（姓名：{existing_member_name or member.get('name', '')}"
         f"{'，Email：' + existing_member_email if existing_member_email else ''}），不是新客！"
         "建議改用「舊客快速建單」流程處理，避免漏看歷史訂單/地址。"
-        if is_existing_member else ""
+        if is_existing_member and not customer.get("same_batch_member") else ""
     )
 
     # 新會員建立完成後，直接使用舊客建單的唯一核心流程。
@@ -4013,6 +4010,8 @@ def quick_create_new_customer_order(env_name, backend_email, backend_password, c
         company_title=company_title,
         invoice_type_override=invoice_type,
         carrier_type_id_override=carrier_type_id,
+        donate_code_override=donate_code,
+        discount_code=discount_code,
         extra_fields={
             "ping": ping,
             "serviceType": service_type,
@@ -4052,89 +4051,84 @@ def quick_create_new_customer_order(env_name, backend_email, backend_password, c
     return _shared_result
 
 
-def _area_from_check_reply(reply):
-    """從後台「查詢地址」回覆取出服務區域；缺 area_id/company_id 視為查無。"""
-    if not isinstance(reply, dict) or reply.get("return_code") not in (None, "", "0000"):
-        return {}
-    area = reply.get("area") if isinstance(reply.get("area"), dict) else {}
-    if not str(area.get("area_id") or "").strip() or not str(area.get("company_id") or "").strip():
-        return {}
-    return area
 
 
-def _lookup_backend_service_area(session, member_payload, address, token, clean_type_id):
-    """模擬後台按「查詢地址」：取得服務區域與座標。
-
-    1. 先用 Google 座標 + /ajax/check_contain。
-    2. 查不到再用後台頁面原生「查詢地址」按鈕（由後台自己定位）。
-    回傳 (area_dict, reply, errors)。
-    """
-    member = (member_payload or {}).get("member", {}) or {}
-    member_id = str(member.get("member_id") or "")
-    errors = []
-    lat, lng = geocode_address(address)
-    try:
-        reply = check_contain(session, member_id, address, lat, lng, token, clean_type_id)
-        area = _area_from_check_reply(reply)
-        if area:
-            area = dict(area)
-            area.setdefault("lat", lat or "")
-            area.setdefault("lng", lng or "")
-            if not area.get("lat"):
-                area["lat"] = lat or ""
-            if not area.get("lng"):
-                area["lng"] = lng or ""
-            return area, reply, errors
-        errors.append("查詢地址未回傳服務區域" + ("" if lat else "（無座標）"))
-    except Exception as exc:
-        errors.append(f"查詢地址：{exc}")
-    try:
-        from backend_address_form import query_native_address
-        reply = query_native_address(session, orders.BASE_URL, member_id, address, clean_type_id)
-        area = _area_from_check_reply(reply)
-        if area:
-            return dict(area), reply, errors
-        errors.append("後台原生查詢地址未回傳服務區域")
-    except Exception as exc:
-        errors.append(f"後台原生查詢地址：{exc}")
-    return {}, {}, errors
 
 
-def resolve_backend_booking_address(session, member_payload, address, token, clean_type_id):
-    """組出成單地址資料（新客、舊客新地址、舊客既有地址共用）。
-
-    - 會員既有地址已存服務區域：直接沿用，不另外查詢。
-    - 新客／建了會員但沒成單／舊客新地址：沒有可用區域時，比照後台手動
-      成單按「查詢地址」，補上 area_id、company_id、lat、lng，送單時後台
-      會以新地址建立。
-    - 查不到服務區域就停止並說明原因，不會用預設區域亂成單。
-    """
+def resolve_backend_booking_address(
+    session, member_payload, address, token, clean_type_id, phone="",
+    refresh_saved_address_via_native_form=True,
+):
+    """依後台原生「查詢地區」按鈕取得服務區域，不自行查地圖或猜區域。"""
     best_addr = dict(pick_best_address_info(member_payload, address) or {})
     selected_address = str(address).strip()
     best_addr["address"] = selected_address
     address_parts = _split_booking_address(selected_address)
-    # country_id 是後台縣市區下拉值，與服務區域 area_id 不同。
-    best_addr["country_id"] = address_parts.get("country_id") or best_addr.get("country_id", "")
-    has_area = all(str(best_addr.get(k) or "").strip() for k in ("area_id", "company_id", "lat", "lng"))
-    if has_area:
+    if not refresh_saved_address_via_native_form:
+        # 批次維持原本的下拉地址流程：保留匹配到的 addressId 與該地址保存欄位；
+        # 不額外啟動單筆舊客使用的瀏覽器表單刷新。
+        best_addr["country_id"] = address_parts.get("country_id") or best_addr.get("country_id", "")
         return best_addr, address_parts, {}
-    lookup_address = address_parts.get("full") or selected_address
-    area, reply, errors = _lookup_backend_service_area(
-        session, member_payload, lookup_address, token, clean_type_id,
-    )
-    if not area:
-        if str(best_addr.get("addressId") or "").strip():
-            # 會員既有地址查詢失敗時，沿用原本存好的資料交給後台判斷。
-            return best_addr, address_parts, {}
-        raise Exception(
-            f"地址查不到服務區域，尚未查班表：{selected_address}。"
-            + "；".join(errors)
-            + "。請確認地址是否在服務範圍，或到後台按「查詢地址」確認。"
+    member = member_payload.get("member", {}) if isinstance(member_payload, dict) else {}
+    if best_addr.get("addressId"):
+        member_addresses = member.get("memberAddressList", []) if isinstance(member, dict) else []
+        matching = next(
+            (
+                item for item in member_addresses
+                if str(item.get("id") or "").strip() == str(best_addr["addressId"]).strip()
+            ),
+            {},
         )
-    for key in ("area_id", "company_id", "lat", "lng"):
-        if not str(best_addr.get(key) or "").strip() and str(area.get(key) or "").strip():
-            best_addr[key] = area.get(key)
-    return best_addr, address_parts, reply if isinstance(reply, dict) else {}
+        purchase = matching.get("purchase") if isinstance(matching.get("purchase"), dict) else {}
+        best_addr["notice"] = str(
+            matching.get("memo")
+            or purchase.get("notice")
+            or purchase.get("service_notice")
+            or best_addr.get("notice")
+            or ""
+        )
+        # 舊客已有相同下拉地址時，只選該 addressId，沿用該地址保存的區域資料
+        # 與客服備註。下拉選取不保證會觸發 /ajax/check_contain，不能再等待
+        # 地址定位回覆；否則正確的既有地址會被誤判為查詢逾時。
+        best_addr["country_id"] = best_addr.get("country_id") or address_parts.get("country_id", "")
+        return best_addr, address_parts, {}
+
+    # 舊客下拉選單沒有相同地址時，才視為新增地址並操作後台原生查詢地區。
+    _assert_address_region_resolved(address_parts, selected_address)
+    member_id = str(member.get("member_id") or "")
+    if not member_id:
+        raise Exception("查詢地區前缺少會員編號，已停止成單")
+
+    # 只操作後台自己的查詢地區按鈕；該頁如何定位地址由後台負責。
+    from backend_address_form import query_native_address
+    addr_check = query_native_address(
+        session, orders.BASE_URL, member_id, selected_address, clean_type_id,
+        city=address_parts.get("city", ""),
+        country_id=address_parts.get("country_id", ""),
+        address_id=best_addr.get("addressId", ""),
+        phone=phone or member.get("phone") or member.get("mobile") or member.get("tel") or "",
+        # 比照手動操作：選好縣市／鄉鎮市區後，地址欄仍填完整地址（只填路名會讓後台地圖定位失敗，
+        # 回覆「此地址尚未開放服務」）。
+        address_detail=selected_address,
+        district=address_parts.get("district", ""),
+    )
+    area_info = addr_check.get("area") if isinstance(addr_check, dict) else {}
+    if not isinstance(area_info, dict):
+        area_info = {}
+    area_id = area_info.get("area_id") or area_info.get("areaId")
+    company_id = area_info.get("company_id") or area_info.get("companyId")
+    if not area_id or not company_id:
+        raise Exception("後台查詢地區未回傳服務區域，已停止成單")
+
+    # country_id 是後台縣市區下拉值，與服務區域 area_id 不同；不互相猜值。
+    best_addr["country_id"] = address_parts.get("country_id") or best_addr.get("country_id", "")
+    best_addr["area_id"] = area_id
+    best_addr["company_id"] = company_id
+    best_addr["lat"] = area_info.get("lat") or best_addr.get("lat", "")
+    best_addr["lng"] = area_info.get("lng") or best_addr.get("lng", "")
+    _validate_area_not_known_bad(selected_address, area_info, context="查詢地區")
+    _validate_address_before_submit(selected_address, area_id, context="查詢地區")
+    return best_addr, address_parts, addr_check
 
 
 def _query_booking_slot_with_lemon_retry(session, base_url, payway, data, token, slot, allow_auto_lemon_shift):
@@ -4156,14 +4150,239 @@ def _query_booking_slot_with_lemon_retry(session, base_url, payway, data, token,
         raw = orders.get_all_sections_raw(session, data, token)
         found = slot_exists_in_section_response(raw, slot)
     if not found:
+        service_date_of_slot = slot.split("_", 1)[0]
         details = [str(pre.get("message") or "")]
         for item in pre.get("skipped", []) or []:
             if isinstance(item, dict):
                 details.append(f"{item.get('name', '')}：{item.get('reason') or item.get('message') or ''}")
         shift_message = "；".join(x for x in details if x)
+        period_of_slot = slot.split("_", 1)[1] if "_" in slot else ""
+        others = _sections_on_date(raw, service_date_of_slot)
         raise Exception(
-            f"後台未回傳可預約時段：{slot}。"
+            f"{service_date_of_slot} {period_of_slot}（{data.get('person', '')} 人）無可預約人力："
+            "後台查詢班表結果沒有這個時段。"
             + (f"補檸檬人結果：{shift_message}。" if shift_message else "")
-            + f"後台班表回覆：{str(raw)[:300]}"
+            + (f"當天可預約：{others}。" if others else "當天沒有任何可預約時段。")
         )
     return raw, token, pre
+
+
+def _prepare_booking_data(
+    env_name, payway, lookup_result, address, clean_type_id,
+    date_s, period_s, hour, person="2", fallback_fare="0", discount_code="",
+    payment_type="", carrier_info="", company_no="", company_title="",
+    invoice_type_override="", carrier_type_id_override="", donate_code_override="",
+    extra_fields=None, pricing_balance=None,
+):
+    """成單步驟 1–5：會員、地址（查詢地區）、坪數與計算時數；查班表前的共用資料。"""
+    payway = normalize_booking_payway(payway)
+    base_url = _configure_environment(env_name)
+    session = lookup_result["session"]
+    token = _get_booking_token_for_payway(session, base_url, payway)
+    member_payload = lookup_result["member_payload"]
+    phone = lookup_result["phone"]
+    member_name = (member_payload.get("member", {}) or {}).get("name", "") if member_payload else ""
+    if not member_payload:
+        raise Exception("此電話查無會員資料，請先走新客人資訊收集流程建立會員後再建單")
+    member = member_payload.get("member", {})
+    # 每筆都重新查詢會員再比對地址下拉：同一次建立多筆時，第 1 筆新增的地址
+    # 已存進後台下拉，後續各筆要選該 addressId。價格仍用原本查詢時的餘額。
+    address_payload = (get_member(session, phone, token, clean_type_id) if phone else None) or member_payload
+    best_addr, address_parts, addr_check = resolve_backend_booking_address(
+        session, address_payload, address, token, clean_type_id, phone=phone,
+    )
+    address_for_lookup = str(best_addr.get("address") or address).strip()
+    address_for_submit = address_for_lookup
+    selected_address = address_for_lookup
+    area_info = addr_check.get("area") if isinstance(addr_check.get("area"), dict) else {}
+    purchase_info = addr_check.get("purchase") if isinstance(addr_check.get("purchase"), dict) else {}
+    fare_from_check = first_nonzero(
+        purchase_info.get("fare") if purchase_info else "",
+        purchase_info.get("car_fare") if purchase_info else "",
+        purchase_info.get("traffic_fee") if purchase_info else "",
+        area_info.get("fare") if area_info else "",
+        area_info.get("car_fare") if area_info else "",
+        area_info.get("traffic_fee") if area_info else "",
+        find_nested_value(addr_check, ["fare", "car_fare", "traffic_fee", "trafficFee", "車馬費"]),
+        best_addr.get("fare", ""),
+        default=str(fallback_fare or "0"),
+    )
+    best_addr["fare"] = fare_from_check
+    invoice_type = str(first_nonzero(invoice_type_override, purchase_info.get("invoiceType") if purchase_info else "", find_nested_value(addr_check, ["invoiceType", "invoice_type"]), default="2"))
+    carrier_type_id = str(first_nonzero(carrier_type_id_override, purchase_info.get("carrierTypeId") if purchase_info else "", default="1"))
+    carrier_info = str(first_nonzero(carrier_info, purchase_info.get("carrierInfo") if purchase_info else "", member.get("email") or "", default=""))
+    company_title = str(first_nonzero(company_title, purchase_info.get("companyTitle", "") if purchase_info else "", default=""))
+    company_no = str(first_nonzero(company_no, purchase_info.get("companyNo", "") if purchase_info else "", default=""))
+    donate_code = str(first_nonzero(
+        donate_code_override,
+        purchase_info.get("donateCode", "") if purchase_info else "",
+        default="8585",
+    ))
+    old_purchase = best_addr.get("purchase", {}) if isinstance(best_addr.get("purchase"), dict) else {}
+
+    def pick(key, default=""):
+        value = old_purchase.get(key)
+        return value if value not in (None, "") else default
+
+    base_data = {
+        "clean_type_id": clean_type_id, "phone": phone,
+        "name": str(member.get("name") or "").strip(), "email": str(member.get("email") or "").strip(),
+        "tel": str(member.get("tel") or phone), "line": str(member.get("line") or ""),
+        "fbName": str(member.get("fb_name") or ""), "fb": str(member.get("fb") or ""),
+        "memoProcess": str(member.get("memo_process") or ""), "memoFinance": str(member.get("memo_finance") or ""),
+        "addressId": str(best_addr.get("addressId") or ""),
+        "country_id": str(address_parts.get("country_id") or best_addr.get("country_id") or pick("country_id", "")),
+        "address": address_for_submit, "ping": str(pick("ping", "4")),
+        "room": str(pick("room", "0")), "bathroom": str(pick("bathroom", "0")),
+        "balcony": str(pick("balcony", "0")), "livingroom": str(pick("livingroom", "0")),
+        "kitchen": str(pick("kitchen", "0")), "window": str(pick("window", "")),
+        "shutter": str(pick("shutter", "")), "clothes": str(pick("clothes", "0")),
+        "dyson": str(pick("dyson", "0")), "refrigerator": str(pick("refrigerator", "0")),
+        "disinfection": str(pick("disinfection", "0")), "go_abord": str(pick("go_abord", "0")),
+        "home_move": str(pick("home_move", "0")), "storage": str(pick("storage", "0")),
+        "cabinet": str(pick("cabinet", "0")), "quintuple": str(pick("quintuple", "0")),
+        "hour": str(int(float(hour))), "price": "", "price_vvip": "",
+        "person": str(person), "date_s": date_s, "period_s": period_s,
+        "period": "", "cycle": "1", "fare": "", "memo": "",
+        "notice": str(best_addr.get("notice") or old_purchase.get("notice") or ""),
+        "discount_code": "" if callable(discount_code) else str(discount_code or ""),
+        "payment": str(payment_type or ""),
+        "carrierInfo": str(carrier_info or ""), "companyNo": str(company_no or ""),
+        "companyTitle": str(company_title or ""), "payway": PAYWAY_MAP.get(payway, "2"),
+        "invoice_type": invoice_type, "carrier_type_id": carrier_type_id,
+        "carrier_info": carrier_info, "company_title": company_title,
+        "company_no": company_no, "donate_code": donate_code, "is_backend": "477",
+        "member_id": str(member.get("member_id") or ""),
+        "company_id": str(best_addr.get("company_id") or best_addr.get("companyId") or pick("company_id", "")),
+        "area_id": str(best_addr.get("area_id") or best_addr.get("areaId") or pick("area_id", "")),
+        "lat": str(best_addr.get("lat") or pick("lat", "")),
+        "lng": str(best_addr.get("lng") or pick("lng", "")),
+    }
+    if extra_fields:
+        base_data.update(extra_fields)
+
+    calc_result = calculate_hour(session, base_data, token)
+    if not calc_result:
+        raise Exception("計算時數失敗")
+    calc_fields = extract_calc_fields(calc_result, fallback_hours=base_data["hour"], fallback_fare=best_addr.get("fare", "0"))
+    base_data["price"] = str(calc_fields.get("price") or "0")
+    base_data["price_vvip"] = str(calc_fields.get("price_vvip") or "0")
+    pricing_config = load_config()
+    if pricing_config["enabled"]:
+        balance = pricing_balance if pricing_balance is not None else account_balance(member_payload)
+        apply_booking_price(base_data, customer_tier("existing", balance), pricing_config)
+    base_data["fare"] = first_nonzero(calc_fields.get("fare"), best_addr.get("fare"), default="0")
+    if base_data["price"] in ("", "0", "0.0") and payway != "儲值金":
+        raise Exception("計算時數後金額為 0，請確認坪數/時數設定是否正確")
+    return {
+        "payway": payway, "base_url": base_url, "session": session, "token": token,
+        "base_data": base_data, "phone": phone, "member_name": member_name,
+        "selected_address": selected_address,
+    }
+
+
+def _slot_of_block(joined_text, wanted_slots):
+    """依訂單卡片的服務日期與時間，對回本次送出的 date_period。"""
+    service_date, service_time = _parse_service_date_time_loose(joined_text)
+    time_compact = str(service_time or "").replace(" ", "")
+    for slot in wanted_slots:
+        slot_date, slot_period = slot.split("_", 1)
+        if service_date != slot_date:
+            continue
+        display = display_period_text(slot_period.split("-")[0], slot_period.split("-")[1]).replace(" ", "")
+        if slot_period.replace(" ", "") in time_compact or (display and display in time_compact):
+            return slot
+    return ""
+
+
+def _order_blocks_for_dates(session, phone, dates, max_pages=20):
+    """依服務日期逐日查訂單列表並翻頁。
+
+    後台訂單列表依服務日期由新到舊排序、每頁 20 筆；同一會員較晚日期的單很多時，
+    較早日期的新單不會出現在第一頁，因此不能只讀第一頁。
+    """
+    blocks = {}
+    for service_date in sorted(set(dates)):
+        for page in range(1, max_pages + 1):
+            params = dict(PURCHASE_FILTER_PARAMS_TEMPLATE)
+            params.update({"phone": normalize_phone(phone), "clean_date_s": service_date,
+                           "clean_date_e": service_date, "page": str(page)})
+            resp = session.get(orders.PURCHASE_URL, params=params, headers=HEADERS, allow_redirects=True)
+            if resp.status_code != 200:
+                break
+            page_blocks = [b for b in extract_order_cards_from_purchase_html(resp.text) if b.get("order_no")]
+            new = [b for b in page_blocks if b["order_no"] not in blocks]
+            if not new:
+                break
+            for block in new:
+                blocks[block["order_no"]] = block
+    return list(blocks.values())
+
+
+def quick_create_stored_value_orders(
+    env_name, region, lookup_result, address, clean_type_id, slots, hour, person="2",
+    extra_fields=None,
+):
+    """儲值金頁一次勾選多個日期時段送出（與批次成單相同，date_list[] 多選）。
+
+    slots 為 ``YYYY-MM-DD_HH:MM-HH:MM`` 清單，同一次送出的時段時數必須相同。
+    回傳每個時段成立的訂單，以及後台沒有回傳（無人力）或送出後未成立的時段。
+    """
+    slots = [str(x) for x in slots or [] if str(x).strip()]
+    if not slots:
+        raise ValueError("尚未選擇要成立的日期時段")
+    first_date, first_period = slots[0].split("_", 1)
+    ctx = _prepare_booking_data(
+        env_name, "儲值金", lookup_result, address, clean_type_id, first_date, first_period, hour,
+        person=person, extra_fields=extra_fields,
+    )
+    session, base_url, token, base_data = ctx["session"], ctx["base_url"], ctx["token"], ctx["base_data"]
+    phone, member_name = ctx["phone"], ctx["member_name"]
+    # 步驟 5–6：查詢班表，只勾後台實際回傳的日期時段。
+    raw = orders.get_all_sections_raw(session, base_data, token)
+    available = [slot for slot in slots if slot_exists_in_section_response(raw, slot)]
+    unavailable = [slot for slot in slots if slot not in available]
+    if not available:
+        return {"orders": [], "unavailable": unavailable, "not_created": [], "failed_count": 0}
+    booking_url = _booking_url_for_payway(base_url, "儲值金")
+    token = _fetch_csrf_from_url(session, booking_url) or token
+    dates = [slot.split("_", 1)[0] for slot in available]
+    before = {b["order_no"] for b in _order_blocks_for_dates(session, phone, dates)}
+    resp = session.post(
+        booking_url, data=booking_flow.build_submit_pairs(base_data, token, "儲值金", available),
+        headers=HEADERS, allow_redirects=True,
+    )
+    created = {}
+    # 第一次不等待直接查；數量不夠才逐步等後台出單。
+    for wait_seconds in (0, 1, 2, 3, 5, 8):
+        if wait_seconds:
+            time.sleep(wait_seconds)
+        for block in _order_blocks_for_dates(session, phone, dates):
+            order_no = block.get("order_no")
+            if not order_no or order_no in before or order_no in created:
+                continue
+            slot = _slot_of_block("\n".join(block.get("lines", [])), available)
+            if slot:
+                created[order_no] = slot
+        if len(created) >= len(available):
+            break
+    orders_out = []
+    for order_no, slot in created.items():
+        date_s, period_s = slot.split("_", 1)
+        orders_out.append({
+            "order_no": order_no, "slot": slot, "date": date_s, "period_s": period_s,
+            # 不再逐張開訂單明細；專員用查詢班表時後台回傳的名單。
+            "staff": format_staff_from_cleaners(extract_cleaners_from_section_response(raw, slot), people=person),
+            "session": session,
+        })
+    created_slots = list(created.values())
+    not_created = []
+    for slot in available:
+        if slot in created_slots:
+            created_slots.remove(slot)
+        else:
+            not_created.append(slot)
+    return {
+        "orders": orders_out, "unavailable": unavailable, "not_created": not_created,
+        "failed_count": booking_flow.stored_value_failed_count(resp), "session": session,
+    }

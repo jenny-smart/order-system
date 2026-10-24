@@ -423,20 +423,48 @@ def confirm_lemon_ren_assignment(session: requests.Session, candidate: Dict, log
     return merged
 
 
+FULL_DAY_HOURS = {"6": ("0900", "1600"), "8": ("0900", "1800")}
+
+
+def _extends_full_day(full_value: str, slot: str, half_value: str) -> Optional[bool]:
+    """全日班＋半天班是否為延長上班時間（全8＋上4 提早到 08:30、全6＋下3 延到 17:00）。
+
+    無法判斷時回傳 None。
+    """
+    full = FULL_DAY_HOURS.get(str(full_value))
+    match = re.fullmatch(r"(\d{4})-(\d{4})", str(half_value or ""))
+    if not full or not match:
+        return None
+    start, end = match.groups()
+    if slot == "1":
+        return start < full[0]
+    if slot == "2":
+        return end > full[1]
+    return None
+
+
 def check_merged_conflicts(merged: Dict[str, str]) -> List[str]:
+    """勾班後的提醒。全日班＋半天班若是延長上班時間（例：全8＋上4、全6＋下3）屬正常排法，
+    不提醒；半天班完全落在全日班時間內（沒有延長）才提醒確認。"""
     warnings = []
     by_date: Dict[str, Dict[str, str]] = {}
     for key, value in merged.items():
         date_val, slot = key.rsplit("_", 1)
         by_date.setdefault(date_val, {})[slot] = value
     for date_val, slots in by_date.items():
-        for slot in slots:
-            for conflicting_slot in CONFLICT_MAP.get(slot, set()):
-                if conflicting_slot in slots:
-                    pair = tuple(sorted([slot, conflicting_slot]))
-                    msg = f"⚠️ {date_val} 同時勾選了 {pair[0]}={slots[pair[0]]} 跟 {pair[1]}={slots[pair[1]]}，請確認"
-                    if msg not in warnings:
-                        warnings.append(msg)
+        if "all" not in slots:
+            continue
+        for slot in ("1", "2"):
+            if slot not in slots:
+                continue
+            if _extends_full_day(slots["all"], slot, slots[slot]):
+                continue
+            msg = (
+                f"⚠️ {date_val} 同時勾選了 all={slots['all']} 跟 {slot}={slots[slot]}，"
+                "半天班沒有延長全日班的上班時間，請確認"
+            )
+            if msg not in warnings:
+                warnings.append(msg)
     return warnings
 
 
@@ -615,10 +643,14 @@ def assign_person_shift_range(
     date_end: str,
     type_values: List[str],
     ui_logger=None,
+    weekends_only: bool = False,
+    only_dates: Optional[List[str]] = None,
 ) -> Dict:
     """
     將指定人員在 date_start ~ date_end 期間勾選指定班別。
     指定日期範圍內會先清掉 all/1/2/3 舊勾選，再套用本次選擇的班別。
+    weekends_only=True 時只處理週六、週日，平日的既有勾選完全不動。
+    only_dates 有給時只處理清單內的日期（例如颱風假移轉的候選日期），其餘日期完全不動。
     """
     log = make_logger(ui_logger)
     clean_names = [str(n).strip() for n in names if str(n).strip()]
@@ -644,6 +676,15 @@ def assign_person_shift_range(
         raise ValueError(f"未知或不可用班別：{invalid_types}")
 
     dates = date_range(date_start, date_end)
+    if weekends_only:
+        dates = [d for d in dates if date.fromisoformat(d).weekday() >= 5]
+        if not dates:
+            raise ValueError("日期區間內沒有週六、週日")
+    if only_dates is not None:
+        wanted = {str(d).strip() for d in only_dates}
+        dates = [d for d in dates if d in wanted]
+        if not dates:
+            raise ValueError("日期區間內沒有要勾班的日期")
     by_month: Dict[str, List[str]] = {}
     for d in dates:
         by_month.setdefault(d[:7], []).append(d)

@@ -73,7 +73,10 @@ class PricingTest(unittest.TestCase):
     def test_booking_route_tax_and_fare(self):
         import quick_order as q
         config = configured()
-        payload = dict(date_s='2027-01-02', hour='4', person='2', fare='100')
+        payload = dict(
+            date_s='2027-01-02', hour='4', person='2', fare='100',
+            invoice_type='2', carrier_type_id='1', carrier_info='member@example.com',
+        )
         p.apply_booking_price(payload, 'vip', config)
         self.assertEqual(payload['price'], '4952')  # 650 * 8 / 1.05
         for payway in ['信用卡', 'ATM', '儲值金']:

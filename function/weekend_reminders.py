@@ -268,23 +268,40 @@ def _service_date_time(lines):
     return sms_date or service_date, sms_time or service_time
 
 
-def build_reminder_message(row):
+def build_reminder_message(row, typhoon_reminder=False):
     service_date = datetime.strptime(row["service_date"], "%Y-%m-%d").date()
     weekdays = "一二三四五六日"
     when = f"{service_date.month}/{service_date.day}（{weekdays[service_date.weekday()]}）"
     if row.get("service_time"):
         when += f" {row['service_time']}"
     address_line = f"\n服務地址：{row['address']}" if row.get("address") else ""
-    return (
-        f"您好，提醒您本週末的清潔服務：\n\n"
+    message = (
+        f"您好，這是週末/例假日的清潔服務提醒：\n\n"
         f"服務時間：{when}{address_line}\n\n"
         "專員會在服務前5-10分鐘，以電話／門鈴／透過管理員等方式與您聯繫，"
         "煩請留意聯繫訊息。\n\n"
         "為確認您已收到提醒，請回覆「已收到」，謝謝您。"
     )
+    if typhoon_reminder:
+        return (
+            f"{message}\n\n"
+            "💡 貼心提醒：\n"
+            "📅 例假日內勤人員休息通常不會處理訊息，建議您可以先留訊息待工作日上班時間處理喔，謝謝～\n"
+            "🌀 若人事行政局公告放假，則該日服務取消，待工作日上班時間與您協調時間，"
+            "造成不便，尚請見諒～"
+        )
+    return (
+        f"{message}\n\n"
+        "💡 貼心提醒：\n"
+        "📅 例假日內勤人員休息通常不會處理訊息，您可以先留訊息待上班日上班時間處理喔，"
+        "造成不便，尚請見諒，謝謝～"
+    )
 
 
-def find_paid_weekend_orders(env_name, backend_email, backend_password, clean_date_s, clean_date_e, max_pages=20):
+def find_paid_weekend_orders(
+    env_name, backend_email, backend_password, clean_date_s, clean_date_e,
+    max_pages=20, typhoon_reminder=False,
+):
     """查詢服務日期區間內已付款／取消／已退款訂單；回傳後由 merge 只顯示已付款提醒。"""
     _configure_backend(env_name)
     session = orders.requests.Session()
@@ -334,7 +351,10 @@ def find_paid_weekend_orders(env_name, backend_email, backend_password, clean_da
                 "line_url": line_urls.get(order_no, ""),
                 "order_status": order_status,
             }
-            row["message"] = build_reminder_message(row) if order_status == "已付款" else ""
+            row["message"] = (
+                build_reminder_message(row, typhoon_reminder=typhoon_reminder)
+                if order_status == "已付款" else ""
+            )
             found[order_no] = row
         if len(blocks) < 20:
             hit_page_limit = False

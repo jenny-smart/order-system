@@ -2,8 +2,13 @@
 # 檔名：ordersapp.py
 # 版本：v8.80
 # 模組：服務訂單系統主畫面／統一功能選單
-# 最後更新：2026-10-17
+# 最後更新：2026-10-24
 #
+# v8.81（同步 orders-system #103～#141）
+# - 新增「檸檬保留刪除地址」「颱風假訂單移轉」。
+# - 三種批次成單共用「本次預約對象」（預約條件階段）、O 欄內容篩選、dev 測試副本；
+#   雲端批次可暫停／立即停止。
+# - 取消訂單手機可留空；新客／舊客多筆、優惠代碼、紙本／捐贈發票；保留單分輪建立可暫停。
 # v8.80
 # - 新增「批次建單優化＋雲端批次成單」（function/cloud_batch_booking.py；
 #   GitHub Actions 執行 python -m shared.cloud_batch_booking）。
@@ -25,7 +30,7 @@
 # - VIP Calendar patch 改由單一 patch bundle 套用。
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.80"
+__version__ = "8.81"
 
 import importlib
 
@@ -179,10 +184,13 @@ FUNCTION_OPTIONS = [
     ("訂單轉換：原單轉多筆新單，各建折價券，混合配班。", "orders", "訂單轉換"),
     ("儲值金補價差：兩段式流程，先建儲值金清零單，再建客付補差價單。", "orders", "儲值金補價差"),
     # ---------- B. 訂單附屬功能 ----------
-    ("取消訂單：依電話、服務月份／日期區間與付款狀態搜尋訂單，處理退款與備註。", "orders", "取消訂單"),
+    ("取消訂單：依電話（可留空）、服務月份／日期區間與付款狀態搜尋訂單，處理退款與備註。", "orders", "取消訂單"),
     ("檸檬保留單取消：依期間、複選時段與客人備註安全篩選並批次取消保留單。", "orders", "檸檬保留單取消"),
+    ("檸檬保留刪除地址：只留信義路、館前路兩個地址，其他不再使用的客人地址一次刪除。", "orders", "檸檬保留刪除地址"),
     ("檸檬人換正式專員：搜尋含檸檬人占位的訂單，依交通與配班規範推薦正式專員。", "orders", "檸檬人換正式專員"),
     ("VIP 訂單／Google 日曆同步：同時查詢後台訂單與 Google 日曆，支援異動、取消、暫停與日曆更新。", "orders", "VIP 訂單／Google 日曆同步"),
+    ("颱風假訂單移轉／比對：颱風假（可連放多天）訂單依時段逐筆用「修改日期」移到指定日期區間，時段不變；並可比對移轉後訂單目前日期，找出又被改過的訂單。", "orders", "颱風假訂單移轉"),
+    ("訂單班表記錄與返回：先記錄執行日期區間的訂單班表（日期／時段／專員），人員或日期被調整後可返回記錄的班表，執行前後都可複製名單。", "orders", "訂單班表記錄與返回"),
     ("訂單客服備註：舊客回購備註回填、新成單提醒建立、客服備忘錄整理。", "memo", "訂單客服備註"),
     ("儲值獎金備註：搜尋儲值金訂單，依姓名把獎金專員名字加進客服備註。", "orders", "儲值獎金備註"),
     ("排班管理：排班匯入、檸檬人空檔查詢、清空排班。", "memo", "排班管理"),
@@ -256,6 +264,11 @@ if _selected_target is None:
 _selected_option = FUNCTION_OPTIONS[_selected_target]
 _system_key, mode = _selected_option[1], _selected_option[2]
 
+# 網頁上按下的每個功能都記一筆到主控表「order-system執行Log-年度」（執行／成功／失敗）
+from shared import unified_log as _unified_log
+
+_unified_log.install_streamlit_hooks(st, _selected_option[0], str(st.session_state.get("username", "") or ""))
+
 st.markdown("<hr>", unsafe_allow_html=True)
 
 if _system_key == "memo":
@@ -278,6 +291,26 @@ if mode == "檸檬保留單取消":
     _reserve_menu_page.render_cancel(backend_email, backend_password, env)
     st.stop()
 
+if mode == "檸檬保留刪除地址":
+    _reserve_menu_page.render_address_cleanup(backend_email, backend_password, env)
+    st.stop()
+
+if mode == "颱風假訂單移轉":
+    from function import typhoon_transfer_page as _typhoon_transfer_page
+    from function.ui_common import copy_button as _copy_button
+
+    step("3", "颱風假訂單移轉")
+    _typhoon_transfer_page.render(backend_email, backend_password, env, copy_button=_copy_button)
+    st.stop()
+
+if mode == "訂單班表記錄與返回":
+    from function import reschedule_page as _reschedule_page
+    from function.ui_common import copy_button as _copy_button
+
+    step("3", "訂單班表記錄與返回")
+    _reschedule_page.render(backend_email, backend_password, env, copy_button=_copy_button)
+    st.stop()
+
 if mode == "檸檬人換正式專員":
     _lemon_staff_replacement_page.render(backend_email, backend_password, env)
     st.stop()
@@ -286,7 +319,7 @@ if mode == "取消訂單":
     from function.cancel_order import render_cancel_order
     step("3", "取消訂單")
     info_panel("功能說明", [
-        "依手機號碼搜尋一般訂單，不限定 VIP。",
+        "依手機號碼搜尋一般訂單，不限定 VIP；手機號碼可留空，改查日期區間內全部客人（可再用姓名篩選）。",
         "服務日期可用月份或日期區間查詢。",
         "付款狀態可選已付款或待付款。",
         "搜尋後可勾選一筆或多筆訂單處理取消、退款與備註。",

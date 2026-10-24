@@ -1,4 +1,5 @@
 name: Optimized Cloud Batch Booking
+run-name: Optimized Cloud Batch Booking (${{ inputs.env || 'prod' }}) ${{ inputs.sheet_name }}
 on:
   workflow_dispatch:
     inputs:
@@ -41,8 +42,23 @@ on:
         required: false
         default: "false"
         type: boolean
+      o_texts:
+        description: JSON list of selected O-column texts for missing_order; empty means all
+        required: false
+        default: "[]"
+        type: string
+      stages:
+        description: JSON list of booking stages (可約/改加/人時不足/已確認/未回覆) to book this run
+        required: false
+        default: '["可約"]'
+        type: string
+      env:
+        description: prod / dev（dev 只建單，使用工作表副本）
+        required: false
+        default: "prod"
+        type: string
 concurrency:
-  group: optimized-cloud-batch-booking-prod
+  group: optimized-cloud-batch-booking-${{ inputs.env == 'dev' && 'dev' || 'prod' }}
   cancel-in-progress: false
 jobs:
   booking:
@@ -70,6 +86,8 @@ jobs:
           KAOHSIUNG_EMAIL: ${{ secrets.KAOHSIUNG_EMAIL }}
           KAOHSIUNG_PASSWORD: ${{ secrets.KAOHSIUNG_PASSWORD }}
           GOOGLE_MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
+          O_TEXTS_JSON: ${{ inputs.o_texts }}
+          STAGES_JSON: ${{ inputs.stages }}
         run: >-
           python -m shared.cloud_batch_booking
           --sheet "${{ inputs.sheet_name }}"
@@ -79,3 +97,4 @@ jobs:
           --region "${{ inputs.region }}"
           --allow-auto-lemon "${{ inputs.allow_auto_lemon }}"
           --retry-failed "${{ inputs.retry_failed }}"
+          --env "${{ inputs.env == 'dev' && 'dev' || 'prod' }}"

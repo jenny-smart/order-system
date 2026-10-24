@@ -87,8 +87,9 @@ def _load_candidates(sheet_name: str) -> pd.DataFrame:
     for c in REQUIRED_COLUMNS:
         work[c] = work[c].map(_text)
 
-    # 建單候選必須同時符合 I 欄未安排、M 欄訂單編號空白。
-    work = work[work["狀態"].eq("未安排") & work["訂單編號"].eq("")]
+    # 建單候選：I 欄未安排、M 欄訂單編號空白、預約條件空白或在本次預約對象內（三種批次共用）。
+    from shared.booking_eligibility import can_create_order
+    work = work[work.apply(can_create_order, axis=1).astype(bool)] if len(work) else work
     work = work[
         work["姓名"].ne("")
         & work["電話"].ne("")
@@ -197,8 +198,10 @@ def render(backend_email: str, backend_password: str, env: str) -> None:
     畫面與原「批次建單」一致；執行改走 shared.hybrid_batch_runner.run_process_web_hybrid：
     依電話＋地址分組，2 筆以上同組先批次、每組完成即回填，單筆組再逐筆；日曆 lazy init。
     """
+    from shared import dev_sheet_copy
     from shared.batch_ui_consistency import region_credentials, resolve_target_rows
     from shared.hybrid_batch_runner import run_process_web_hybrid
+    from shared.selected_row_status_guard import held_message, render_o_text_filter, render_stage_filter
 
     step("4", "執行設定")
     c1, c2, c3 = st.columns(3)
@@ -214,16 +217,19 @@ def render(backend_email: str, backend_password: str, env: str) -> None:
     st.markdown("<hr>", unsafe_allow_html=True)
 
     step("3", "執行項目")
-    default_actions = ["建單", "寄確認信", "改 Google 日曆"] if env == "prod" else ["建單"]
     selected_actions = st.multiselect(
-        "執行項目", ["建單", "寄確認信", "改 Google 日曆"],
-        default=default_actions, key="batch_opt_actions_same_ui", label_visibility="collapsed",
+        "執行項目", dev_sheet_copy.action_options(env),
+        default=dev_sheet_copy.default_actions(env), key="batch_opt_actions_same_ui", label_visibility="collapsed",
     )
     st.markdown('<div class="hint-box">建單與回填優先；只有勾選改日曆且該筆已有訂單編號後，才初始化 Google Calendar。</div>', unsafe_allow_html=True)
     allow_auto_lemon = st.checkbox("查無班表時自動補檸檬人（不動其他客人已配班專員）", value=False, key="batch_opt_allow_auto_lemon")
     st.caption("指定範圍及自動篩選可包含失敗列；調整後可直接重試，不必清空 N 欄結果。")
+    st.caption("三種批次共用建單條件：訂單編號空白＋狀態未安排＋「預約條件」空白或在本次預約對象內；其他列會略過並在執行過程註明原因。")
+    render_stage_filter(st, "batch_opt_booking_stages")
     auto_no_slot = st.checkbox("自動篩選：狀態未安排＋訂單編號空白＋無班表", value=False, key="batch_opt_auto_no_slot")
     auto_missing_o = st.checkbox("自動篩選：狀態未安排＋訂單編號空白＋O欄找不到訂單編號", value=False, key="batch_opt_auto_missing_o")
+    o_texts = render_o_text_filter(st, sys.modules[__name__], dev_sheet_copy.read_sheet(st, env, sheet_name), region, "batch_opt_o_texts") if auto_missing_o else []
+    dev_sheet_copy.render_notice(st, env, sheet_name, "batch_opt")
 
     run_clicked = st.button("🚀  開始執行", use_container_width=True, key="batch_opt_same_ui_run")
     with st.expander("📄  執行過程", expanded=True):
@@ -238,6 +244,15 @@ def render(backend_email: str, backend_password: str, env: str) -> None:
     if not selected_actions:
         st.error("請至少選擇一個執行項目。")
         return
+    if dev_sheet_copy.is_dev(env):
+        # 測試機：先複製分頁，後續篩選、建單、回填都改用副本。
+        source_sheet = sheet_name
+        try:
+            sheet_name = dev_sheet_copy.resolve_run_sheet(st, env, source_sheet)
+        except Exception as exc:
+            st.error(f"建立測試副本失敗：{exc}")
+            return
+        st.info(f"🧪 測試機 dev：本次使用測試副本「{sheet_name}」（原分頁「{source_sheet}」不受影響）。")
 
     logs = []
 
@@ -247,15 +262,21 @@ def render(backend_email: str, backend_password: str, env: str) -> None:
 
     target_rows = []
     try:
-        target_rows, invalid, region_mismatch = resolve_target_rows(
-            sys.modules[__name__], sheet_name, region, row_spec,
-            auto_no_slot=auto_no_slot, auto_missing_o=auto_missing_o,
+        batch_opt = sys.modules[__name__]
+        target_rows, invalid, region_mismatch, held = resolve_target_rows(
+            batch_opt, sheet_name, region, row_spec,
+            auto_no_slot=auto_no_slot, auto_missing_o=auto_missing_o, o_texts=o_texts,
         )
+        if held:
+            ui_log(f"⏭️ {held_message(batch_opt, sheet_name, held)}：" + "、".join(map(str, held)))
         if invalid:
             ui_log("⏭️ 略過不符合執行條件列：" + "、".join(map(str, invalid)))
         if region_mismatch:
             ui_log(f"⏭️ 略過非{region}列：" + "、".join(map(str, region_mismatch)))
         if not target_rows:
+            if held:
+                st.info(f"{held_message(batch_opt, sheet_name, held)}，沒有其他符合執行條件的列。")
+                return
             raise ValueError("指定範圍內沒有符合執行條件的列。")
 
         email, password = region_credentials(region, backend_email, backend_password)
@@ -271,7 +292,8 @@ def render(backend_email: str, backend_password: str, env: str) -> None:
         ) or {}
         success = int(result.get("success_count", 0) or 0)
         fail = int(result.get("fail_count", 0) or 0)
-        st.success(f"執行完成：成功 {success}，失敗 {fail}，略過 {len(invalid) + len(region_mismatch)}。")
+        st.success(f"執行完成：成功 {success}，失敗 {fail}，"
+                   f"未選對象略過 {len(held)}，其他略過 {len(invalid) + len(region_mismatch)}。")
         log_execution(
             function_name="批次建單優化", status="失敗" if fail else "成功",
             area=region, date=sheet_name, target="、".join(map(str, target_rows)),

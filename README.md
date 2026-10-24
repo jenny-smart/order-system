@@ -41,3 +41,44 @@ VIP提前異動費目前保留每2人1小時200／300元，待確認是否改為
 - 共用防呆（`shared/batch_booking_safety.py`、`shared/selected_row_status_guard.py`、`shared/batch_recovery_meta.py`）：建單前先反查後台，已成立但未回填者依訂單編號精確補回（不重建、不重寄信）；同條件後台訂單多於空白列時整批擋下待人工確認；只建立 I 欄「未安排」＋M 欄空白的列；重複欄名一律以第一個欄位為準；「每月確認」事件不改日曆、I 欄寫「待確認」；勾選補檸檬人時只有「無班表」列才補班並重試。
 
 雲端批次需在 **jenny-smart/order-system** 的 GitHub Actions secrets 設定：`GOOGLE_SERVICE_ACCOUNT_JSON`、`TAIPEI_EMAIL`／`TAIPEI_PASSWORD`、`TAICHUNG_EMAIL`／`TAICHUNG_PASSWORD`、`TAOYUAN_EMAIL`／`TAOYUAN_PASSWORD`、`HSINCHU_EMAIL`／`HSINCHU_PASSWORD`、`KAOHSIUNG_EMAIL`／`KAOHSIUNG_PASSWORD`、`GOOGLE_MAPS_API_KEY`；Streamlit 端需設定 `ORDERS_GITHUB_TOKEN`（可對 order-system 執行 Actions workflow_dispatch／讀取 runs 與 logs）。workflow 以 `ref: main` 啟動，須合併到 main 後才可使用。
+
+### 本次預約對象、O 欄內容與測試副本（三種批次共用）
+
+- 可建單＝訂單編號空白＋狀態「未安排」＋排程「預約條件」空白或屬於本次預約對象（`shared/booking_eligibility.py`）。畫面可勾選可約／改加／人時不足／已確認／未回覆，預設只有「可約」；未選入的列略過並顯示筆數與列號。雲端以 `STAGES_JSON` 傳入。
+- 「O欄找不到訂單編號」改為 O 欄沒有單號，可再勾選 O 欄目前內容（雲端以 `O_TEXTS_JSON` 傳入）。
+- 測試機 dev：執行前先把工作表分頁複製成「原名_devMMDD-HHMMSS」，讀取與回填都在副本（`shared/dev_sheet_copy.py`）；雲端 dev 只建單。
+- 雲端批次成單可「暫停成單」（做完目前這一組並回填後停止，寫入 `_雲端成單進度` 的「控制」欄）或「立即停止」（取消 Actions 執行）。
+- 已退款／取消訂單不視為已成單：中斷復原與比對新單號都排除。
+- 工作表「代客保留」打勾的列改用檸檬保留帳號建單，客人備註寫「代客保留：客人姓名」（`shared/proxy_reserve.py`）。
+- 回填時沿用排程既有短欄名（沒班表日／餘額不足／日曆改色內容），不再另開欄位。
+
+## 檸檬保留單
+
+- 建單（`function/reserve_menu.py`、`function/reserve_optimizer.py`）：一輪一輪執行，每輪先重新分析各日期剩餘未配班人數；儲值金一次勾選所有日期時段送出。可暫停、繼續、結束。
+- 取消（`function/reserve_cancel.py`）：每批 3 張、可暫停；可用客人備註關鍵字搜尋並批次取消代客保留，取消後同步刪除檸檬保留帳號上不再使用的客人地址。
+- 檸檬保留刪除地址（`function/reserve_address.py`）：只留信義路、館前路兩個地址，其他地址不查訂單直接刪除；取消檸檬保留單時也順便清。
+- 成立／取消紀錄寫入「保留單紀錄」工作表（`shared/reserve_sheet_log.py`）。
+
+## 颱風假訂單移轉
+
+`function/typhoon_transfer.py`（邏輯）＋ `function/typhoon_transfer_page.py`（畫面）：颱風假日期（一天或區間）當天已付款訂單，依後台列表由上而下逐筆用「修改日期」移到指定日期區間，時段不變、日別只分平日與週末；結果可複製原／移轉後日期時段，並可追蹤目前日期（可貼沒有標題列的內容或上次追蹤結果）。
+
+比對 Google 表單（`function/typhoon_sheet_sync.py`）：讀客服的表單，逐筆查後台目前日期／時段，和表單的新日期／新時段比對；確認後只在有異動時填入「異動日期／異動時段」欄（相同但異動欄有舊值則清空），寫入前重讀避免覆蓋手動修改。表單欄位設定依後台帳號暫存在主控試算表「颱風移轉設定」分頁；表單須共用給服務帳號（編輯者）。
+
+返回原班表（誤傳颱風假時使用）：依移轉時記錄的原日期／原時段／原專員移回並配回原專員，一筆錯不影響其他筆；結果（或檢查結果）可複製貼回表單，含標題列：訂單編號、姓名、原日期、原時段、原專員、目前日期、目前時段、目前專員、狀態、返回時間。移轉前可先勾檸檬人排班、複製通知客人名單（含 LINE 連結），並標注同一客人多筆訂單與含檸檬人的專員。
+
+## 訂單班表記錄與返回
+
+功能選單 B 類（`function/reschedule.py`＋`function/reschedule_page.py`），不需 Google 表單，直接查後台；供排班調班時使用：
+
+1. 記錄：查執行日期區間的已付款訂單，記下每筆的日期／時段／專員，存到主控試算表「班表記錄」分頁（每次記錄一個記錄 ID）。
+2. 返回：選一份記錄（可再用返回日期區間篩選），查後台目前狀態後，逐筆用「修改日期」改回記錄的日期／時段，馬上到「排班修改」配回記錄的專員並確認姓名才做下一筆；配不回的位置不占其他待返回訂單的專員，全部跑完再補試。每筆最後再核對專員姓名，兩組人員對調也能換回。
+3. 執行前、執行後都可複製名單（含標題列，欄位同返回原班表）。
+
+## 其他同步項目（orders-system #103～#141）
+
+- 取消訂單：手機號碼可留空改查日期區間內全部客人、全選／全部取消選取、確認視窗下方顯示進度。
+- 新客／舊客：多筆日期時段、優惠代碼、紙本／捐贈發票；單筆與批次共用建單流程（`shared/booking_flow.py`，見 `docs/order-creation-flow.md`）。
+- 訂單轉換／儲值金補價差：查到班表時段後才建立優惠券，優惠券標題為訂購人姓名＋原訂單末4碼－面額；補價差第一段固定換成檸檬人，可重試。
+- 週末服務 LINE 提醒可加入颱風停班提醒；檸檬人勾班新增「僅勾週末」。
+- 網頁上按下的每個功能都記入主控表「order-system執行Log-年度」（執行／成功／失敗）。

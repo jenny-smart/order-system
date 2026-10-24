@@ -22,6 +22,7 @@ import requests
 
 import orders as _orders
 from accounts import ACCOUNTS
+from shared.booking_eligibility import create_block_reason
 from shared.env_config import apply_env
 from shared.selected_row_status_guard import _load_worksheet_unique
 
@@ -90,6 +91,7 @@ def _block_key(block):
         "period": str(service_period or "").replace(" ", ""),
         "address": _orders.normalize_addr_for_match(address),
         "joined_address": _orders.normalize_addr_for_match(joined),
+        "void": _orders.is_void_card(lines),
     }
 
 
@@ -188,14 +190,22 @@ def _recover_before_create(
         return ws, [], [], [], 0
 
     blanks = []
+    # 三種批次共用：訂單編號空白但不能建單的列（狀態非未安排、預約條件不在本次預約對象）
+    # 只註明原因後略過，不建新單，也不反查後台。
+    not_creatable = {}
     for _, row in work.iterrows():
         row_no = int(row["__sheet_row__"])
-        # 只有 I 欄「未安排」＋訂單編號空白的列才會建單，也才需要反查復原。
-        if not _orders.should_create_order(row):
+        if str(row.get("訂單編號", "") or "").strip():
+            continue
+        reason = create_block_reason(row)
+        if reason:
+            not_creatable[row_no] = reason
             continue
         key = _row_key(row)
         if key:
             blanks.append((row_no, row, key))
+    for row_no, reason in sorted(not_creatable.items()):
+        logger(f"⏭️ 第 {row_no} 列不建單：{reason}")
 
     if not blanks:
         return ws, [], [], [], 0
@@ -230,6 +240,9 @@ def _recover_before_create(
         for parsed in blocks_by_phone[phone]:
             order_no = parsed.get("order_no")
             if not order_no or order_no in claimed_order_nos:
+                continue
+            # 已退款／取消訂單不算已成單，不能拿來補回工作表。
+            if parsed.get("void"):
                 continue
             if parsed.get("phone") and parsed.get("phone") != phone:
                 continue
@@ -267,7 +280,7 @@ def _recover_before_create(
         recovered_set = set(recovered)
         blocked_set = set(blocked)
         for row_no, _ in row_items:
-            if row_no not in recovered_set and row_no not in blocked_set:
+            if row_no not in recovered_set and row_no not in blocked_set and row_no not in not_creatable:
                 remaining.append(row_no)
 
     return ws, sorted(remaining), sorted(recovered), sorted(blocked), len(blanks)

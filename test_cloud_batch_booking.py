@@ -57,7 +57,8 @@ class CloudCandidatesTest(unittest.TestCase):
              patch.dict(cloud.ACCOUNTS, {'台北': account}), \
              patch.object(cloud, 'run_process_web_hybrid', return_value={'success_count': 1}) as runner:
             self.assertEqual(cloud.run('sheet', pause_seconds=0, allow_auto_lemon=True, retry_failed=True), 0)
-        self.assertTrue(all(call.args[-1] is True for call in pending.call_args_list))
+        # load_pending(sheet, excluded, filter_mode, region, allow_auto_lemon, retry_failed, o_texts)
+        self.assertTrue(all(call.args[5] is True for call in pending.call_args_list))
         self.assertTrue(runner.call_args.kwargs['allow_auto_lemon_shift'])
         self.assertEqual(runner.call_args.kwargs['selected_rows'], [3])
 
@@ -83,6 +84,21 @@ class CloudDispatchTest(unittest.TestCase):
                 inputs = post.call_args.kwargs['json']['inputs']
                 self.assertEqual(inputs['retry_failed'], str(retry).lower())
                 self.assertEqual(inputs['allow_auto_lemon'], 'false')
+                self.assertEqual(inputs['o_texts'], '[]')
+
+    def test_selected_o_texts_are_sent_as_json(self):
+        with patch.object(ui, '_token', return_value='test'), patch.object(ui, '_latest_run', return_value=None), \
+             patch.object(ui, 'load_config', return_value={}), \
+             patch.object(ui.requests, 'post', return_value=Mock(status_code=204)) as post:
+            ui._dispatch('sheet', 50, 0, 'missing_order', '台北', False, False, ['系統未產生新訂單編號', '（O欄空白）'])
+        import json
+        self.assertEqual(json.loads(post.call_args.kwargs['json']['inputs']['o_texts']), ['系統未產生新訂單編號', '（O欄空白）'])
+
+    def test_o_texts_env_is_parsed_safely(self):
+        with patch.dict('os.environ', {'O_TEXTS_JSON': '["無訂單編號", "a\\"b"]'}):
+            self.assertEqual(cloud._o_texts_from_env(), ['無訂單編號', 'a"b'])
+        with patch.dict('os.environ', {'O_TEXTS_JSON': ''}):
+            self.assertEqual(cloud._o_texts_from_env(), [])
 
     def test_ui_uses_same_retry_flag_for_count_and_dispatch(self):
         class Session(dict):
@@ -104,13 +120,16 @@ class CloudDispatchTest(unittest.TestCase):
                     'optimized_cloud_confirm': True,
                 }.get(kw.get('key'), False)
                 st.button.return_value = True
+                st.multiselect.return_value = ['可約']
                 with patch.object(ui, 'st', st), patch.object(ui, '_render_cloud_status'), \
                      patch.object(cloud, 'load_pending', return_value=[(3, '台北', '')]) as pending, \
                      patch.object(ui, '_dispatch', return_value={}) as dispatch:
                     ui.render('prod')
                 self.assertIs(pending.call_args.kwargs['retry_failed'], retry)
-                self.assertIs(dispatch.call_args.args[-1], retry)
-                self.assertEqual(st.session_state['optimized_cloud_pending_key'], ('sheet', '台北', 'all', False, retry))
+                self.assertIs(dispatch.call_args.args[6], retry)
+                self.assertEqual(dispatch.call_args.args[7], [])
+                self.assertEqual(dispatch.call_args.args[8], ['可約'])
+                self.assertEqual(st.session_state['optimized_cloud_pending_key'], ('sheet', '台北', 'all', False, retry, (), ('可約',)))
 
 
 class CloudStatusTest(unittest.TestCase):
@@ -158,8 +177,20 @@ class CloudStatusTest(unittest.TestCase):
                 self.render()
                 summary.assert_not_called()
                 if status == 'in_progress':
-                    steps.assert_called_once_with(1)
+                    steps.assert_called_once_with(1, dev=False)
             self.assertIn('15 秒', self.st.info.call_args.args[0])
+            # 執行中時記下標籤，頁面上方顯示一行提醒。
+            self.assertIn('第 1 次執行', self.st.session_state['optimized_cloud_active'])
+
+    def test_completed_run_clears_top_reminder_and_dev_run_uses_dev_step_label(self):
+        self.st.session_state['optimized_cloud_active'] = 'old'
+        with patch.object(ui, '_run_summary', return_value=(1, 1, 0, 0)):
+            self.render()
+        self.assertNotIn('optimized_cloud_active', self.st.session_state)
+        self.run.update(status='in_progress', display_title='Optimized Cloud Batch Booking (dev) 台北')
+        with patch.object(ui, '_render_running_steps') as steps:
+            self.render()
+        steps.assert_called_once_with(1, dev=True)
 
     def test_pending_dispatch_does_not_show_previous_completion(self):
         self.st.session_state['optimized_cloud_dispatch'] = {'previous_run_id': 1, 'requested_at': '2026-10-04T00:00:00+00:00'}
