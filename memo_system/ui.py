@@ -992,12 +992,18 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
             default=["全8"],
             key="lemon_assign_types",
         )
+        weekends_only = st.checkbox(
+            "僅勾週末（週六、週日）",
+            value=False,
+            key="lemon_assign_weekends_only",
+            help="勾選後只處理日期區間內的週六、週日；平日原本的勾選不會被清掉或修改。",
+        )
 
         lemon_names = [n.strip() for n in re.split(r"[,，]", lemon_names_raw) if n.strip()]
         if lemon_names:
             st.caption(f"將處理 {len(lemon_names)} 人：{'、'.join(lemon_names)}")
         if assign_types:
-            st.caption(f"將勾選班別：{'、'.join(assign_types)}")
+            st.caption(f"將勾選班別：{'、'.join(assign_types)}" + ("（僅週六、週日）" if weekends_only else ""))
 
         execute_btn = st.button(
             "🚀 執行檸檬人勾班",
@@ -1024,7 +1030,8 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                 lemon_assign_log(
                     f"===== 開始檸檬人勾班：{len(lemon_names)} 人，"
                     f"{assign_start.strftime('%Y-%m-%d')} ~ {assign_end.strftime('%Y-%m-%d')}，"
-                    f"班別：{'、'.join(assign_types)} ====="
+                    f"班別：{'、'.join(assign_types)}"
+                    f"{'，僅週末' if weekends_only else ''} ====="
                 )
                 with st.spinner("勾班中，請稍候…"):
                     session = get_session(ui_logger=lemon_assign_log)
@@ -1035,6 +1042,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                         date_end=assign_end.strftime("%Y-%m-%d"),
                         type_values=assign_types,
                         ui_logger=lemon_assign_log,
+                        weekends_only=weekends_only,
                     )
                 st.session_state.lemon_assign_result = result
                 lemon_assign_log("===== 檸檬人勾班完成 =====")

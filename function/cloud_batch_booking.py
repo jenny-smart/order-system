@@ -19,6 +19,9 @@ from service_pricing import load_config
 import requests
 import streamlit as st
 from accounts import ACCOUNTS
+from shared import dev_sheet_copy
+from shared.cloud_booking_progress import PAUSED_PHASE
+from shared.selected_row_status_guard import render_o_text_filter, render_stage_filter
 
 REPO = "jenny-smart/order-system"
 WORKFLOW = "optimized-cloud-batch-booking.yml"
@@ -38,7 +41,7 @@ def _token():
     return ""
 
 
-def _dispatch(sheet, chunk_size, max_rows, filter_mode, region, allow_auto_lemon, retry_failed=False):
+def _dispatch(sheet, chunk_size, max_rows, filter_mode, region, allow_auto_lemon, retry_failed=False, o_texts=(), stages=("可約",), env="prod"):
     token = _token()
     if not token:
         raise RuntimeError("尚未設定 ORDERS_GITHUB_TOKEN；需提供可啟動 order-system Actions 的 GitHub Token。")
@@ -55,7 +58,10 @@ def _dispatch(sheet, chunk_size, max_rows, filter_mode, region, allow_auto_lemon
             "filter_mode":filter_mode, "region":region,
             "allow_auto_lemon":"true" if allow_auto_lemon else "false",
             "retry_failed":"true" if retry_failed else "false",
+            "o_texts": json.dumps(list(o_texts or []), ensure_ascii=False),
+            "stages": json.dumps(list(stages), ensure_ascii=False),
             "pricing_json": json.dumps(load_config()),
+            "env": "dev" if dev_sheet_copy.is_dev(env) else "prod",
         }},
         timeout=30,
     )
@@ -80,6 +86,9 @@ def _latest_run():
     runs = _github_get(
         f"actions/workflows/{WORKFLOW}/runs?per_page=1&branch=main&event=workflow_dispatch"
     ).json().get("workflow_runs", [])
+    if not runs:
+        # GitHub 的篩選查詢偶爾會暫時回傳空清單（執行中的也一樣）；改查不篩選的最新一筆。
+        runs = _github_get(f"actions/workflows/{WORKFLOW}/runs?per_page=1").json().get("workflow_runs", [])
     return runs[0] if runs else None
 
 
@@ -126,13 +135,15 @@ def _render_live_progress(run):
     if total:
         st.progress(min(snapshot['processed'] / total, 1.0),
                     text=f"本次處理 {snapshot['processed']}／{total} 列")
+    if snapshot.get('held'):
+        st.info(f"未選入本次預約對象略過 {snapshot['held']} 列（各階段筆數與列號見日誌）")
     if run.get('status') != 'completed' and snapshot['rows']:
         st.write(f"目前處理列號：{snapshot['rows']}")
     if run.get('status') == 'completed' and run.get('conclusion') != 'success':
         st.caption("以上為中止前最後回報的進度；未回報部分請核對工作表，勿視為零筆。")
 
 
-def _render_running_steps(run_id):
+def _render_running_steps(run_id, dev=False):
     jobs = _github_get(f"actions/runs/{run_id}/jobs").json().get("jobs", [])
     if not jobs:
         st.caption("正在等待雲端執行環境。")
@@ -149,7 +160,10 @@ def _render_running_steps(run_id):
         active = [step for step in job.get("steps", []) if step.get("status") == "in_progress"]
         for step in active:
             name = step.get("name", "")
-            st.write("目前步驟：" + labels.get(name, name))
+            label = labels.get(name, name)
+            if dev and name == "Run optimized cloud batch booking":
+                label = "批次成單、回填（測試機 dev 只建單）"
+            st.write("目前步驟：" + label)
         completed = sum(step.get("status") == "completed" for step in job.get("steps", []))
         total = len(job.get("steps", []))
         if total:
@@ -167,6 +181,50 @@ def _sync_cloud_settings(settings):
 
 def _is_current_run(run):
     return st.session_state.get('optimized_cloud_current_run') == (run['id'], run.get('run_attempt', 1))
+
+
+def _cancel_run(run_id):
+    """直接取消 GitHub Actions 執行（舊版程式啟動、看不到暫停要求的執行也停得了）。"""
+    r = requests.post(
+        f"https://api.github.com/repos/{REPO}/actions/runs/{run_id}/cancel",
+        headers={"Accept": "application/vnd.github+json", "Authorization": f"Bearer {_token()}",
+                 "X-GitHub-Api-Version": "2022-11-28"},
+        timeout=15,
+    )
+    if r.status_code not in (202, 409):  # 409：已經結束或正在取消
+        raise RuntimeError(f"停止失敗：HTTP {r.status_code} {r.text[:200]}")
+
+
+def _render_stop_button(run):
+    box = st.expander("⏹ 立即停止（暫停沒反應時使用）")
+    box.caption("直接停止雲端執行，可能停在一組建單中途。已成立但還沒回填的訂單，下次執行會先到後台找回並補回工作表，"
+                "不會重複建單；中斷復原的列不會自動補寄確認信。停止後請等 1～2 分鐘再重新開始。")
+    confirm = box.checkbox("我確認要立即停止這次雲端執行", key=f"optimized_cloud_stop_confirm_{run['id']}")
+    if box.button("⏹ 立即停止", key=f"optimized_cloud_stop_{run['id']}", disabled=not confirm):
+        try:
+            _cancel_run(run['id'])
+            box.warning("已送出停止，雲端會在數秒內停止；請等 1～2 分鐘後再重新開始。")
+        except Exception as exc:
+            box.error(str(exc))
+
+
+def _render_pause_button(run):
+    """雲端執行中可暫停：寫入暫停要求，雲端做完目前這一組、回填後就停，不會停在建單一半。"""
+    from shared.cloud_booking_progress import PAUSE, request_pause
+    key = f"cloud_live_{run['id']}_{run.get('run_attempt', 1)}"
+    requested = (st.session_state.get(key) or {}).get('control') == PAUSE
+    if requested:
+        st.warning("⏸ 已要求暫停：雲端做完目前這一組並回填後就會停止（不會停在建單一半）。")
+        return
+    if st.button("⏸ 暫停成單", key=f"optimized_cloud_pause_{run['id']}"):
+        try:
+            if request_pause(run['id'], run.get('run_attempt', 1)):
+                st.session_state.setdefault(key, {})['control'] = PAUSE
+                st.warning("⏸ 已要求暫停：雲端做完目前這一組並回填後就會停止（不會停在建單一半）。")
+            else:
+                st.info("雲端尚未開始成單，請稍後再按暫停。")
+        except Exception as exc:
+            st.error(f"暫停要求送出失敗：{exc}")
 
 
 @st.fragment(run_every="15s")
@@ -190,6 +248,11 @@ def _render_cloud_status():
                 return
             st.session_state['optimized_cloud_current_run'] = (run['id'], run.get('run_attempt', 1))
             del st.session_state['optimized_cloud_dispatch']
+        # 頁面上方的「執行中」提醒讀這個值；下一次整頁重繪時更新。
+        if run and run.get('status') != 'completed':
+            st.session_state['optimized_cloud_active'] = _run_label(run)
+        else:
+            st.session_state.pop('optimized_cloud_active', None)
         if not run:
             st.info("尚無雲端批次執行紀錄。")
             return
@@ -205,8 +268,10 @@ def _render_cloud_status():
         if run.get("status") != "completed":
             if run.get("status") == "in_progress":
                 st.info("雲端批次執行中；每 15 秒更新狀態。")
+                _render_pause_button(run)
+                _render_stop_button(run)
                 try:
-                    _render_running_steps(run['id'])
+                    _render_running_steps(run['id'], dev="(dev)" in str(run.get("display_title") or ""))
                 except Exception:
                     st.caption("暫時無法取得目前步驟，請查看日誌；執行狀態仍會每 15 秒更新。")
             else:
@@ -222,9 +287,18 @@ def _render_cloud_status():
                     st.session_state[cache_key] = summary
             except Exception:
                 st.caption("暫時無法取得筆數，請查看執行日誌。")
+        live = st.session_state.get(f"cloud_live_{run['id']}_{run.get('run_attempt', 1)}") or {}
+        if summary is not None and live.get('phase') == PAUSED_PHASE:
+            attempted, success, failed, remaining = summary
+            st.info(f"⏸ 已暫停：處理 {attempted} 列，成功 {success} 列，失敗 {failed} 列，尚待處理 {remaining} 列。"
+                    "要繼續，按上方「開始雲端批次成單」；已建立的訂單不會重做。")
+            return
         if summary is not None:
             attempted, success, failed, remaining = summary
             message = f"已執行完成：處理 {attempted} 列，成功 {success} 列，失敗 {failed} 列，尚待處理 {remaining} 列。"
+            held = (st.session_state.get(f"cloud_live_{run['id']}_{run.get('run_attempt', 1)}") or {}).get('held', 0)
+            if held:
+                message += f"未選入本次預約對象略過 {held} 列。"
             if conclusion == "cancelled":
                 st.warning("雲端批次已取消。" + message)
             elif failed:
@@ -245,11 +319,13 @@ def _render_cloud_status():
 
 def render(env: str):
     st.subheader("批次建單優化＋雲端批次成單")
-    if env != "prod":
-        st.warning("雲端批次成單只允許正式機 prod。")
-        return
+    is_dev = dev_sheet_copy.is_dev(env)
+    if is_dev:
+        st.warning("🧪 測試機 dev：雲端會連 backend-dev 建單，只執行「建單」，不寄確認信、不改 Google 日曆，並在工作表副本回填。")
 
-    status_panel = st.container()
+    active = st.session_state.get('optimized_cloud_active')
+    if active:
+        st.info(f"⏳ 雲端成單執行中（{active}），進度見頁面最下方「雲端成單進度」；同一環境一次只跑一個，新送出的會排隊。")
 
     st.markdown("#### 4　執行設定")
     c1, c2, c3 = st.columns(3)
@@ -261,9 +337,10 @@ def render(env: str):
     st.info("💡 雲端版由篩選條件自動取得列號；中斷重跑會先反查後台，避免重複建單。")
 
     st.markdown("#### 3　執行項目")
+    cloud_actions = ["建單"] if is_dev else ["建單", "寄確認信", "改 Google 日曆"]
     st.multiselect(
-        "執行項目", ["建單", "寄確認信", "改 Google 日曆"],
-        default=["建單", "寄確認信", "改 Google 日曆"], disabled=True,
+        "執行項目", cloud_actions,
+        default=cloud_actions, disabled=True,
         key="optimized_cloud_actions", label_visibility="collapsed",
     )
     allow_auto_lemon = st.checkbox(
@@ -275,6 +352,8 @@ def render(env: str):
         value=False, key="optimized_cloud_retry_failed",
         help="已補班、要自動補檸檬人，或客人已重新儲值時勾選；仍依區域及篩選條件選取未安排、訂單編號空白的列。",
     )
+    st.caption("三種批次共用建單條件：訂單編號空白＋狀態未安排＋「預約條件」空白或在本次預約對象內；其他列會略過並在執行過程註明原因。")
+    stages = render_stage_filter(st, "optimized_cloud_booking_stages")
     auto_no_slot = st.checkbox(
         "自動篩選：狀態未安排＋訂單編號空白＋無班表",
         value=False, key="optimized_cloud_no_schedule",
@@ -283,6 +362,11 @@ def render(env: str):
         "自動篩選：狀態未安排＋訂單編號空白＋O欄找不到訂單編號",
         value=False, key="optimized_cloud_missing_o",
     )
+    if auto_missing_o:
+        import function.batch_booking_optimized as batch_opt
+        o_texts = render_o_text_filter(st, batch_opt, dev_sheet_copy.read_sheet(st, env, sheet), region, "optimized_cloud_o_texts", allow_failed=retry_failed)
+    else:
+        o_texts = []
     c1, c2 = st.columns(2)
     chunk = c1.number_input("每輪最多處理列數", 1, 200, 50, 10, key="optimized_cloud_chunk")
     max_rows = c2.number_input("本次最多處理列數（0＝全部）", 0, 5000, 0, 10, key="optimized_cloud_max")
@@ -293,16 +377,17 @@ def render(env: str):
     if auto_missing_o:
         modes.append("missing_order")
     filter_mode = "both" if len(modes) == 2 else (modes[0] if modes else "all")
-    pending_key = (sheet, region, filter_mode, allow_auto_lemon, retry_failed)
+    pending_key = (sheet, region, filter_mode, allow_auto_lemon, retry_failed, tuple(o_texts), tuple(stages))
     _sync_cloud_settings(pending_key + (int(chunk), int(max_rows)))
     st.caption("雲端預設略過 N 欄結果為「失敗」的列；調整後勾選「重試失敗列」，不必清空結果。要補檸檬人時請同時勾選上方補檸檬人選項。同一次執行中，每列處理後不會在下一輪重複執行。")
 
+    dev_sheet_copy.render_notice(st, env, sheet, "optimized_cloud")
     if st.button("檢查待成單筆數", disabled=not sheet, key="optimized_cloud_check"):
         try:
             from shared.cloud_batch_booking import load_pending
             rows = [row_no for row_no, _, _ in load_pending(
-                sheet, filter_mode=filter_mode, selected_region=region, allow_auto_lemon=allow_auto_lemon,
-                retry_failed=retry_failed,
+                dev_sheet_copy.read_sheet(st, env, sheet), filter_mode=filter_mode, selected_region=region, allow_auto_lemon=allow_auto_lemon,
+                retry_failed=retry_failed, o_texts=o_texts,
             )]
             st.session_state.optimized_cloud_pending = len(rows)
             st.session_state.optimized_cloud_pending_rows = rows
@@ -315,14 +400,23 @@ def render(env: str):
         if rows:
             st.caption("列號：" + "、".join(map(str, rows[:100])) + ("…" if len(rows) > 100 else ""))
 
-    confirm = st.checkbox("我確認執行：建單＋寄確認信＋同步 Google 日曆", key="optimized_cloud_confirm")
+    confirm_label = "我確認在測試機 dev 執行：只建單（工作表副本回填）" if is_dev else "我確認執行：建單＋寄確認信＋同步 Google 日曆"
+    confirm = st.checkbox(confirm_label, key="optimized_cloud_confirm")
     if st.button("🚀  開始雲端批次成單", type="primary", use_container_width=True, disabled=not(sheet and confirm), key="optimized_cloud_start"):
         try:
-            st.session_state['optimized_cloud_dispatch'] = _dispatch(sheet, int(chunk), int(max_rows), filter_mode, region, allow_auto_lemon, retry_failed)
+            run_sheet = dev_sheet_copy.resolve_run_sheet(st, env, sheet)
+            if is_dev:
+                st.info(f"🧪 測試機 dev：本次使用測試副本「{run_sheet}」（原分頁「{sheet}」不受影響）。")
+                st.session_state['optimized_cloud_dispatch'] = _dispatch(run_sheet, int(chunk), int(max_rows), filter_mode, region, allow_auto_lemon, retry_failed, o_texts, stages, env="dev")
+            else:
+                st.session_state['optimized_cloud_dispatch'] = _dispatch(run_sheet, int(chunk), int(max_rows), filter_mode, region, allow_auto_lemon, retry_failed, o_texts, stages)
             st.success("已交給 GitHub Actions 雲端執行；可關閉瀏覽器或電腦。")
             st.markdown(f"[查看雲端執行進度](https://github.com/{REPO}/actions/workflows/{WORKFLOW})")
         except Exception as exc:
             st.error(str(exc))
 
-    with status_panel:
-        _render_cloud_status()
+    st.markdown("<hr>", unsafe_allow_html=True)
+    _render_cloud_status()
+    # 頁面底部留白：進度區每 15 秒更新時高度會變，且右下角有 Streamlit 浮動列，
+    # 留白讓進度一定能完整捲到畫面內。
+    st.markdown('<div style="height:240px"></div>', unsafe_allow_html=True)

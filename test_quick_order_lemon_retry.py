@@ -35,7 +35,7 @@ class LemonRetryTest(unittest.TestCase):
     def test_disabled_never_adds_shifts(self):
         with patch.object(q.orders, 'get_all_sections_raw', return_value='[]'), \
              patch.object(q, 'ensure_lemon_cleaner_shifts') as shift:
-            with self.assertRaisesRegex(Exception, '後台未回傳可預約時段'):
+            with self.assertRaisesRegex(Exception, '無可預約人力'):
                 q._query_booking_slot_with_lemon_retry(object(), '', 'ATM', {'person': '2'}, '', SLOT, False)
             shift.assert_not_called()
 
@@ -58,7 +58,7 @@ class LemonRetryTest(unittest.TestCase):
                 refresh.assert_called_once_with('s', 'base', payway)
 
     def test_makeup_orders_forward_auto_shift_switch_to_shared_order(self):
-        ctx = {'balance': 100, 'region': '台北', 'lookup': {}, 'address': '地址', 'member': {},
+        ctx = {'balance': 100, 'region': '台北', 'lookup': {}, 'address': '地址', 'member': {'email': 'member@example.com'},
                'plan': {'coupon_a': 100, 'coupon_b': 100}, 'today_str': '2026-09-14',
                'date_e': '2026-10-14', 'prefix_a': 'a', 'prefix_b': 'b'}
         for fn in (q.stored_value_makeup_create_stored_order, q.stored_value_makeup_create_paid_order):

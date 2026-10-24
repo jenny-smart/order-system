@@ -47,7 +47,9 @@ COUNTRY_ID_BY_CITY_AREA.update({
 
 
 def _split_booking_address(address):
-    address = _fix_address_district_order(str(address or "").strip(), fallback_district="")
+    # 客人常把郵遞區號貼在最前面（例如 108臺北市…）；後台縣市下拉不含郵遞區號。
+    address = re.sub(r"^\d{3,6}\s*", "", str(address or "").strip())
+    address = _fix_address_district_order(address, fallback_district="")
     result = {"city": "", "district": "", "country_id": "", "detail": address, "full": address}
     city_m = re.search(r"(?P<city>[^市縣區鄉鎮]{1,6}[市縣])", address)
     if not city_m:

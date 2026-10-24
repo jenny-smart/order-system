@@ -30,10 +30,17 @@ RUNNER_UPDATED_AT = "2026-10-17"
 
 
 def _phone_address_group_key(row):
-    """優化／雲端模式只依電話＋地址分組。"""
+    """優化／雲端模式依電話＋地址＋人數＋時數分組。
+
+    同組送單時人數、時數都取第一列；例如平日 2人3小時、某天 3人3小時，必須分開，
+    否則 3 人那天會被當成 2 人建單。
+    """
+    people, hours = _orders.parse_service_human_hour(row.get("服務人時", ""), row.get("開始時間", ""), row.get("結束時間", ""))
     return (
         _orders.normalize_phone(row.get("電話", "")),
         _orders.normalize_addr_for_match(row.get("地址", "")),
+        str(people),
+        str(hours),
     )
 
 
@@ -260,9 +267,13 @@ def run_process_web_direct_single(
 def run_process_web_hybrid(
     *, env_name, region, backend_email, backend_password, sheet_name,
     start_row, end_row, selected_actions=None, logger=print,
-    allow_auto_lemon_shift=False, selected_rows=None, progress_callback=None,
+    allow_auto_lemon_shift=False, selected_rows=None, progress_callback=None, should_stop=None,
 ):
-    """優化/雲端：多筆同組先批次；單筆組直接逐筆。"""
+    """優化/雲端：多筆同組先批次；單筆組直接逐筆。
+
+    should_stop()：每一組、每一單筆開始前檢查；回傳 True 就不再開始新的建單，
+    已建立的都已回填，回傳結果帶 paused=True。
+    """
     selected_actions = selected_actions or ["建單", "寄確認信", "改 Google 日曆"]
     core_actions = _without_calendar(selected_actions)
     _safety._configure_runtime(env_name)
@@ -349,7 +360,22 @@ def run_process_web_hybrid(
         f"{sum(len(x) for x in multi_groups)} 筆，單筆 {len(single_rows)} 筆。先多筆組，再單筆。"
     )
 
+    paused = False
+
+    def stop_now():
+        nonlocal paused
+        if not paused and should_stop:
+            try:
+                paused = bool(should_stop())
+            except Exception:
+                paused = False
+            if paused:
+                logger("⏸ 已收到暫停：目前這組已完成並回填，不再開始新的建單。")
+        return paused
+
     for group_no, rows_with_idx in enumerate(multi_groups, 1):
+        if stop_now():
+            break
         row_numbers = [row_no for row_no, _ in rows_with_idx]
         _safety._checkpoint(ws, row_numbers, message="多筆組已建立建單斷點；本組完成後立即回填")
         logger(f"▶ 多筆組 {group_no}/{len(multi_groups)}：列號 {'、'.join(map(str, row_numbers))}")
@@ -389,6 +415,8 @@ def run_process_web_hybrid(
             report_progress()
 
     for index, (row_no, row) in enumerate(single_rows, 1):
+        if stop_now():
+            break
         report_progress(str(row_no))
         _safety._checkpoint(ws, [row_no], message="單筆已建立建單斷點；完成後立即回填")
         logger(f"▶ 優化單筆 {index}/{len(single_rows)}：第 {row_no} 列")
@@ -420,4 +448,5 @@ def run_process_web_hybrid(
         "recovered_count": len(recovered),
         "blocked_count": len(blocked),
         "failed_records": failed_records,
+        "paused": paused,
     }

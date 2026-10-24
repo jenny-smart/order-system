@@ -14,9 +14,10 @@ order-system 改為：
 """
 from __future__ import annotations
 
-import re
-
 import pandas as pd
+
+from shared.booking_eligibility import (DEFAULT_STAGES, HOLD_COLUMN, STAGES, booking_stage, can_create_order, can_process_row,
+                                        hold_reason, normalize_status, set_booking_stages)
 
 import orders
 
@@ -25,11 +26,6 @@ def _scalar(value):
     if isinstance(value, pd.Series): return value.iloc[0] if len(value) else ""
     if isinstance(value, (list, tuple)): return value[0] if value else ""
     return value
-
-
-def normalize_status(value) -> str:
-    text = str(_scalar(value) or "").replace(" ", " ").replace("﻿", "").replace("​", "")
-    return re.sub(r"\s+", "", text)
 
 
 def _dedupe_dataframe(df):
@@ -66,11 +62,10 @@ def _safe_load_candidates(batch_opt, sheet_name, allow_failed=False):
     work = pd.DataFrame(index=df.index); work["__sheet_row__"] = _first_series(df, "__sheet_row__")
     for col in batch_opt.REQUIRED_COLUMNS: work[col] = _first_series(df, col).map(batch_opt._text)
     work["__o_col__"] = df.iloc[:, 14].map(batch_opt._text) if df.shape[1] > 14 else ""
-    for col in ("結果", "原因", "沒班表日期"): work[col] = _first_series(df, col).map(batch_opt._text) if col in df.columns else ""
+    for col in ("結果", "原因", "沒班表日期", HOLD_COLUMN): work[col] = _first_series(df, col).map(batch_opt._text) if col in df.columns else ""
     required_ok = work["姓名"].ne("") & work["電話"].ne("") & work["地址"].ne("") & work["日期"].ne("") & work["開始時間"].ne("") & work["結束時間"].ne("")
     # 雲端預設排除失敗列；本機入口或雲端明確確認重試時傳入 allow_failed=True。
-    create_ok = (work["狀態"].map(normalize_status).eq("未安排")
-                 & work["訂單編號"].eq("")
+    create_ok = (work.apply(can_create_order, axis=1).astype(bool)
                  & (allow_failed | work["結果"].map(normalize_status).ne("失敗")))
     work = work[required_ok & (create_ok | work["訂單編號"].ne(""))].copy().reset_index(drop=True)
     work["日期顯示"] = work["日期"].map(batch_opt._date_text)
@@ -79,17 +74,135 @@ def _safe_load_candidates(batch_opt, sheet_name, allow_failed=False):
     return work
 
 
-def _auto_filter_rows(batch_opt, sheet_name, mode, region=None, allow_failed=False, candidates=None):
+# 「O欄找不到訂單編號」：O 欄沒有單號；可再依 O 欄目前的文字勾選（都不選＝全部）。
+O_BLANK_OPTION = "（O欄空白）"
+_ORDER_NO_PATTERN = r"(?:LC|TT|KK)\d+"
+
+
+def _creatable(batch_opt, work, region=None):
+    work = work[work.apply(can_create_order, axis=1).astype(bool)].copy() if len(work) else work.copy()
+    if region and len(work):
+        work = work[work.apply(lambda row: batch_opt.get_region_by_address(batch_opt._text(row.get("地址")), __import__("accounts").ACCOUNTS) == region, axis=1).astype(bool)].copy()
+    return work
+
+
+def _auto_filter_rows(batch_opt, sheet_name, mode, region=None, allow_failed=False, candidates=None, o_texts=None):
     work = candidates if candidates is not None else _safe_load_candidates(batch_opt, sheet_name, allow_failed=allow_failed)
-    work = work[work["狀態"].map(normalize_status).eq("未安排") & work["訂單編號"].eq("")].copy()
-    if region:
-        work = work[work.apply(lambda row: batch_opt.get_region_by_address(batch_opt._text(row.get("地址")), __import__("accounts").ACCOUNTS) == region, axis=1)].copy()
+    work = _creatable(batch_opt, work, region)
+    if not len(work): return []
+    mask = _mode_mask(batch_opt, work, mode, o_texts)
+    return sorted(work.loc[mask, "__sheet_row__"].astype(int).tolist())
+
+
+def _o_label(text):
+    return text or O_BLANK_OPTION
+
+
+def _o_text_options(batch_opt, sheet_name, region=None, allow_failed=True):
+    """目前可建單、O 欄沒有單號的列，其 O 欄文字與列數，供畫面勾選。"""
+    work = _creatable(batch_opt, _safe_load_candidates(batch_opt, sheet_name, allow_failed=allow_failed), region)
+    if not len(work): return []
+    o_col = work["__o_col__"].map(batch_opt._text)
+    o_col = o_col[~o_col.str.contains(_ORDER_NO_PATTERN, regex=True, na=False)]
+    counts = o_col.map(_o_label).value_counts()
+    return sorted(counts.items(), key=lambda item: (item[0] != O_BLANK_OPTION, -item[1], item[0]))
+
+
+def _mode_mask(batch_opt, work, mode, o_texts=None):
     reason = work.get("原因", pd.Series("", index=work.index)).map(batch_opt._text)
     no_schedule_date = work.get("沒班表日期", pd.Series("", index=work.index)).map(batch_opt._text)
-    if mode == "no_schedule": mask = reason.str.contains("無班表|沒班表", regex=True, na=False) | no_schedule_date.ne("")
-    elif mode == "missing_order": mask = reason.str.contains("找不到訂單編號|未產生新訂單編號", regex=True, na=False)
-    else: mask = pd.Series(False, index=work.index)
-    return sorted(work.loc[mask, "__sheet_row__"].astype(int).tolist())
+    no_schedule = reason.str.contains("無班表|沒班表", regex=True, na=False) | no_schedule_date.ne("")
+    o_col = work.get("__o_col__", pd.Series("", index=work.index)).map(batch_opt._text)
+    missing_order = ~o_col.str.contains(_ORDER_NO_PATTERN, regex=True, na=False)
+    if o_texts:
+        missing_order &= o_col.map(_o_label).isin(set(o_texts))
+    if mode == "all": return pd.Series(True, index=work.index)
+    if mode == "no_schedule": return no_schedule
+    if mode == "missing_order": return missing_order
+    if mode == "both": return no_schedule | missing_order
+    return pd.Series(False, index=work.index)
+
+
+def _held_for_request(batch_opt, sheet_name, region, rows=(), modes=(), mode_scope=None, allow_failed=True, o_texts=None):
+    """指定列號＋自動篩選中，因預約條件不在本次預約對象而略過的列；三種批次共用。"""
+    held = set(_held_rows(batch_opt, sheet_name, "all", region, allow_failed, rows=rows)) if rows else set()
+    for mode in modes:
+        held.update(_held_rows(batch_opt, sheet_name, mode, region, allow_failed, rows=mode_scope, o_texts=o_texts))
+    return sorted(held)
+
+
+def _held_rows(batch_opt, sheet_name, mode="all", region=None, allow_failed=False, rows=None, o_texts=None):
+    """若預約條件在本次預約對象內就會成為建單候選的列號；三種批次用來顯示略過筆數。"""
+    _, df = _load_worksheet_unique(sheet_name)
+    if df.empty: return []
+    work = df.copy()
+    work["__o_col__"] = df.iloc[:, 14].map(batch_opt._text) if df.shape[1] > 14 else ""
+    if rows is not None: work = work[work["__sheet_row__"].astype(int).isin({int(x) for x in rows})]
+    held = work.apply(lambda row: bool(hold_reason(row)) and can_create_order({**row.to_dict(), HOLD_COLUMN: ""}), axis=1) if len(work) else pd.Series(dtype=bool)
+    work = work[held.astype(bool)] if len(work) else work
+    if not allow_failed and "結果" in work.columns: work = work[work["結果"].map(normalize_status).ne("失敗")]
+    if region: work = work[work.apply(lambda row: batch_opt.get_region_by_address(batch_opt._text(row.get("地址")), __import__("accounts").ACCOUNTS) == region, axis=1).astype(bool)] if len(work) else work
+    if not len(work): return []
+    return sorted(work.loc[_mode_mask(batch_opt, work, mode, o_texts), "__sheet_row__"].astype(int).tolist())
+
+
+def _held_stage_text(batch_opt, sheet_name, rows):
+    """略過列依預約條件分類，例如「改加 3、未回覆 5」。"""
+    if not rows: return ""
+    _, df = _load_worksheet_unique(sheet_name)
+    wanted = {int(x) for x in rows}
+    counts = {}
+    for _, row in df.iterrows():
+        if int(row["__sheet_row__"]) in wanted:
+            stage = booking_stage(row) or "其他"
+            counts[stage] = counts.get(stage, 0) + 1
+    order = list(STAGES)
+    return "、".join(f"{k} {v}" for k, v in sorted(counts.items(), key=lambda kv: order.index(kv[0]) if kv[0] in order else 99))
+
+
+def held_message(batch_opt, sheet_name, rows):
+    try:
+        detail = _held_stage_text(batch_opt, sheet_name, rows)
+    except Exception:
+        detail = ""
+    return f"未選入本次預約對象略過 {len(rows)} 列" + (f"（{detail}）" if detail else "")
+
+
+def render_stage_filter(st, key):
+    """三種批次共用：勾選本次要約排程「預約條件」的哪些階段（預設只有可約）。"""
+    stages = st.multiselect(
+        "本次預約對象（排程「預約條件」欄；空白的列一律照常判斷）", list(STAGES),
+        default=list(DEFAULT_STAGES), key=key,
+    )
+    st.caption("建議順序：可約 → 改加 → 人時不足 → 已確認 → 未回覆。單一客人要例外處理，可直接改該列「預約條件」。")
+    set_booking_stages(stages)
+    return stages
+
+
+def render_o_text_filter(st, batch_opt, sheet_name, region, key, allow_failed=True):
+    """三種批次共用：列出 O 欄目前文字讓使用者單選／多選／不選；回傳所選文字。"""
+    if not sheet_name:
+        st.caption("輸入工作表名稱後，會列出 O 欄目前的內容可勾選。")
+        return []
+    cache_key, scope = f"{key}_options", (sheet_name, region, allow_failed)
+    if st.button("重新讀取 O 欄內容", key=f"{key}_reload") or st.session_state.get(f"{cache_key}_scope") != scope:
+        try:
+            st.session_state[cache_key] = _o_text_options(batch_opt, sheet_name, region, allow_failed)
+            st.session_state[f"{cache_key}_scope"] = scope
+        except Exception as exc:
+            st.warning(f"無法讀取 O 欄內容：{exc}")
+            return []
+    options = st.session_state.get(cache_key) or []
+    counts = dict(options)
+    if not options:
+        st.caption("目前沒有 O 欄無單號的可建單列。")
+        return []
+    selected = st.multiselect(
+        "O 欄內容（可單選、多選；都不選＝全部沒有單號的列）", [text for text, _ in options],
+        format_func=lambda text: f"{text[:60]}{'…' if len(text) > 60 else ''}（{counts.get(text, 0)} 列）",
+        key=f"{key}_selected",
+    )
+    return [text for text in selected if text in counts]
 
 
 def update_sheet_rows_first_header(ws, row_results):

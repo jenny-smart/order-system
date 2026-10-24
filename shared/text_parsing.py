@@ -11,8 +11,9 @@ import requests
 import pandas as pd
 
 import orders
+from shared import booking_flow
 
-PAYWAY_MAP = {"信用卡": "1", "ATM": "2", "儲值金": "4"}
+PAYWAY_MAP = {name: booking_flow.route_for(name).payway_code for name in ("信用卡", "ATM", "儲值金")}
 CLEAN_TYPE_LABELS = ["居家清潔", "辦公室清潔", "裝修細清", "大掃除"]
 PERIOD_DISPLAY_INFO = {
     "08:30-12:30": ("4小時", False), "09:00-11:00": ("2小時", False),
@@ -266,16 +267,7 @@ def normalize_hours_text(cell_value, start_time_str=None, end_time_str=None):
 
 
 def normalize_booking_payway(payway):
-    text = str(payway or "").strip()
-    if text in PAYWAY_MAP:
-        return text
-    if "儲值金" in text:
-        return "儲值金"
-    if "信用卡" in text or "刷卡" in text:
-        return "信用卡"
-    if "ATM" in text.upper() or "匯款" in text or "轉帳" in text or "藍新" in text:
-        return "ATM"
-    return text
+    return booking_flow.normalize_payway(payway)
 
 def _format_period_display(period_raw, person="", display_override=""):
     compact = str(period_raw or "").replace(" ", "")
@@ -514,6 +506,14 @@ def _day_type_from_date(date_text):
         return "平日"
     return "週末" if d.weekday() >= 5 else "平日"
 
+def _read_payway(value):
+    """讀取既有訂單用：後台其他付款方式（如購物金、現金）回傳空字串，不中斷查詢。"""
+    try:
+        return booking_flow.normalize_payway(value)
+    except ValueError:
+        return ""
+
+
 def _extract_payway_line(joined_text):
     text = str(joined_text or "")
     for line in text.splitlines():
@@ -521,12 +521,12 @@ def _extract_payway_line(joined_text):
             continue
         m_line = re.search(r"付款方式[：:]\s*(.+)", line)
         if m_line:
-            value = normalize_booking_payway(m_line.group(1).strip())
+            value = _read_payway(m_line.group(1).strip())
             if value in ("信用卡", "ATM", "儲值金"):
                 return value
     m = re.search(r"付款方式[：:]\s*([^\s\n]+)", text)
     if m:
-        value = normalize_booking_payway(m.group(1).strip())
+        value = _read_payway(m.group(1).strip())
         if value in ("信用卡", "ATM", "儲值金"):
             return value
     if "藍新ATM" in text or "ATM" in text:

@@ -428,14 +428,14 @@ def normalize_status_text(value) -> str:
 
 
 def should_process_row(row):
-    # 已有訂單編號的列仍需後續同步（寄信／日曆）；空白訂單只處理 I 欄「未安排」。
-    order_no = str(_row_scalar(row.get("訂單編號", "")) or "").strip()
-    return bool(order_no) or normalize_status_text(row.get("狀態", "")) == "未安排"
+    from shared.booking_eligibility import can_process_row
+    # 已有訂單編號的列仍需後續同步（寄信／日曆）；空白訂單只處理可建單列。
+    return can_process_row(row)
 
 
 def should_create_order(row):
-    order_no = str(_row_scalar(row.get("訂單編號", "")) or "").strip()
-    return not order_no and normalize_status_text(row.get("狀態", "")) == "未安排"
+    from shared.booking_eligibility import can_create_order
+    return can_create_order(row)
 
 
 # =========================
@@ -518,6 +518,7 @@ def build_row_result(
 from shared.gsheet import (
     get_service_account_info, build_gsheet_client, load_worksheet,
     ensure_columns_in_sheet, set_customer_notice_clip_style, update_sheet_rows,
+    HEADER_ALIASES, add_header_aliases,
 )
 
 
@@ -960,6 +961,23 @@ def extract_order_cards_from_purchase_html(html):
     return blocks
 
 
+# 付款狀態是這些的訂單已作廢：不能當成已成單（中斷復原、比對新單號都要排除）。
+VOID_PAYMENT_STATUS = ("已退款", "取消訂單")
+
+
+def card_payment_status(lines):
+    """訂單卡片的付款狀態（例如 已付款／待付款／已退款／取消訂單）；找不到回傳空字串。"""
+    m = re.search(r"付款狀態[：:]\s*([^\n]+)", "\n".join(str(x) for x in (lines or [])))
+    return m.group(1).strip() if m else ""
+
+
+def is_void_card(lines):
+    """已退款／取消訂單，或卡片上有取消時間（已被取消）。"""
+    status = card_payment_status(lines)
+    joined = "\n".join(str(x) for x in (lines or []))
+    return any(word in status for word in VOID_PAYMENT_STATUS) or bool(re.search(r"取消時間[：:]", joined))
+
+
 def match_order_from_purchase_page(html, target_date, target_period, phone="", exclude_order_nos=None):
     """
     v2026-07：比對日期＋時段，且若有提供 phone 則同時比對電話，避免只用
@@ -973,6 +991,8 @@ def match_order_from_purchase_page(html, target_date, target_period, phone="", e
     for block in extract_order_cards_from_purchase_html(html):
         order_no_candidate = block.get("order_no")
         if not order_no_candidate or order_no_candidate in exclude_order_nos:
+            continue
+        if is_void_card(block.get("lines")):
             continue
         joined = "\n".join(block["lines"])
         # 後台不同頁面可能顯示為「09:00-12:00」或「09:00 - 12:00」；
@@ -1693,10 +1713,13 @@ def process_one_group(session, rows_with_idx, token, gcal_service, region, backe
     stored_value = int(float(member_payload.get("storedValue", 0) or 0))
 
     target_address = str(row0["地址"]).strip().split(",")[0]
-    # 與新客／舊客單筆共用地址流程；由後台決定區域與是否可成單。
+    # 批次維持既有地址下拉選單流程：使用匹配到的 addressId 與保存欄位。
+    # 代客保留列用檸檬保留帳號建單，帳號裡沒有客人地址時改用後台「查詢地區」取得服務區域。
+    from shared import proxy_reserve
     from quick_order import resolve_backend_booking_address
     best_addr, address_parts, addr_check = resolve_backend_booking_address(
         session, member_payload, target_address, token, clean_type_id,
+        phone=phone, refresh_saved_address_via_native_form=proxy_reserve.needs_native_address(row0),
     )
     selected_address = str(best_addr.get("address") or target_address).strip()
     area_info = addr_check.get("area") if isinstance(addr_check.get("area"), dict) else {}
@@ -1756,6 +1779,15 @@ def process_one_group(session, rows_with_idx, token, gcal_service, region, backe
 
     base_data["address"] = selected_address
 
+    # 代客保留：客人備註與客服備註都寫「代客保留：客人姓名」，不沿用該地址原本的客服備註。
+    from shared import proxy_reserve
+    proxy_customer = proxy_reserve.proxy_name(row0)
+    if proxy_customer:
+        proxy_memo = proxy_reserve.memo_for(proxy_customer)
+        base_data["memo"] = "；".join(x for x in (proxy_memo, str(base_data.get("memo") or "")) if x)
+        best_addr["notice"] = proxy_memo
+        logger(f"{group_label}代客保留：用檸檬保留帳號 {phone} 建單，備註「{proxy_memo}」")
+
     # 強制套用查詢地址後取得的區域/車馬費資料
     base_data["fare"] = first_nonzero(best_addr.get("fare"), base_data.get("fare"), default="0")
     base_data["notice"] = str(best_addr.get("notice") or base_data.get("notice") or "")
@@ -1781,6 +1813,8 @@ def process_one_group(session, rows_with_idx, token, gcal_service, region, backe
         if mapped["need_note"]:
             sms_time = mapped["original_slot"]
             customer_note = f"服務時間：{mapped['original_slot']}"
+            if proxy_customer:
+                customer_note = base_data.get("memo", "")
         return sms_time, customer_note
 
     def build_priced_payload_for_date(date_s, row_system_period):

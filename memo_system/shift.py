@@ -615,10 +615,12 @@ def assign_person_shift_range(
     date_end: str,
     type_values: List[str],
     ui_logger=None,
+    weekends_only: bool = False,
 ) -> Dict:
     """
     將指定人員在 date_start ~ date_end 期間勾選指定班別。
     指定日期範圍內會先清掉 all/1/2/3 舊勾選，再套用本次選擇的班別。
+    weekends_only=True 時只處理週六、週日，平日的既有勾選完全不動。
     """
     log = make_logger(ui_logger)
     clean_names = [str(n).strip() for n in names if str(n).strip()]
@@ -644,6 +646,10 @@ def assign_person_shift_range(
         raise ValueError(f"未知或不可用班別：{invalid_types}")
 
     dates = date_range(date_start, date_end)
+    if weekends_only:
+        dates = [d for d in dates if date.fromisoformat(d).weekday() >= 5]
+        if not dates:
+            raise ValueError("日期區間內沒有週六、週日")
     by_month: Dict[str, List[str]] = {}
     for d in dates:
         by_month.setdefault(d[:7], []).append(d)
