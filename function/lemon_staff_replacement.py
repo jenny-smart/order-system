@@ -397,30 +397,35 @@ def _candidate_map(slot_map: dict) -> dict[str, str]:
     return result
 
 
-def _match_names_to_slots(names: list[str], slots: list[dict], target_indexes: list[int]):
-    """把一組姓名配到不同的檸檬人槽位；同一人不得重複。"""
+def _match_names_to_slots(names: list[str], slots: list[dict], target_indexes: list[int], allow_partial: bool = False):
+    """把一組姓名配到不同的檸檬人槽位；同一人不得重複。
+
+    allow_partial：人數可少於檸檬人槽位（先放入選好的人，其餘槽位維持檸檬人）。
+    """
     wanted = list(dict.fromkeys(str(x) for x in names if str(x)))
-    if len(wanted) != len(target_indexes):
+    if not wanted or len(wanted) > len(target_indexes):
+        return None
+    if not allow_partial and len(wanted) != len(target_indexes):
         return None
     by_slot = {index: _candidate_map(slots[index]) for index in target_indexes}
 
-    def walk(position: int, remaining: set[str], assigned: dict):
-        if position == len(target_indexes):
+    def walk(position: int, free_slots: list[int], assigned: dict):
+        if position == len(wanted):
             return assigned
-        slot_index = target_indexes[position]
-        for name in sorted(remaining):
+        name = wanted[position]
+        for slot_index in free_slots:
             shift_id = by_slot[slot_index].get(name)
             if shift_id:
                 result = walk(
                     position + 1,
-                    remaining - {name},
+                    [x for x in free_slots if x != slot_index],
                     {**assigned, slot_index: {"name": name, "shift_id": shift_id}},
                 )
                 if result:
                     return result
         return None
 
-    return walk(0, set(wanted), {})
+    return walk(0, list(target_indexes), {})
 
 
 def _available_names(slots: list[dict], target_indexes: list[int]) -> dict[str, float]:
@@ -482,6 +487,40 @@ def _build_recommendations(order: dict, slots: list[dict], target_indexes: list[
             raise RuntimeError(f"沒有符合喜愛專員性別「{gender_label}」的組合（含訂單上保留的專員一起判斷）")
         raise RuntimeError("班表雖有候選人，但沒有符合『組合平均星等至少 4 分』及槽位限制的組合")
     return recommendations, candidate_names
+
+
+MIN_AVERAGE_RATING = 4.0
+
+
+def validate_manual_pick(order: dict, names: list[str]) -> str:
+    """檢查手動選的放入人員；回傳錯誤原因，空字串代表可以放入。
+
+    - 只能選「可放入人員」（未配班、符合地址資格、排班修改選得到）；人數不可超過檸檬人位置，
+      少於時其餘位置先留檸檬人；
+    - 星等：放入的人加上訂單上保留的正式專員，平均至少 4 分；
+    - 喜愛專員性別：限女／限男一律檢查；1女、1男、1男1女在檸檬人位置都放滿時才檢查。
+    """
+    names = list(dict.fromkeys(str(x) for x in names or [] if str(x)))
+    pickable = {item["name"]: item for item in order.get("可放入人員") or []}
+    slots = int(order.get("lemon_count") or order.get("people_needed") or 0)
+    if not names:
+        return "沒有選擇放入人員"
+    if len(names) > slots:
+        return f"選了 {len(names)} 位，但只有 {slots} 個檸檬人位置"
+    outside = [n for n in names if n not in pickable]
+    if outside:
+        return f"{'、'.join(outside)} 不在可放入人員（未配班且符合地址資格）"
+    kept = order.get("保留專員") or []
+    ratings = [float(item.get("rating") or 0) for item in kept] + [float(pickable[n].get("rating") or 0) for n in names]
+    average = sum(ratings) / len(ratings)
+    if average < MIN_AVERAGE_RATING:
+        return f"放入後整組平均星等 {average:.2f}，未達 {MIN_AVERAGE_RATING:g} 分"
+    label = str(order.get("喜愛專員性別") or "").strip()
+    genders = [str(item.get("gender") or "") for item in kept] + [str(pickable[n].get("gender") or "") for n in names]
+    if label in ("限女", "限男") or len(names) == slots:
+        if not gender_rule_ok(label, genders):
+            return f"不符合喜愛專員性別「{label}」"
+    return ""
 
 
 def _parse_period_range(period_text: str) -> tuple[int, int] | None:
@@ -562,6 +601,8 @@ def _get_schedule_context(session, base_url: str, order: dict, limit: int = 3, g
     qualified_names: list[str] = []
     unqualified_names: list[str] = []
     unknown_names: list[str] = []
+    pickable: list[dict] = []
+    kept: list[dict] = []
     try:
         target_indexes = _lemon_slot_indexes(order, len(slots))
         area_id = _order_area_id(session, base_url, order)
@@ -584,6 +625,19 @@ def _get_schedule_context(session, base_url: str, order: dict, limit: int = 3, g
         def gender_of(name):
             return _staff_profile(session, base_url, name, staff_cache, need_gender=True).get("gender") or "" if need_gender else ""
 
+        # 可放入人員：未配班、符合地址資格、排班修改頁選得到（依星等高到低），供手動選擇
+        available = _available_names(slots, target_indexes)
+        pickable = [
+            {"name": name, "rating": available[name], "gender": gender_of(name)}
+            for name in sorted((n for n in qualified_names if n in available), key=lambda n: (-available[n], n))
+        ]
+        current_staff = list(order.get("current_staff") or _split_staff(order.get("staff", "")))
+        for i, label in enumerate(current_staff):
+            if i in target_indexes:
+                continue
+            kept_name, kept_rating = _staff_name_and_rating(label)
+            kept.append({"name": kept_name, "rating": kept_rating, "gender": gender_of(kept_name)})
+
         recommendations, candidate_names = _build_recommendations(
             order, slots, target_indexes, limit=limit, allowed_names=qualified_names,
             gender_label=gender_label, gender_of=gender_of,
@@ -597,6 +651,8 @@ def _get_schedule_context(session, base_url: str, order: dict, limit: int = 3, g
             "unqualified_names": unqualified_names,
             "unknown_names": unknown_names,
             "area_id": area_id,
+            "pickable": pickable,
+            "kept": kept,
             "candidate_count": 0,
             "slots": slots,
             "target_indexes": [],
@@ -611,6 +667,8 @@ def _get_schedule_context(session, base_url: str, order: dict, limit: int = 3, g
         "unqualified_names": unqualified_names,
         "unknown_names": unknown_names,
         "area_id": area_id,
+        "pickable": pickable,
+        "kept": kept,
         "candidate_count": len(candidate_names),
         "slots": slots,
         "target_indexes": target_indexes,
@@ -746,6 +804,8 @@ def analyze_lemon_orders(
                 "member_id": member_context.get("member_id", ""),
                 "喜愛專員性別": member_context.get("preferred_gender_label", "無法取得"),
                 "地址區域編號": schedule_context.get("area_id", ""),
+                "可放入人員": schedule_context.get("pickable", []),
+                "保留專員": schedule_context.get("kept", []),
                 "會員狀態": member_context.get("error", "") or "OK",
                 "班表狀態": schedule_context.get("error", "") or "OK",
                 "符合該地址資格人員": qualified_text,
@@ -860,7 +920,8 @@ def _fetch_current_order(session, order_no: str) -> dict | None:
     return None
 
 
-def replace_lemon_staff(env: str, email: str, password: str, order: dict, selected_names: list[str]) -> dict:
+def replace_lemon_staff(env: str, email: str, password: str, order: dict, selected_names: list[str],
+                        allow_partial: bool = False) -> dict:
     """送出前重讀換班頁；候選人若已失效就停止，不使用舊畫面資料寫入。"""
     session, base_url = _logged_in_session(env, email, password)
     try:
@@ -879,7 +940,7 @@ def replace_lemon_staff(env: str, email: str, password: str, order: dict, select
         if not csrf or not origin_ids or len(origin_ids) != len(slots):
             raise RuntimeError("送出前無法重新確認換班頁，已停止寫入")
         target_indexes = _lemon_slot_indexes(order, len(slots))
-        assignment = _match_names_to_slots(selected_names, slots, target_indexes)
+        assignment = _match_names_to_slots(selected_names, slots, target_indexes, allow_partial=allow_partial)
         if not assignment:
             raise RuntimeError("推薦名單已不在目前可換班候選中，請重新產生推薦")
 
@@ -907,7 +968,8 @@ def replace_lemon_staff(env: str, email: str, password: str, order: dict, select
         )
         if [str(x) for x in origin_after] != selected_shift_ids:
             raise RuntimeError("後台已回應，但重新讀取後未確認到完整換人結果，請立即人工檢查")
-        return {"success": True, "assigned": [assignment[i]["name"] for i in target_indexes]}
+        return {"success": True, "assigned": [assignment[i]["name"] for i in target_indexes if i in assignment],
+                "lemon_left": len(target_indexes) - len(assignment)}
     finally:
         session.close()
 
@@ -957,7 +1019,10 @@ def _build_batch_display_df(analyzed_orders: list[dict]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _run_batch_replacements(env: str, email: str, password: str, analyzed_orders: list[dict], edited_df: pd.DataFrame) -> list[dict]:
+def _run_batch_replacements(env: str, email: str, password: str, analyzed_orders: list[dict], edited_df: pd.DataFrame,
+                            manual_picks: dict | None = None) -> list[dict]:
+    """manual_picks：{列索引: [姓名…]}，有手動選人就用手動選的（可少於檸檬人位置）。"""
+    manual_picks = manual_picks or {}
     planned = []
     for index, order in enumerate(analyzed_orders):
         row = edited_df.iloc[index] if index < len(edited_df) else None
@@ -965,6 +1030,25 @@ def _run_batch_replacements(env: str, email: str, password: str, analyzed_orders
         allowed = str(order.get("批次狀態") or "") == "可勾選"
         chosen_rank = _rank_label_to_index(row["採用順位"]) if row is not None and "採用順位" in row else None
         recommendations = order.get("推薦列表") or []
+        manual_names = list(manual_picks.get(index) or [])
+        if should_process and manual_names:
+            error = validate_manual_pick(order, manual_names)
+            planned.append({
+                "序號": index + 1,
+                "訂單編號": order.get("order_no", ""),
+                "service_date": order.get("service_date", ""),
+                "period": order.get("period", ""),
+                "服務日期": order.get("service_date", ""),
+                "時段": order.get("period", ""),
+                "結果": "失敗" if error else "待寫入",
+                "原因": error,
+                "寫入專員": "",
+                "writeable": not error,
+                "order": order,
+                "selected_names": manual_names,
+                "allow_partial": True,
+            })
+            continue
         if not should_process:
             planned.append({
                 "序號": index + 1,
@@ -1045,12 +1129,14 @@ def _run_batch_replacements(env: str, email: str, password: str, analyzed_orders
     results = []
     for entry in planned:
         if not entry.get("writeable"):
-            results.append({k: v for k, v in entry.items() if k not in {"writeable", "order", "selected_names"}})
+            results.append({k: v for k, v in entry.items() if k not in {"writeable", "order", "selected_names", "allow_partial"}})
         else:
             order = entry["order"]
             selected_names = entry["selected_names"]
             try:
-                result = replace_lemon_staff(env, email, password, order, selected_names)
+                result = replace_lemon_staff(env, email, password, order, selected_names,
+                                             allow_partial=bool(entry.get("allow_partial")))
+                lemon_left = int(result.get("lemon_left") or 0)
                 results.append(
                     {
                         "序號": entry["序號"],
@@ -1058,7 +1144,7 @@ def _run_batch_replacements(env: str, email: str, password: str, analyzed_orders
                         "服務日期": entry["服務日期"],
                         "時段": entry["時段"],
                         "結果": "成功",
-                        "原因": "",
+                        "原因": f"仍有 {lemon_left} 個檸檬人位置待補" if lemon_left else "",
                         "寫入專員": "、".join(result.get("assigned") or selected_names or []),
                     }
                 )
@@ -1075,6 +1161,43 @@ def _run_batch_replacements(env: str, email: str, password: str, analyzed_orders
                     }
                 )
     return results
+
+
+def _render_manual_picks(analyzed_orders: list[dict], edited_df: pd.DataFrame) -> dict:
+    """勾選的列：可手動從「可放入人員」選要放誰（人數少於檸檬人位置時，其餘位置先留檸檬人）。"""
+    picks = {}
+    if edited_df is None or edited_df.empty or "處理" not in edited_df:
+        return picks
+    ticked = [i for i in range(min(len(analyzed_orders), len(edited_df))) if bool(edited_df.iloc[i]["處理"])]
+    rows = [i for i in ticked if analyzed_orders[i].get("可放入人員")]
+    if not ticked:
+        return picks
+    st.markdown("#### 手動選擇放入人員")
+    st.caption("只列出當天該時段未配班、且符合地址資格的人（星等高到低）。有選人就用手動選的，不選則用『採用順位』的推薦。"
+               "放入後整組平均星等需至少 4 分；喜愛專員性別一樣檢查。")
+    for i in ticked:
+        order = analyzed_orders[i]
+        if i not in rows:
+            st.caption(f"{_order_label(order)}：沒有可放入的人員（未配班且符合地址資格）")
+            continue
+        options = [item["name"] for item in order["可放入人員"]]
+        info = {item["name"]: item for item in order["可放入人員"]}
+        slots = int(order.get("lemon_count") or order.get("people_needed") or 0)
+        chosen = st.multiselect(
+            f"{_order_label(order)}（檸檬人 {slots} 位）",
+            options,
+            format_func=lambda n, info=info: f"{n}（{info[n]['rating']:g}星{'・' + info[n]['gender'] if info[n].get('gender') else ''}）",
+            max_selections=slots or None,
+            key=f"lemon_replace_manual_{order.get('order_no')}",
+        )
+        if chosen:
+            error = validate_manual_pick(order, chosen)
+            if error:
+                st.warning(f"{order.get('order_no')}：{error}，這筆不會寫入")
+            elif len(chosen) < slots:
+                st.info(f"{order.get('order_no')}：先放入 {'、'.join(chosen)}，其餘 {slots - len(chosen)} 個位置留檸檬人")
+            picks[i] = chosen
+    return picks
 
 
 def render(backend_email: str, backend_password: str, env: str) -> None:
@@ -1185,9 +1308,11 @@ def render(backend_email: str, backend_password: str, env: str) -> None:
             disabled=disabled_columns,
             key=st.session_state.get("lemon_replace_analysis_key", "lemon_replace_editor"),
         )
-        st.caption("被標為不可勾選的列，即使手動勾選也不會送出。你可以在『採用順位』欄改 Top2 / Top3。")
+        st.caption("可在『採用順位』欄改 Top2 / Top3；沒有推薦的列可在下方手動選擇要放入的人。")
     else:
         edited_df = display_df
+
+    manual_picks = _render_manual_picks(analyzed_orders, edited_df)
 
     if analyzed_orders:
         with st.expander("單筆 Top1~3 詳情"):
@@ -1214,7 +1339,10 @@ def render(backend_email: str, backend_password: str, env: str) -> None:
     can_submit = (
         batch_confirm
         and not edited_df.empty
-        and bool(((edited_df["處理"].fillna(False)) & (edited_df["批次狀態"].eq("可勾選"))).any())
+        and (
+            bool(((edited_df["處理"].fillna(False)) & (edited_df["批次狀態"].eq("可勾選"))).any())
+            or any(not validate_manual_pick(analyzed_orders[i], names) for i, names in manual_picks.items())
+        )
     )
     if st.button(
         "批次確認並寫入",
@@ -1225,7 +1353,8 @@ def render(backend_email: str, backend_password: str, env: str) -> None:
     ):
         try:
             with st.spinner("逐筆重新確認班表並執行換人…"):
-                batch_results = _run_batch_replacements(env, backend_email, backend_password, analyzed_orders, edited_df)
+                batch_results = _run_batch_replacements(env, backend_email, backend_password, analyzed_orders, edited_df,
+                                                        manual_picks=manual_picks)
             st.session_state["lemon_replace_batch_results"] = batch_results
             result_df = pd.DataFrame(batch_results)
             success_count = sum(1 for item in batch_results if item.get("結果") == "成功")
