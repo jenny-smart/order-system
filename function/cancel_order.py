@@ -520,7 +520,7 @@ def _cleanup_reserve_addresses(env_name, backend_email, backend_password, result
         return []
     try:
         with area:
-            with st.spinner("取消完成，正在檢查並刪除檸檬保留不再使用的客人地址…"):
+            with st.spinner("取消完成，正在刪除檸檬保留帳號上固定地址以外的地址…"):
                 return reserve_address.cleanup_after_cancel(env_name, backend_email, backend_password, result)
     except Exception as exc:
         return [{"地址": "", "結果": "失敗", "說明": f"同步刪除地址失敗：{exc}"}]

@@ -1,30 +1,26 @@
 # -*- coding: utf-8 -*-
 """檸檬保留刪除地址：代客保留會替檸檬保留帳號加很多客人地址，用完要刪掉。
 
-- 固定保留兩個地址（KEEP_ADDRESSES），永遠不刪。
-- 地址還有未取消、服務日期在今天以後的訂單就跳過；讀不完未來訂單時全部跳過。
-- 刪除是用瀏覽器開會員管理頁，點該地址旁的垃圾桶（fa-trash-o），刪完重新讀頁面確認。
+- 固定保留兩個地址（KEEP_ADDRESSES），其他有垃圾桶的地址一律刪除，不查訂單
+  （訂單保存自己的地址，刪會員地址不影響已成立的訂單）。
+- 用瀏覽器開會員管理頁讀「實際顯示」的地址，點該地址旁的垃圾桶（fa-trash-o），刪完重新讀頁面確認。
+- 取消到檸檬保留帳號的訂單時（一般取消訂單頁、檸檬保留單取消頁）也會順便清一次。
 """
 from __future__ import annotations
 
 import re
 import shutil
 import unicodedata
-from collections import Counter
-from datetime import datetime, timedelta, timezone
-from typing import Dict, Iterable, List, Tuple
+from typing import Iterable, List
 from urllib.parse import quote, urlparse
 
 from bs4 import BeautifulSoup, NavigableString, Tag
 
 from function import cancel_order as co
-import orders
 from shared.proxy_reserve import RESERVE_PHONE
 
 KEEP_ADDRESSES = ("台北市大安區信義路四段210號4樓", "台中市北區館前路19號4樓")
-INACTIVE_PAYMENT_STATUS = {"取消訂單", "已退款"}
 DELETE = "刪除"
-MAX_ORDER_PAGES = 60
 
 # 頁面上的地址行：「地址[備註] 🗑」，以 <br> 分行；Python 與瀏覽器用同一套規則取地址文字。
 _MARK_JS = """
@@ -84,10 +80,6 @@ def parse_member_addresses(html: str, phone: str = RESERVE_PHONE) -> List[str]:
     return found
 
 
-def _today() -> str:
-    return datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
-
-
 def _launch_browser(runtime):
     executable = shutil.which("chromium") or shutil.which("chromium-browser")
     return runtime.chromium.launch(headless=True, **({"executable_path": executable} if executable else {}))
@@ -105,15 +97,9 @@ def _open_member_page(page, member_url):
 
 
 def list_member_addresses(env_name, backend_email, backend_password, phone=RESERVE_PHONE) -> List[str]:
-    session, base_url = co._new_logged_in_session(env_name, backend_email, backend_password)
-    resp = session.get(f"{base_url}/member", params={"keyword": phone}, headers=orders.HEADERS, allow_redirects=True)
-    if resp.status_code != 200:
-        raise RuntimeError(f"讀取會員管理頁失敗：HTTP {resp.status_code}")
-    found = parse_member_addresses(resp.text, phone)
-    if found:
-        return found
-    # 地址清單由頁面程式產生時，直接讀 HTML 讀不到；改用瀏覽器開頁面再讀。
+    """會員管理頁上實際顯示、有垃圾桶的地址。地址清單由頁面程式產生，所以用瀏覽器開頁再讀。"""
     from playwright.sync_api import sync_playwright
+    session, base_url = co._new_logged_in_session(env_name, backend_email, backend_password)
     origin = base_url.rstrip("/")
     with sync_playwright() as runtime:
         browser = _launch_browser(runtime)
@@ -127,58 +113,10 @@ def list_member_addresses(env_name, backend_email, backend_password, phone=RESER
             browser.close()
 
 
-def active_order_counts(env_name, backend_email, backend_password, phone=RESERVE_PHONE) -> Tuple[Dict[str, int], bool]:
-    """今天以後、未取消的訂單數（依地址）；第二個值＝是否確定讀完。
-
-    後台 /purchase 同時送電話與日期篩選可能整個失效、回傳空結果（見 cancel_order.find_orders），
-    所以只用電話篩選、依服務日期新到舊排序，日期與付款狀態在這裡自己比對。
-    一張訂單都讀不到時不當作「已讀完」，避免把還在使用的地址刪掉。
-    """
-    session, base_url = co._new_logged_in_session(env_name, backend_email, backend_password)
-    today = _today()
-    counts: Counter = Counter()
-    seen = 0
-    for page in range(1, MAX_ORDER_PAGES + 1):
-        params = dict(co.PURCHASE_FILTER_PARAMS_TEMPLATE)
-        params.update({"phone": phone, "orderBy": "date_clean:desc", "page": str(page)})
-        resp = session.get(f"{base_url}/purchase", params=params, headers=orders.HEADERS, allow_redirects=True)
-        if resp.status_code != 200:
-            return dict(counts), False
-        blocks = orders.extract_order_cards_from_purchase_html(resp.text)
-        seen += len(blocks)
-        page_dates = []
-        for block in blocks:
-            item = co._order_from_block(block) or {}
-            if item.get("phone") and item["phone"] != phone:
-                continue
-            service_date = str(item.get("service_date") or "")
-            if service_date:
-                page_dates.append(service_date)
-            if service_date < today or item.get("payment_status") in INACTIVE_PAYMENT_STATUS:
-                continue
-            address = item.get("address") or orders._calchk_address_from_lines(block.get("lines", []))
-            if address:
-                counts[address_key(address)] += 1
-        # 依服務日期新到舊：最後一頁，或整頁都已早於今天，就不會再有今天以後的訂單。
-        if len(blocks) < 20 or (page_dates and max(page_dates) < today):
-            return dict(counts), seen > 0
-    return dict(counts), False
-
-
-def plan_cleanup(addresses: Iterable[str], counts: Dict[str, int], complete: bool) -> List[dict]:
-    plan = []
-    for address in addresses:
-        active = counts.get(address_key(address), 0)
-        if is_kept(address):
-            action, reason = "保留", "固定保留地址"
-        elif not complete:
-            action, reason = "跳過", "未能讀完今天以後的訂單，無法確認是否還在使用"
-        elif active:
-            action, reason = "跳過", f"仍有 {active} 張今天以後未取消的訂單"
-        else:
-            action, reason = DELETE, ""
-        plan.append({"地址": address, "處理": action, "原因": reason})
-    return plan
+def plan_cleanup(addresses: Iterable[str]) -> List[dict]:
+    """固定地址保留，其他一律刪除。"""
+    return [{"地址": a, "處理": "保留" if is_kept(a) else DELETE, "原因": "固定保留地址" if is_kept(a) else ""}
+            for a in addresses]
 
 
 def _browser_cookies(session, origin):
@@ -248,21 +186,12 @@ def delete_member_addresses(env_name, backend_email, backend_password, addresses
 
 def cleanup_after_cancel(env_name, backend_email, backend_password, cancelled_rows: Iterable[dict],
                          phone=RESERVE_PHONE) -> List[dict]:
-    """取消檸檬保留帳號的訂單後（代客保留單取消頁或一般取消訂單頁）：
-    這些訂單的地址若已沒有今天以後未取消的訂單，就從檸檬保留刪除；固定地址一律不刪。"""
-    keys = {address_key(r.get("address")) for r in cancelled_rows
-            if r.get("ok") and r.get("address")
-            and (r.get("memo_keyword") or re.sub(r"\D", "", str(r.get("phone") or "")) == phone)}
-    if not keys:
+    """有取消到檸檬保留帳號的訂單時，順便把固定地址以外的地址全部刪除。"""
+    triggered = any(r.get("ok") and (r.get("memo_keyword") or re.sub(r"\D", "", str(r.get("phone") or "")) == phone)
+                    for r in cancelled_rows)
+    if not triggered:
         return []
-    addresses = [a for a in list_member_addresses(env_name, backend_email, backend_password, phone)
-                 if address_key(a) in keys]
-    if not addresses:
+    targets = [a for a in list_member_addresses(env_name, backend_email, backend_password, phone) if not is_kept(a)]
+    if not targets:
         return []
-    counts, complete = active_order_counts(env_name, backend_email, backend_password, phone)
-    plan = plan_cleanup(addresses, counts, complete)
-    to_delete = [item["地址"] for item in plan if item["處理"] == DELETE]
-    deleted = {r["地址"]: r for r in delete_member_addresses(env_name, backend_email, backend_password, to_delete, phone)}
-    return [{**item, **({"結果": deleted[item["地址"]]["結果"], "說明": deleted[item["地址"]]["說明"]}
-                        if item["地址"] in deleted else {"結果": "未刪除", "說明": item["原因"]})}
-            for item in plan]
+    return delete_member_addresses(env_name, backend_email, backend_password, targets, phone)

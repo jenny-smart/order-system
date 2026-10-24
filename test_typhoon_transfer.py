@@ -217,6 +217,25 @@ class TrackingTests(unittest.TestCase):
             {"order_no": "LC00215959", "name": "王騏三", "expected_date": "2027-03-03", "expected_period": "14:00-18:00"},
         ])
 
+    def test_parse_headerless_rows_with_one_date(self):
+        items = tt.parse_tracking_input(
+            "LC00217286\t陳世湟\t2027-03-01\t14:00-18:00\n"
+            "LC002169001\t創盟電子\t2027/3/2\t14:00-16:00\n"
+            "LC00217080\t簡驪蓉\t2026-10-23\t09:00-11:00\t2027-03-01\t09:00-11:00\n"
+        )
+        self.assertEqual(items[0], {"order_no": "LC00217286", "name": "陳世湟",
+                                    "expected_date": "2027-03-01", "expected_period": "14:00-18:00"})
+        self.assertEqual((items[1]["expected_date"], items[1]["expected_period"]), ("2027-03-02", "14:00-16:00"))
+        # 兩個日期無法判斷哪個是新日期
+        self.assertEqual(items[2]["expected_date"], "")
+
+    def test_parse_previous_tracking_result(self):
+        rows = [{"訂單編號": "LC00217286", "姓名": "陳世湟", "表單新日期": "2027-03-01", "表單新時段": "14:00-18:00",
+                 "目前日期": "2026-10-30", "目前時段": "14:00-18:00", "付款狀態": "已付款", "狀態": "已變動",
+                 "查詢時間": "2026-10-23 10:00"}]
+        items = tt.parse_tracking_input(tt.tracking_tsv(rows))
+        self.assertEqual((items[0]["expected_date"], items[0]["expected_period"]), ("2027-03-01", "14:00-18:00"))
+
     def test_parse_plain_order_numbers(self):
         items = tt.parse_tracking_input("LC00215208\n 訂單 LC00215959 \n無單號")
         self.assertEqual([i["order_no"] for i in items], ["LC00215208", "LC00215959"])

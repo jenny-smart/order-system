@@ -460,14 +460,15 @@ def _render_reserve_cancel_job(env, backend_email, backend_password, machine) ->
 
 
 def _render_proxy_address_cleanup(job, env, backend_email, backend_password) -> None:
-    """取消代客保留後同步刪除檸檬保留的該地址（該地址已無今天以後未取消的訂單才刪）。"""
-    if not any(r.get("ok") and r.get("memo_keyword") for r in job["results"]):
+    """檸檬保留單取消後，順便刪除檸檬保留帳號上固定地址以外的地址。"""
+    if not any(r.get("ok") for r in job["results"]):
         return
     if "address_cleanup" not in job:
-        with st.spinner("代客保留已取消，正在檢查並刪除檸檬保留不再使用的客人地址…"):
+        with st.spinner("已取消，正在刪除檸檬保留帳號上固定地址以外的地址…"):
             try:
                 job["address_cleanup"] = reserve_address.cleanup_after_cancel(
-                    env, backend_email.strip(), backend_password.strip(), job["results"])
+                    env, backend_email.strip(), backend_password.strip(),
+                    [{**r, "phone": reserve_address.RESERVE_PHONE} for r in job["results"]])
             except Exception as exc:
                 job["address_cleanup"] = [{"地址": "", "處理": "失敗", "結果": "失敗", "說明": f"同步刪除地址失敗：{exc}"}]
         st.session_state.reserve_cancel_job = job
@@ -475,25 +476,24 @@ def _render_proxy_address_cleanup(job, env, backend_email, backend_password) -> 
     if job["address_cleanup"]:
         st.dataframe(pd.DataFrame(job["address_cleanup"]), width="stretch", hide_index=True)
     else:
-        st.caption("檸檬保留帳號上沒有這些訂單的地址，不需刪除。")
+        st.caption("檸檬保留帳號上只有固定地址，不需刪除。")
 
 
 def render_reserve_address_cleanup(backend_email: str, backend_password: str, env: str) -> None:
     st.markdown("### 🧹 檸檬保留刪除地址")
     keep = "、".join(reserve_address.KEEP_ADDRESSES)
     st.caption(f"代客保留會替檸檬保留帳號加入很多客人地址。這裡只保留：{keep}；"
-               "其他地址若已沒有今天以後未取消的訂單就刪除，仍有訂單的會跳過。")
+               "其他地址直接刪除，不查訂單（刪會員地址不影響已成立的訂單）。")
     if not _require_supported_env(env):
         return
     phone, lookup = _common_member_header(env, backend_email, backend_password)
     if not lookup:
         return
     if st.button("讀取檸檬保留地址", width="stretch", key="reserve_address_load"):
-        with st.spinner("正在讀取會員地址與今天以後的訂單…"):
+        with st.spinner("正在讀取檸檬保留的地址…"):
             try:
                 addresses = reserve_address.list_member_addresses(env, backend_email.strip(), backend_password.strip(), phone.strip())
-                counts, complete = reserve_address.active_order_counts(env, backend_email.strip(), backend_password.strip(), phone.strip())
-                st.session_state.reserve_address_plan = reserve_address.plan_cleanup(addresses, counts, complete)
+                st.session_state.reserve_address_plan = reserve_address.plan_cleanup(addresses)
                 st.session_state.pop("reserve_address_result", None)
                 if not addresses:
                     st.warning("會員管理頁上讀不到可刪除的地址（沒有垃圾桶圖示的地址）。")
@@ -514,18 +514,10 @@ def render_reserve_address_cleanup(backend_email: str, backend_password: str, en
         return
     confirm = st.checkbox(f"我確認要在{_env_label(env)}刪除以上 {len(targets)} 個地址", key="reserve_address_confirm")
     if st.button("確認刪除地址", type="primary", width="stretch", disabled=not confirm, key="reserve_address_delete"):
-        with st.spinner(f"正在重新確認訂單並逐一刪除 {len(targets)} 個地址…"):
+        with st.spinner(f"正在逐一刪除 {len(targets)} 個地址…"):
             try:
-                # 讀取清單後可能又有新訂單：按確認時重新檢查，只刪仍然沒有訂單的地址。
-                counts, complete = reserve_address.active_order_counts(
-                    env, backend_email.strip(), backend_password.strip(), phone.strip())
-                recheck = reserve_address.plan_cleanup(targets, counts, complete)
-                still = [item["地址"] for item in recheck if item["處理"] == reserve_address.DELETE]
-                deleted = reserve_address.delete_member_addresses(
-                    env, backend_email.strip(), backend_password.strip(), still, phone.strip())
-                st.session_state.reserve_address_result = deleted + [
-                    {"地址": item["地址"], "結果": "未刪除", "說明": item["原因"]}
-                    for item in recheck if item["處理"] != reserve_address.DELETE]
+                st.session_state.reserve_address_result = reserve_address.delete_member_addresses(
+                    env, backend_email.strip(), backend_password.strip(), targets, phone.strip())
             except Exception as exc:
                 st.session_state.reserve_address_result = [{"地址": "", "結果": "失敗", "說明": str(exc)}]
         st.session_state.pop("reserve_address_plan", None)

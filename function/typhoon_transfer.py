@@ -335,11 +335,25 @@ TRACK_HEADERS = [
 ]
 
 
+TRACK_DATE_HEADERS = ["新日期", "表單新日期"]
+TRACK_PERIOD_HEADERS = ["新時段", "表單新時段"]
+_DATE_IN_TEXT = r"\d{4}[/-]\d{1,2}[/-]\d{1,2}"
+
+
+def _normalize_date_text(value):
+    try:
+        return _parse_date(value).strftime("%Y-%m-%d")
+    except Exception:
+        return str(value or "").strip()
+
+
 def parse_tracking_input(text):
     """解析貼上的表單內容或訂單編號清單。
 
-    有標題列（含「訂單編號」）時，讀「新日期／新時段」欄當作預期值；
-    沒有標題列時，每行抓第一個訂單編號，只查目前日期。同一訂單只取第一次出現。
+    有標題列（含「訂單編號」）時，讀「新日期／新時段」（或追蹤結果的「表單新日期／
+    表單新時段」）欄當作預期值。沒有標題列時，每行只有一個日期就把它當新日期、
+    第一個時段當新時段；有多個日期無法判斷哪個是新日期，只查目前日期。
+    同一訂單只取第一次出現。
     """
     lines = [line for line in str(text or "").splitlines() if line.strip()]
     if not lines:
@@ -352,30 +366,37 @@ def parse_tracking_input(text):
     items, seen = [], set()
     for line in lines:
         cells = [cell.strip() for cell in line.split("\t")]
+
+        def cell(*names):
+            for name in names:
+                idx = columns.get(name)
+                if idx is not None and idx < len(cells) and cells[idx]:
+                    return cells[idx]
+            return ""
+
         if columns:
-            order_no = cells[columns["訂單編號"]] if columns["訂單編號"] < len(cells) else ""
+            order_no = cell("訂單編號")
+            name = cell("姓名")
+            expected_date = _normalize_date_text(cell(*TRACK_DATE_HEADERS)) if cell(*TRACK_DATE_HEADERS) else ""
+            expected_period = _compact_period(cell(*TRACK_PERIOD_HEADERS))
         else:
             match = re.search(orders.ORDER_NO_REGEX, line)
             order_no = match.group(0) if match else ""
+            rest = line[match.end():] if match else ""
+            dates = {_normalize_date_text(d) for d in re.findall(_DATE_IN_TEXT, rest)}
+            expected_date = dates.pop() if len(dates) == 1 else ""
+            expected_period = _compact_period(rest) if expected_date else ""
+            name = ""
+            if len(cells) > 1 and not re.search(_DATE_IN_TEXT, cells[1]) and not re.search(r"\d:\d", cells[1]):
+                name = cells[1]
         if not re.fullmatch(orders.ORDER_NO_REGEX, order_no) or order_no in seen:
             continue
         seen.add(order_no)
-
-        def cell(name):
-            idx = columns.get(name)
-            return cells[idx] if idx is not None and idx < len(cells) else ""
-
-        expected_date = ""
-        if cell("新日期"):
-            try:
-                expected_date = _parse_date(cell("新日期")).strftime("%Y-%m-%d")
-            except Exception:
-                expected_date = cell("新日期")
         items.append({
             "order_no": order_no,
-            "name": cell("姓名"),
+            "name": name,
             "expected_date": expected_date,
-            "expected_period": _compact_period(cell("新時段")),
+            "expected_period": expected_period,
         })
     return items
 
