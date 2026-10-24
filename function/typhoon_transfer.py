@@ -81,6 +81,42 @@ def target_dates(start, end, day_type="不限", typhoon_date=None):
     return days
 
 
+# ---------------------------------------------------------
+# 移轉前先勾檸檬人排班
+# ---------------------------------------------------------
+
+DEFAULT_LEMON_NAMES = ",".join(f"檸檬人{i}" for i in range(1, 13))
+DEFAULT_LEMON_SHIFT_TYPES = ["全8", "上4"]
+SHIFT_DAY_MODES = ["與移轉日期相同（依移轉日別）", "僅平日", "僅週末", "平日＋週末"]
+
+
+def parse_lemon_names(text):
+    return [name.strip() for name in re.split(r"[,，、\s]+", str(text or "")) if name.strip()]
+
+
+def shift_dates(start, end, mode, transfer_dates=()):
+    """排班日期：預設和移轉候選日期相同；也可選區間內僅平日／僅週末／平日＋週末。"""
+    if mode == SHIFT_DAY_MODES[0]:
+        return sorted(set(transfer_dates))
+    day_type = {"僅平日": "只排平日", "僅週末": "只排週末", "平日＋週末": "不限"}[mode]
+    return target_dates(start, end, day_type)
+
+
+def assign_lemon_shifts(env_name, backend_email, backend_password, names, shift_types, dates, logger=None):
+    """用排班管理的勾班功能，替檸檬人在指定日期勾班（該日原有勾選會先清掉再套用）。"""
+    from memo_system import memo, shift
+
+    if not dates:
+        raise ValueError("沒有要排班的日期")
+    memo.set_env(env_name)
+    memo.set_runtime_credentials(backend_email, backend_password)
+    session = memo.login(ui_logger=logger)
+    return shift.assign_person_shift_range(
+        session=session, names=names, date_start=min(dates), date_end=max(dates),
+        type_values=shift_types, ui_logger=logger, only_dates=dates,
+    )
+
+
 def _now_text():
     return datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d %H:%M")
 
@@ -127,6 +163,33 @@ def _order_row_from_block(block, typhoon_start, typhoon_end=None):
         "payway": qo._extract_payway_line(joined) or "儲值金",
         "clean_type_id": CLEAN_TYPE_ID_MAP.get(qo._extract_clean_type_line(joined), "1"),
     }
+
+
+def attention_notes(rows):
+    """標注要人工確認的訂單：同一客人有多筆（可能是合併或獨立訂單）、專員含檸檬人。
+
+    同一客人以電話判斷，沒有電話時用姓名。回傳 {訂單編號: 注意事項}。
+    """
+    by_customer = {}
+    for row in rows:
+        key = row.get("phone") or row.get("name")
+        if key:
+            by_customer.setdefault(key, []).append(row)
+    notes = {}
+    for row in rows:
+        parts = []
+        same = by_customer.get(row.get("phone") or row.get("name"), [])
+        if len(same) > 1:
+            others = "、".join(
+                f"{r['order_no']}（{r.get('service_date', '')} {r.get('period', '')}）"
+                for r in same if r["order_no"] != row["order_no"]
+            )
+            parts.append(f"同客人 {len(same)} 筆，確認合併或獨立訂單：{others}")
+        if "檸檬人" in str(row.get("staff") or ""):
+            parts.append("專員含檸檬人，請確認")
+        if parts:
+            notes[row["order_no"]] = "；".join(parts)
+    return notes
 
 
 def find_typhoon_orders(env_name, backend_email, backend_password, typhoon_start, typhoon_end=None, max_pages=40):
@@ -207,6 +270,16 @@ def _staff_names(staff):
     return [name for name in re.split(r"\s*[Xx×]\s*", staff) if name.strip()]
 
 
+def staff_text(staff):
+    """後台專員欄（例：宋芳儀(2)X陳佩琪(3)）→ 表單用「宋芳儀、陳佩琪」。"""
+    return "、".join(qo._staff_name_key(name) for name in _staff_names(staff) if qo._staff_name_key(name))
+
+
+def parse_staff_text(text):
+    """表單上的原專員（、／,／X 分隔）→ 姓名清單。"""
+    return [qo._staff_name_key(n) for n in re.split(r"[、,，\s]+|\s*[Xx×]\s*", str(text or "")) if qo._staff_name_key(n)]
+
+
 def transfer_one_order(session, base_url, env_name, row, dates):
     """把一筆訂單移到 dates 中第一個排得進去的日期，時段維持原時段。"""
     order_no, period = row["order_no"], row["period"]
@@ -278,7 +351,7 @@ def transfer_typhoon_orders(env_name, backend_email, backend_password, rows, dat
 
 
 RESULT_COPY_HEADERS = [
-    "訂單編號", "姓名", "LINE@連結", "電話", "客戶地址", "原日期", "原時段", "服務時數",
+    "訂單編號", "姓名", "LINE@連結", "電話", "客戶地址", "原日期", "原時段", "服務時數", "原專員",
     "新日期", "新時段", "結果", "說明", "移轉時間",
 ]
 
@@ -306,6 +379,7 @@ def result_copy_rows(results):
             "原日期": r.get("service_date_before", ""),
             "原時段": r.get("period", ""),
             "服務時數": service_hours(r.get("period", "")),
+            "原專員": staff_text(r.get("staff", "")),
             "新日期": r.get("new_date", "") if r.get("success") else "",
             "新時段": r.get("period", "") if r.get("success") else "",
             "結果": "成功" if r.get("success") else "失敗",
@@ -314,6 +388,20 @@ def result_copy_rows(results):
         }
         for r in results
     ]
+
+
+NOTICE_COPY_HEADERS = RESULT_COPY_HEADERS[:RESULT_COPY_HEADERS.index("原專員") + 1]
+
+
+def notice_tsv(rows):
+    """移轉前通知客人用：訂單編號～原專員（同移轉結果前 9 欄），含標題列，Tab 分隔。"""
+    copy_rows = result_copy_rows([{**row, "service_date_before": row.get("service_date", "")} for row in rows])
+    lines = ["\t".join(NOTICE_COPY_HEADERS)]
+    lines += [
+        "\t".join(str(r.get(h, "") or "").replace("\t", " ").replace("\n", " ") for h in NOTICE_COPY_HEADERS)
+        for r in copy_rows
+    ]
+    return "\n".join(lines)
 
 
 def results_tsv(results):

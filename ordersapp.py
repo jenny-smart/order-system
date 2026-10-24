@@ -190,6 +190,7 @@ FUNCTION_OPTIONS = [
     ("檸檬人換正式專員：搜尋含檸檬人占位的訂單，依交通與配班規範推薦正式專員。", "orders", "檸檬人換正式專員"),
     ("VIP 訂單／Google 日曆同步：同時查詢後台訂單與 Google 日曆，支援異動、取消、暫停與日曆更新。", "orders", "VIP 訂單／Google 日曆同步"),
     ("颱風假訂單移轉／比對：颱風假（可連放多天）訂單依時段逐筆用「修改日期」移到指定日期區間，時段不變；並可比對移轉後訂單目前日期，找出又被改過的訂單。", "orders", "颱風假訂單移轉"),
+    ("訂單批次調班：查執行日期區間的已付款訂單，逐筆移到返回日期區間的同時段並配回原本的專員，執行前後都可複製名單。", "orders", "訂單批次調班"),
     ("訂單客服備註：舊客回購備註回填、新成單提醒建立、客服備忘錄整理。", "memo", "訂單客服備註"),
     ("儲值獎金備註：搜尋儲值金訂單，依姓名把獎金專員名字加進客服備註。", "orders", "儲值獎金備註"),
     ("排班管理：排班匯入、檸檬人空檔查詢、清空排班。", "memo", "排班管理"),
@@ -300,6 +301,14 @@ if mode == "颱風假訂單移轉":
 
     step("3", "颱風假訂單移轉")
     _typhoon_transfer_page.render(backend_email, backend_password, env, copy_button=_copy_button)
+    st.stop()
+
+if mode == "訂單批次調班":
+    from function import reschedule_page as _reschedule_page
+    from function.ui_common import copy_button as _copy_button
+
+    step("3", "訂單批次調班")
+    _reschedule_page.render(backend_email, backend_password, env, copy_button=_copy_button)
     st.stop()
 
 if mode == "檸檬人換正式專員":

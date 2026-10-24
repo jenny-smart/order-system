@@ -178,20 +178,20 @@ class CopyResultsTests(unittest.TestCase):
             {"order_no": "LC1", "name": "王小明", "phone": "0912345678", "service_date_before": "2026-10-23",
              "line_url": "https://chat.line.biz/Uabc/chat/U123", "address": "台北市大安區復興南路一段1號",
              "period": "08:30-12:30", "success": True, "new_date": "2027-03-02", "message": "已移到",
-             "transferred_at": "2026-10-23 14:32"},
+             "transferred_at": "2026-10-23 14:32", "staff": "宋芳儀(2)X陳佩琪(3)"},
             {"order_no": "LC2", "name": "李\t大", "phone": "", "service_date_before": "2026-10-23",
              "period": "09:00-12:00", "success": False, "new_date": "", "message": "無法安排"},
         ]
         lines = tt.results_tsv(results).split("\n")
         self.assertEqual(lines[0].split("\t"), [
-            "訂單編號", "姓名", "LINE@連結", "電話", "客戶地址", "原日期", "原時段", "服務時數",
+            "訂單編號", "姓名", "LINE@連結", "電話", "客戶地址", "原日期", "原時段", "服務時數", "原專員",
             "新日期", "新時段", "結果", "說明", "移轉時間",
         ])
-        self.assertEqual(lines[1].split("\t")[:11], [
+        self.assertEqual(lines[1].split("\t")[:12], [
             "LC1", "王小明", "https://chat.line.biz/Uabc/chat/U123", "0912345678", "台北市大安區復興南路一段1號",
-            "2026-10-23", "08:30-12:30", "4", "2027-03-02", "08:30-12:30", "成功",
+            "2026-10-23", "08:30-12:30", "4", "宋芳儀、陳佩琪", "2027-03-02", "08:30-12:30", "成功",
         ])
-        self.assertEqual(lines[2].split("\t")[5:11], ["2026-10-23", "09:00-12:00", "3", "", "", "失敗"])
+        self.assertEqual(lines[2].split("\t")[5:12], ["2026-10-23", "09:00-12:00", "3", "", "", "", "失敗"])
         self.assertEqual(lines[1].split("\t")[-1], "2026-10-23 14:32")
         self.assertEqual(lines[2].split("\t")[-1], "")
 
@@ -257,6 +257,82 @@ class TrackingTests(unittest.TestCase):
         self.assertEqual((rows[1]["目前日期"], rows[1]["目前時段"], rows[1]["付款狀態"]), ("2026-10-30", "14:00-18:00", "已付款"))
         self.assertTrue(rows[2]["狀態"].startswith("查詢失敗"))
         self.assertEqual(tt.tracking_tsv(rows).split("\n")[0].split("\t"), tt.TRACK_HEADERS)
+
+
+class LemonShiftTests(unittest.TestCase):
+    def test_defaults(self):
+        self.assertEqual(tt.parse_lemon_names(tt.DEFAULT_LEMON_NAMES), [f"檸檬人{i}" for i in range(1, 13)])
+        self.assertEqual(tt.DEFAULT_LEMON_SHIFT_TYPES, ["全8", "上4"])
+        self.assertEqual(tt.parse_lemon_names("檸檬人1，檸檬人2、 檸檬人3"), ["檸檬人1", "檸檬人2", "檸檬人3"])
+
+    def test_shift_dates_modes(self):
+        transfer_dates = ["2027-03-01", "2027-03-02"]
+        args = ("2027-02-26", "2027-03-02")
+        self.assertEqual(tt.shift_dates(*args, "與移轉日期相同（依移轉日別）", transfer_dates), transfer_dates)
+        self.assertEqual(tt.shift_dates(*args, "僅平日"), ["2027-02-26", "2027-03-01", "2027-03-02"])
+        self.assertEqual(tt.shift_dates(*args, "僅週末"), ["2027-02-27", "2027-02-28"])
+        self.assertEqual(len(tt.shift_dates(*args, "平日＋週末")), 5)
+
+    def test_assign_uses_shift_tool_with_only_dates(self):
+        from memo_system import memo, shift
+        calls = {}
+
+        def fake_assign(**kwargs):
+            calls.update(kwargs)
+            return {"errors": [], "saved": 1}
+
+        with patch.object(memo, "login", lambda ui_logger=None: "SESSION"), \
+                patch.object(shift, "assign_person_shift_range", fake_assign):
+            tt.assign_lemon_shifts("dev", "a@x", "pw", ["檸檬人1"], ["全8", "上4"], ["2027-03-02", "2027-03-01"])
+        self.assertEqual(memo.BASE_URL.endswith("dev.lemonclean.com.tw"), True)
+        self.assertEqual((calls["session"], calls["date_start"], calls["date_end"]), ("SESSION", "2027-03-01", "2027-03-02"))
+        self.assertEqual(calls["only_dates"], ["2027-03-02", "2027-03-01"])
+        self.assertEqual(calls["type_values"], ["全8", "上4"])
+
+
+class AttentionTests(unittest.TestCase):
+    def test_flags_same_customer_and_lemon_staff(self):
+        rows = [
+            {"order_no": "LC00217516", "name": "柯宗育", "phone": "0911975612", "service_date": "2026-10-28",
+             "period": "14:00-18:00", "staff": "吳珍嫻X魏思遠X胡偉勝"},
+            {"order_no": "LC00217507", "name": "柯宗育", "phone": "0911975612", "service_date": "2026-10-28",
+             "period": "09:00-16:00", "staff": "檸檬人1(0)X檸檬人2(0)"},
+            {"order_no": "LC00217399", "name": "吳昭潔", "phone": "0928989191", "service_date": "2026-10-28",
+             "period": "09:00-12:00", "staff": "李心媛X謝孟諭"},
+        ]
+        notes = tt.attention_notes(rows)
+        self.assertEqual(set(notes), {"LC00217516", "LC00217507"})
+        self.assertIn("同客人 2 筆", notes["LC00217516"])
+        self.assertIn("LC00217507（2026-10-28 09:00-16:00）", notes["LC00217516"])
+        self.assertIn("專員含檸檬人", notes["LC00217507"])
+        self.assertNotIn("專員含檸檬人", notes["LC00217516"])
+
+    def test_same_name_without_phone(self):
+        rows = [{"order_no": "LC1", "name": "王", "phone": "", "staff": ""},
+                {"order_no": "LC2", "name": "王", "phone": "", "staff": ""}]
+        self.assertEqual(set(tt.attention_notes(rows)), {"LC1", "LC2"})
+
+
+class NoticeCopyTests(unittest.TestCase):
+    def test_notice_row_matches_result_first_columns(self):
+        rows = [{"order_no": "LC00217763", "name": "邱秀美",
+                 "line_url": "https://chat.line.biz/U70866032f75cbfed9c32ce87366562ce/chat/Ub6ccb2bade49e71d15f65c4b968721a6",
+                 "phone": "0928244622", "address": "台北市萬華區萬大路344巷22號3樓",
+                 "service_date": "2026-10-28", "period": "09:00-12:00", "staff": "鄭淵涼 X 吳奐"}]
+        self.assertEqual(tt.NOTICE_COPY_HEADERS, tt.RESULT_COPY_HEADERS[:9])
+        lines = tt.notice_tsv(rows).split("\n")
+        self.assertEqual(lines[0].split("\t"), tt.NOTICE_COPY_HEADERS)
+        self.assertEqual(lines[1], "\t".join([
+            "LC00217763", "邱秀美",
+            "https://chat.line.biz/U70866032f75cbfed9c32ce87366562ce/chat/Ub6ccb2bade49e71d15f65c4b968721a6",
+            "0928244622", "台北市萬華區萬大路344巷22號3樓", "2026-10-28", "09:00-12:00", "3", "鄭淵涼、吳奐",
+        ]))
+
+    def test_staff_text_round_trip(self):
+        self.assertEqual(tt.staff_text("宋芳儀(2)X陳佩琪(3)"), "宋芳儀、陳佩琪")
+        self.assertEqual(tt.staff_text("檸檬人2 X 檸檬人11"), "檸檬人2、檸檬人11")
+        self.assertEqual(tt.parse_staff_text("宋芳儀、陳佩琪"), ["宋芳儀", "陳佩琪"])
+        self.assertEqual(tt.parse_staff_text("宋芳儀(2) X 陳佩琪(3)"), ["宋芳儀", "陳佩琪"])
 
 
 if __name__ == "__main__":
