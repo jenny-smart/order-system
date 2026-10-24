@@ -1,113 +1,123 @@
 # -*- coding: utf-8 -*-
-"""訂單批次調班：把執行日期區間的已付款訂單，移到返回日期區間的同時段，並配回原本的專員。
+"""訂單班表記錄與返回：先記錄目前班表，之後可把訂單返回記錄的班表。
 
 供排班要調班時使用（不需 Google 表單，直接查後台）：
-1. 查執行日期區間內的已付款服務訂單（沿用颱風假移轉的查詢），記下每筆原日期／原時段／原專員。
-2. 一筆一筆處理：用「修改日期」移到返回日期區間中第一個選得到同時段的日期，
-   馬上到「排班修改」選回原專員並回查確認姓名，才做下一筆。
-3. 原專員配不回的位置，改配不是其他待調班訂單原專員、也沒被占用的人，避免連鎖錯誤；
-   全部跑完後對專員未全部配回的訂單再補試。
+1. 記錄：查執行日期區間的已付款訂單，記下每筆的日期／時段／專員，存到主控試算表
+   「班表記錄」分頁（每次記錄一個記錄 ID）。
+2. 返回：選一份記錄（可再用返回日期區間篩選記錄的日期），查後台目前狀態後，
+   逐筆用「修改日期」改回記錄的日期／時段，馬上到「排班修改」配回記錄的專員並確認姓名，
+   才做下一筆；配不回的位置不占其他待返回訂單的專員，全部跑完後再補試
+   （沿用颱風假返回原班表的流程）。
 """
 
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+import orders
 from function import typhoon_sheet_sync as tss
 from function import typhoon_transfer as tt
 
 
+SNAPSHOT_SHEET_TITLE = "班表記錄"
+SNAPSHOT_HEADERS = ["記錄ID", "記錄時間", "後台帳號", "執行日期區間", "訂單編號", "姓名", "日期", "時段", "專員"]
+
+
 def rows_from_orders(orders_found):
-    """查詢結果 → 調班用的列（原日期／原時段／原專員）。"""
-    return [
-        {
+    """後台查詢結果 → 記錄用的列（日期／時段／專員）。"""
+    rows = []
+    for index, row in enumerate(orders_found, 1):
+        staff = tt.parse_staff_text(tt.staff_text(row.get("staff", "")))
+        rows.append({
             "row": index,
             "order_no": row["order_no"],
             "name": row.get("name", ""),
-            "phone": row.get("phone", ""),
             "orig_date": row["service_date"],
             "orig_period": row["period"],
-            "orig_staff": tt.parse_staff_text(tt.staff_text(row.get("staff", ""))),
+            "orig_staff": staff,
             "now_date": row["service_date"],
             "now_period": row["period"],
-            "now_staff": tt.parse_staff_text(tt.staff_text(row.get("staff", ""))),
-            "status": "待調班",
-        }
-        for index, row in enumerate(orders_found, 1)
+            "now_staff": list(staff),
+            "status": "已記錄",
+        })
+    return rows
+
+
+# ---------------------------------------------------------
+# 班表記錄（主控試算表「班表記錄」分頁）
+# ---------------------------------------------------------
+
+def _snapshot_worksheet(client=None):
+    client = client or orders.build_gsheet_client()
+    spreadsheet = client.open_by_key(orders.GOOGLE_SHEET_ID)
+    try:
+        worksheet = spreadsheet.worksheet(SNAPSHOT_SHEET_TITLE)
+    except orders.gspread.WorksheetNotFound:
+        worksheet = spreadsheet.add_worksheet(title=SNAPSHOT_SHEET_TITLE, rows=1000, cols=len(SNAPSHOT_HEADERS))
+        worksheet.update(range_name="A1", values=[SNAPSHOT_HEADERS])
+    return worksheet
+
+
+def save_snapshot(account, range_label, rows, client=None):
+    """存一份班表記錄，回傳記錄 ID。"""
+    if not rows:
+        raise ValueError("沒有要記錄的訂單")
+    now = datetime.now(ZoneInfo("Asia/Taipei"))
+    snapshot_id = now.strftime("%Y%m%d-%H%M%S")
+    recorded_at = now.strftime("%Y-%m-%d %H:%M")
+    values = [
+        [snapshot_id, recorded_at, str(account or "").strip(), range_label, r["order_no"], r.get("name", ""),
+         r["orig_date"], r["orig_period"], "、".join(r["orig_staff"])]
+        for r in rows
     ]
+    _snapshot_worksheet(client).append_rows(values, value_input_option="RAW")
+    return snapshot_id
 
 
-def execute_reschedule(env_name, backend_email, backend_password, rows, dates_by_day, progress=None, retry_rounds=2):
-    """依 rows 順序逐筆調班；dates_by_day：{原日期: [候選返回日期...]}。"""
-    session, base_url = tt._login(env_name, backend_email, backend_password)
-    results = {}
-    unfinished = []
+def _snapshot_records(client=None):
+    values = _snapshot_worksheet(client).get_all_values()
+    headers = values[0] if values else SNAPSHOT_HEADERS
+    return [dict(zip(headers, row + [""] * (len(headers) - len(row)))) for row in values[1:] if row and row[0]]
 
-    def reserved_for(row):
-        names = set()
-        for other in rows:
-            if other["order_no"] == row["order_no"]:
-                continue
-            done = results.get(other["order_no"])
-            if done is not None and done["status"] == "已調班並配回原專員":
-                continue
-            names.update(other["orig_staff"])
-        return names
 
-    def assign_and_record(row, result):
-        outcome = tss._assign_original_staff(
-            session, base_url, row["order_no"], result["now_date"], row["orig_period"], row["orig_staff"],
-            reserved=reserved_for(row),
-        )
-        _d, _p, now_staff, _n = tss._order_now(session, row["order_no"])
-        result["now_staff"] = now_staff
-        if outcome["all_original"] and sorted(now_staff) == sorted(row["orig_staff"]):
-            result["status"] = "已調班並配回原專員"
-            result["restored_at"] = tss._now_text()
-            return True
-        if outcome["all_original"]:
-            result["status"] = f"已改日期，但專員是 {'、'.join(now_staff) or '無'}，請到後台確認"
-        else:
-            result["status"] = f"已改日期，專員未全部配回：{outcome['message']}，請手動處理"
-        return False
+def list_snapshots(client=None):
+    """列出所有班表記錄（新的在前）：[{id, recorded_at, account, range, count}]。"""
+    grouped = {}
+    for rec in _snapshot_records(client):
+        item = grouped.setdefault(rec["記錄ID"], {
+            "id": rec["記錄ID"], "recorded_at": rec["記錄時間"], "account": rec["後台帳號"],
+            "range": rec["執行日期區間"], "count": 0,
+        })
+        item["count"] += 1
+    return sorted(grouped.values(), key=lambda x: x["id"], reverse=True)
 
-    for index, row in enumerate(rows, 1):
-        if progress:
-            progress(index, len(rows), row)
-        result = dict(row)
-        results[row["order_no"]] = result
-        try:
-            moved = tt.transfer_one_order(
-                session, base_url, env_name,
-                {"order_no": row["order_no"], "period": row["orig_period"], "phone": row.get("phone", ""),
-                 "person": len(row["orig_staff"]), "service_date_before": row["orig_date"]},
-                dates_by_day.get(row["orig_date"], []),
-            )
-            now_date, now_period, now_staff, _n = tss._order_now(session, row["order_no"])
-            result.update({"now_date": now_date, "now_period": now_period, "now_staff": now_staff})
-            if not moved.get("success"):
-                result["status"] = f"調班失敗：{moved.get('message', '')}"
-                if moved.get("attempts"):
-                    result["status"] += f"（{'；'.join(moved['attempts'])}）"
-                continue
-            if not row["orig_staff"]:
-                result["status"] = "已改日期（原訂單沒有專員，未配專員）"
-                result["restored_at"] = tss._now_text()
-                continue
-            if not assign_and_record(row, result):
-                unfinished.append(row)
-        except Exception as exc:
-            result["status"] = f"調班失敗：{exc}"
 
-    for _round in range(retry_rounds):
-        if not unfinished:
-            break
-        still = []
-        for row in unfinished:
-            try:
-                if not assign_and_record(row, results[row["order_no"]]):
-                    still.append(row)
-            except Exception as exc:
-                results[row["order_no"]]["status"] = f"已改日期，補配專員失敗：{exc}"
-                still.append(row)
-        if len(still) == len(unfinished):
-            break
-        unfinished = still
+def load_snapshot_items(snapshot_id, date_start=None, date_end=None, client=None):
+    """讀一份記錄；有給返回日期區間時，只取記錄日期在區間內的訂單。"""
+    items = []
+    for rec in _snapshot_records(client):
+        if rec["記錄ID"] != snapshot_id:
+            continue
+        day = tt._normalize_date_text(rec["日期"])
+        if date_start and day < str(date_start):
+            continue
+        if date_end and day > str(date_end):
+            continue
+        items.append({
+            "row": len(items) + 1, "order_no": rec["訂單編號"], "name": rec["姓名"],
+            "orig_date": day, "orig_period": rec["時段"], "orig_staff": rec["專員"],
+        })
+    return items
 
-    return [results[r["order_no"]] for r in rows]
+
+def plan_return(env_name, backend_email, backend_password, items, progress=None):
+    """查後台目前狀態，列出要返回記錄班表的訂單；不修改後台。"""
+    rows = tss.plan_restore_items(env_name, backend_email, backend_password, items, progress=progress)
+    names = {i["order_no"]: i.get("name", "") for i in items}
+    for row in rows:
+        row["name"] = row.get("name") or names.get(row["order_no"], "")
+    return rows
+
+
+def execute_return(env_name, backend_email, backend_password, rows, progress=None):
+    """逐筆返回記錄的班表（改回日期／時段並配回專員，避免連鎖錯誤）。"""
+    return tss.execute_restore(env_name, backend_email, backend_password, rows, progress=progress)

@@ -99,7 +99,7 @@ def _render_restore(backend_email, backend_password, env, copy_button=None):
             "列": r["row"], "訂單編號": r["order_no"], "姓名": r.get("name", ""),
             "原日期": r["orig_date"], "原時段": r["orig_period"], "原專員": "、".join(r["orig_staff"]),
             "目前日期": r["now_date"], "目前時段": r["now_period"], "目前專員": "、".join(r["now_staff"]),
-            "狀態": r["status"],
+            "核對": tss.check_mark(r), "狀態": r["status"],
         }
 
     pending = [r for r in rows if r["status"] in tss.RESTORE_PENDING]
@@ -110,7 +110,7 @@ def _render_restore(backend_email, backend_password, env, copy_button=None):
             f"已在原班表 {sum(r['status'] == '已在原班表' for r in rows)} 筆"
         )
     else:
-        done = sum(r["status"] == "已返回原班表" for r in results)
+        done = sum(r["status"].startswith("已返回原班表") for r in results)
         (st.success if done == len(results) else st.warning)(f"返回完成：{done}／{len(results)} 筆已返回原班表，其餘請看狀態")
     st.dataframe(pd.DataFrame([_fmt(r) for r in shown]), hide_index=True, use_container_width=True)
     _copy(copy_button, "複製返回結果（含標題列，貼到 Google Sheets 會自動分欄）" if results is not None

@@ -238,7 +238,7 @@ class RestoreTests(unittest.TestCase):
     def test_plan_statuses(self):
         rows = tss.plan_restore("dev", "a", "b", RESTORE_SETTINGS, client=self.client)
         self.assertEqual([(r["order_no"], r["status"]) for r in rows], [
-            ("LC1", "待返回"), ("LC2", "待配回原專員"), ("LC3", "已在原班表"), ("LC4", "表單缺原專員"),
+            ("LC1", "待返回"), ("LC2", "待配回原專員"), ("LC3", "已在原班表"), ("LC4", "缺原專員"),
         ])
         self.assertEqual(rows[0]["orig_staff"], ["宋芳儀", "陳佩琪"])
 
@@ -277,6 +277,30 @@ class RestoreTests(unittest.TestCase):
         self.assertEqual(cells[:9], ["LC1", "", "2026-10-23", "09:00-12:00", "宋芳儀、陳佩琪",
                                      "2026-10-23", "09:00-12:00", "宋芳儀、陳佩琪", "已返回原班表"])
         self.assertRegex(cells[9], r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$")
+
+    def test_final_check_catches_order_changed_after_it_finished(self):
+        rows = tss.plan_restore("dev", "a", "b", RESTORE_SETTINGS, client=self.client)
+
+        def change_date(session, base_url, order_no, day, period, phone=""):
+            self.state[order_no][0:2] = [day, period]
+            return True, ""
+
+        def assign(session, base_url, order_no, day, period, wanted, reserved=()):
+            self.state[order_no][2] = list(wanted)
+            if order_no == "LC2":
+                self.state["LC1"][2] = ["宋芳儀", "李佩蓉"]  # 處理 LC2 時 LC1 被動到
+            return {"all_original": True, "missing": [], "message": ""}
+
+        with patch.object(tss.tt, "_change_date_options",
+                          lambda *a, **k: {"2026-10-23": {"09:00-12:00": [], "14:00-17:00": []}}), \
+                patch.object(tss.qo, "_update_order_service_date", change_date), \
+                patch.object(tss, "_assign_original_staff", assign):
+            results = tss.execute_restore("dev", "a", "b", rows)
+        self.assertTrue(results[0]["status"].startswith("最後核對不一致"), results[0]["status"])
+        self.assertNotIn("restored_at", results[0])
+        self.assertEqual(tss.check_mark(results[0]), "❌ 不一致")
+        self.assertEqual(results[1]["status"], "已返回原班表")
+        self.assertEqual(tss.check_mark(results[1]), "✅ 一致")
 
     def test_date_not_selectable_is_retried_after_others(self):
         rows = tss.plan_restore("dev", "a", "b", RESTORE_SETTINGS, client=self.client)
@@ -404,6 +428,68 @@ class CascadeSimulationTests(unittest.TestCase):
         # B 不受 A 影響，完整返回
         self.assertEqual(statuses["LCB"], "已返回原班表")
         self.assertEqual(sorted(self.orders["LCB"]["staff"]), ["乙1", "乙2"])
+
+
+class SwapDeadlockTests(unittest.TestCase):
+    """兩組人員同時段對調，且沒有空閒人員：要借檸檬人暫時頂替才能各自換回。"""
+
+    def setUp(self):
+        self.roster = {"甲": "1", "乙": "2"}
+        self.orders = {
+            "LCA": {"date": "2026-10-29", "period": "09:00-12:00", "staff": ["乙"]},
+            "LCB": {"date": "2026-10-29", "period": "09:00-12:00", "staff": ["甲"]},
+        }
+        self.pid = {"A": "LCA", "B": "LCB"}
+        self.lemon_calls = []
+
+    def post(self, url, params=None, data=None, **kwargs):
+        by_id = {v: k for k, v in self.roster.items()}
+        order = self.orders[self.pid[params["purchase_id"]]]
+        ids = [v for k, v in data if k.startswith("shiftId")]
+        order["staff"] = [by_id.get(sid, order["staff"][i]) for i, sid in enumerate(ids)]
+        return type("R", (), {"status_code": 200})()
+
+    def test_swapped_staff_are_restored_with_lemon_placeholder(self):
+        rows = [
+            {"row": 1, "order_no": "LCA", "name": "", "orig_date": "2026-10-29", "orig_period": "09:00-12:00",
+             "orig_staff": ["甲"], "now_date": "2026-10-29", "now_period": "09:00-12:00", "now_staff": ["乙"],
+             "status": "待配回原專員"},
+            {"row": 2, "order_no": "LCB", "name": "", "orig_date": "2026-10-29", "orig_period": "09:00-12:00",
+             "orig_staff": ["乙"], "now_date": "2026-10-29", "now_period": "09:00-12:00", "now_staff": ["甲"],
+             "status": "待配回原專員"},
+        ]
+
+        def order_now(session, no):
+            o = self.orders[no]
+            return o["date"], o["period"], list(o["staff"]), ""
+
+        def edit_info(session, base_url, day, pid):
+            current = [self.roster[n] for n in self.orders[self.pid[pid]]["staff"]]
+            slot = {f"{n} (1)": sid for n, sid in self.roster.items()}
+            return "tok", current, [slot for _ in current]
+
+        def occupied(session, base_url, day, period, exclude_purchase_id=None):
+            me = self.pid[exclude_purchase_id]
+            return {n for no, o in self.orders.items() if no != me for n in o["staff"]}
+
+        def add_lemon(session, base_url, day, period, count):
+            self.lemon_calls.append((day, period))
+            self.roster["檸檬人1"] = "9"
+            return {"assigned": ["檸檬人1"]}
+
+        with patch.object(tss.tt, "_login", lambda *a: (self, "https://x")), \
+                patch.object(tss, "_order_now", order_now), \
+                patch.object(tss.qo, "_fetch_order_edit_id", lambda s, no: {"LCA": "A", "LCB": "B"}[no]), \
+                patch.object(tss.qo, "_get_schedule_edit_info", edit_info), \
+                patch.object(tss.qo, "_get_occupied_staff_for_period", occupied), \
+                patch.object(tss.qo, "ensure_lemon_cleaner_shifts", add_lemon):
+            results = tss.execute_restore("dev", "a", "b", rows)
+        self.assertEqual(self.orders["LCA"]["staff"], ["甲"])
+        self.assertEqual(self.orders["LCB"]["staff"], ["乙"])
+        self.assertTrue(all(r["status"].startswith("已返回原班表") for r in results), [r["status"] for r in results])
+        self.assertTrue(all(tss.check_mark(r) == "✅ 一致" for r in results))
+        self.assertEqual(self.lemon_calls, [("2026-10-29", "09:00-12:00")])
+        self.assertIn("檸檬人1 暫時頂替", results[0]["status"])
 
 
 if __name__ == "__main__":

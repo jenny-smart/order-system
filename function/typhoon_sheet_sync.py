@@ -341,6 +341,12 @@ def plan_restore(env_name, backend_email, backend_password, settings, client=Non
             raise ValueError(f"返回原班表需要設定{label}")
     worksheet = _open_target(settings, client)
     items = read_sheet_orders(worksheet.get_all_values(), settings)
+    return plan_restore_items(env_name, backend_email, backend_password, items, progress=progress)
+
+
+def plan_restore_items(env_name, backend_email, backend_password, items, progress=None):
+    """依 items（row／order_no／orig_date／orig_period／orig_staff）查後台目前狀態，
+    列出要返回的訂單；不修改後台。orig_staff 可為「、」分隔文字或姓名清單。"""
     session, _base_url = tt._login(env_name, backend_email, backend_password)
     rows = []
     for index, item in enumerate(items, 1):
@@ -350,13 +356,14 @@ def plan_restore(env_name, backend_email, backend_password, settings, client=Non
             "row": item["row"], "order_no": item["order_no"], "name": "",
             "orig_date": tt._normalize_date_text(item["orig_date"]) if item["orig_date"] else "",
             "orig_period": tt._compact_period(item["orig_period"]),
-            "orig_staff": tt.parse_staff_text(item["orig_staff"]),
+            "orig_staff": (list(item["orig_staff"]) if isinstance(item["orig_staff"], (list, tuple))
+                           else tt.parse_staff_text(item["orig_staff"])),
             "now_date": "", "now_period": "", "now_staff": [], "status": "",
         }
         if not row["orig_date"] or not row["orig_period"]:
-            row["status"] = "表單缺原日期／原時段"
+            row["status"] = "缺原日期／原時段"
         elif not row["orig_staff"]:
-            row["status"] = "表單缺原專員"
+            row["status"] = "缺原專員"
         else:
             try:
                 row["now_date"], row["now_period"], row["now_staff"], row["name"] = _order_now(session, item["order_no"])
@@ -447,7 +454,7 @@ def _assign_original_staff(session, base_url, order_no, service_date, period, wa
     return {"all_original": not missing, "missing": missing, "message": message}
 
 
-def execute_restore(env_name, backend_email, backend_password, rows, progress=None, retry_rounds=2):
+def execute_restore(env_name, backend_email, backend_password, rows, progress=None, retry_rounds=6):
     """逐筆返回：每一筆先用修改日期改回原日期／原時段，馬上到排班修改配回原專員，才做下一筆。
 
     配不回原專員的位置不留著後台自動配的人（避免占到後面訂單的原專員造成連鎖錯誤）；
@@ -487,6 +494,27 @@ def execute_restore(env_name, backend_email, backend_password, rows, progress=No
         return False
 
     date_failed = []  # 修改日期選不到原日期時段，等其他訂單處理完再試
+    placeholder_tried = set()
+
+    def add_placeholders(stuck_rows):
+        """每個卡住的日期時段補一位暫時頂替的檸檬人（只用當天沒有任何班別的檸檬人）。"""
+        added = False
+        for row in stuck_rows:
+            key = (row["orig_date"], row["orig_period"])
+            if key in placeholder_tried:
+                continue
+            placeholder_tried.add(key)
+            try:
+                shift = qo.ensure_lemon_cleaner_shifts(session, base_url, row["orig_date"], row["orig_period"], "1")
+            except Exception:
+                continue
+            names = shift.get("assigned") or []
+            if names:
+                added = True
+                for other in stuck_rows:
+                    if (other["orig_date"], other["orig_period"]) == key:
+                        results[other["order_no"]]["placeholder"] = "、".join(names)
+        return added
 
     def move_back(row, result):
         """改回原日期並配回原專員；回傳 'done'／'unfinished'／'date_failed'／'stop'。"""
@@ -549,10 +577,46 @@ def execute_restore(env_name, backend_email, backend_password, rows, progress=No
                 results[row["order_no"]]["status"] = f"已改回原日期，補配專員失敗：{exc}"
                 still_unfinished.append(row)
         unfinished, date_failed = still_unfinished, still_date_failed
+        if not progressed and unfinished:
+            # 卡住（例如兩組人員同時段對調、又沒有空閒人員可暫時頂替）：用安全補檸檬人
+            # 找當天沒有任何班別的檸檬人勾這個時段，讓卡住的訂單先換給檸檬人騰出位置
+            progressed = add_placeholders(unfinished)
         if not progressed:
             break
 
+    # 全部跑完後，每一筆再和記錄的日期／時段／專員姓名核對一次
+    for row in pending:
+        result = results[row["order_no"]]
+        try:
+            now_date, now_period, now_staff, _n = _order_now(session, row["order_no"])
+        except Exception as exc:
+            result["status"] = f"{result['status']}（最後核對失敗：{exc}）"
+            continue
+        result.update({"now_date": now_date, "now_period": now_period, "now_staff": now_staff})
+        if result["status"] == "已返回原班表" and not matches_record(result):
+            result["status"] = (
+                f"最後核對不一致：目前 {now_date} {now_period} {'、'.join(now_staff) or '無'}，請到後台確認"
+            )
+            result.pop("restored_at", None)
+        if result.get("placeholder"):
+            result["status"] += (
+                f"（曾借 {result['placeholder']} 暫時頂替，已替其勾 {row['orig_date']} 班別；"
+                "如不需要請到排班管理清除）"
+            )
     return [results[r["order_no"]] for r in pending]
+
+
+def matches_record(row):
+    """目前日期／時段／專員姓名是否和記錄（原）完全一致。"""
+    return (
+        row.get("now_date") == row.get("orig_date")
+        and row.get("now_period") == row.get("orig_period")
+        and sorted(row.get("now_staff") or []) == sorted(row.get("orig_staff") or [])
+    )
+
+
+def check_mark(row):
+    return "✅ 一致" if matches_record(row) else "❌ 不一致"
 
 
 RESTORE_COPY_HEADERS = [
