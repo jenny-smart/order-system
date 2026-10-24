@@ -12,6 +12,10 @@ from function.lemon_staff_replacement import (
     _periods_overlap,
     _staff_name_and_rating,
     analyze_lemon_orders,
+    _get_schedule_context,
+    _gender_from_user_edit,
+    _parse_cleaner_rows,
+    gender_rule_ok,
     build_assignment_plan,
     preferred_gender_label,
     _run_batch_replacements,
@@ -48,12 +52,64 @@ class LemonStaffReplacementTests(unittest.TestCase):
 
     def test_builds_qualified_and_unqualified_lists(self):
         qualified, unqualified = _build_qualification_text(
-            ["王甲", "李乙", "丁丁"],
-            ["王甲", "李乙", "張丙", "丁丁"],
+            ["王甲", "李乙", "丁丁"], ["張丙"], area_id="44", unknown_names=["趙丁（居家專員列表查無此人）"],
         )
         self.assertEqual(qualified, "丁丁、李乙、王甲")
-        self.assertIn("張丙", unqualified)
-        self.assertIn(UNQUALIFIED_REASON, unqualified)
+        self.assertTrue(unqualified.startswith("張丙（詳細資料區域未含區域編號 44）"), unqualified)
+        self.assertIn("無法判定：趙丁", unqualified)
+
+    def test_area_qualification_uses_staff_area_list(self):
+        """LC00217083：地址區域 44；余世烽、劉士誠沒有 44（不符），何亮萱有 44（符合）。"""
+        order = {"order_no": "LC00217083", "service_date": "2026-11-04", "period": "08:30-12:30",
+                 "staff": "王宣婷(5)X檸檬人2(0)", "current_staff": ["王宣婷(5)", "檸檬人2(0)"],
+                 "purchase_id": "217083", "lemon_count": 1, "people_needed": 1}
+        slots = [{"王宣婷(5)": "1"}, {"檸檬人2(0)": "2", "余世烽(5)": "3", "劉士誠(5)": "4", "何亮萱(5)": "5"}]
+        areas = {"余世烽": {"21", "25"}, "劉士誠": {"21", "25", "31"}, "何亮萱": {"21", "44"}}
+        with patch("function.lemon_staff_replacement._get_schedule_edit_info", return_value=("csrf", ["o1", "o2"], slots)), \
+             patch("function.lemon_staff_replacement._order_area_id", return_value="44"), \
+             patch("function.lemon_staff_replacement._staff_profile",
+                   side_effect=lambda _s, _b, name, _c, need_gender=False: {"areas": areas[name], "gender": "", "error": ""}):
+            context = _get_schedule_context(None, "", order)
+        self.assertTrue(context["ok"], context["error"])
+        self.assertEqual(context["candidate_names"], ["何亮萱"])
+        self.assertEqual(context["unqualified_names"], ["余世烽", "劉士誠"])
+        self.assertEqual([r["names"] for r in context["recommendations"]], [["何亮萱"]])
+
+    def test_gender_rule(self):
+        self.assertTrue(gender_rule_ok("1女", ["女", "女"]))
+        self.assertTrue(gender_rule_ok("1女", ["女", "男"]))
+        self.assertFalse(gender_rule_ok("1女", ["男", "男"]))
+        self.assertTrue(gender_rule_ok("限女", ["女", "女"]))
+        self.assertFalse(gender_rule_ok("限女", ["女", "男"]))
+        self.assertFalse(gender_rule_ok("限女", ["女", ""]))  # 讀不到性別不算女生
+        self.assertTrue(gender_rule_ok("1男1女", ["男", "女"]))
+        self.assertTrue(gender_rule_ok("不限", ["", ""]))
+
+    def test_gender_counts_kept_staff(self):
+        """1女：訂單上保留的王宣婷是女生，檸檬人換成男生也符合；限女則只能換女生。"""
+        order = {"order_no": "LC1", "service_date": "2026-11-04", "period": "08:30-12:30",
+                 "current_staff": ["王宣婷(5)", "檸檬人2(0)"], "purchase_id": "1", "lemon_count": 1, "people_needed": 1}
+        slots = [{"王宣婷(5)": "1"}, {"檸檬人2(0)": "2", "男甲(5)": "3", "女乙(4)": "4"}]
+        gender = {"王宣婷": "女", "男甲": "男", "女乙": "女"}
+
+        def run(label):
+            with patch("function.lemon_staff_replacement._get_schedule_edit_info", return_value=("csrf", ["o1", "o2"], slots)), \
+                 patch("function.lemon_staff_replacement._order_area_id", return_value="44"), \
+                 patch("function.lemon_staff_replacement._staff_profile",
+                       side_effect=lambda _s, _b, name, _c, need_gender=False: {"areas": {"44"}, "gender": gender[name], "error": ""}):
+                return _get_schedule_context(None, "", order, gender_label=label)
+
+        self.assertEqual({r["display"] for r in run("1女")["recommendations"]}, {"男甲", "女乙"})
+        self.assertEqual([r["display"] for r in run("限女")["recommendations"]], ["女乙"])
+
+    def test_parses_cleaner_list_and_user_gender(self):
+        html = ('<table><tr><th>區域</th><th>資料</th></tr><tr><td><a>21</a> , <a>25</a> , <a>44</a></td>'
+                '<td>何亮萱<br>居家專員<br>0912000000</td><td>5</td><td><a href="/user/edit/1342">詳細資料</a></td></tr></table>')
+        self.assertEqual(_parse_cleaner_rows(html)["何亮萱"], {"areas": {"21", "25", "44"}, "user_id": "1342"})
+        page = '<input type="radio" name="gender" id="g1" value="1"><label for="g1">男</label>' \
+               '<input type="radio" name="gender" id="g2" value="2" checked><label for="g2">女</label>'
+        self.assertEqual(_gender_from_user_edit(page), "女")
+        self.assertEqual(_gender_from_user_edit("<html></html>"), "")
 
     def test_period_overlap_detects_partial_overlap(self):
         self.assertTrue(_periods_overlap("09:00-12:00", "09:00-11:00"))
@@ -138,7 +194,7 @@ class LemonStaffReplacementTests(unittest.TestCase):
             },
         }
 
-        def fake_schedule_context(_session, _base_url, order, limit=3):
+        def fake_schedule_context(_session, _base_url, order, limit=3, **_kwargs):
             return schedule_contexts[order["purchase_id"]]
 
         def fake_member_context(_session, phone, member_token, member_cache, token_error=""):
@@ -215,7 +271,7 @@ class LemonStaffReplacementTests(unittest.TestCase):
             },
         }
 
-        def fake_schedule_context(_session, _base_url, order, limit=3):
+        def fake_schedule_context(_session, _base_url, order, limit=3, **_kwargs):
             return schedule_contexts[order["purchase_id"]]
 
         def fake_member_context(_session, phone, member_token, member_cache, token_error=""):
@@ -339,12 +395,15 @@ class LemonStaffReplacementTests(unittest.TestCase):
             }
 
         with patch("function.lemon_staff_replacement._get_schedule_edit_info", side_effect=fake_get_schedule_edit_info), \
-             patch("function.lemon_staff_replacement._resolve_member_context", side_effect=fake_member_context):
+             patch("function.lemon_staff_replacement._resolve_member_context", side_effect=fake_member_context), \
+             patch("function.lemon_staff_replacement._order_area_id", return_value="44"), \
+             patch("function.lemon_staff_replacement._staff_profile",
+                   side_effect=lambda *a, **k: {"areas": {"44"}, "gender": "", "error": ""}):
             analyzed = analyze_lemon_orders(None, "", orders, member_token="token")
 
         self.assertEqual(len(analyzed), 2)
         self.assertFalse(analyzed[0]["可批次"])
-        self.assertIn("目前真實班表沒有足夠的正式專員可替換", analyzed[0]["批次狀態"])
+        self.assertIn("符合該地址資格的正式專員不足", analyzed[0]["批次狀態"])
         self.assertTrue(analyzed[1]["可批次"])
         self.assertEqual(analyzed[1]["批次狀態"], "可勾選")
 

@@ -13,6 +13,7 @@ from datetime import date, timedelta
 import pandas as pd
 import requests
 import streamlit as st
+from bs4 import BeautifulSoup
 
 import orders
 from function.ui_common import info_panel, step
@@ -33,7 +34,7 @@ GENDER_LABELS = {
     4: "1男",
     5: "1男1女",
 }
-UNQUALIFIED_REASON = "未出現在後台該地址／日期／時段可換班名單"
+UNQUALIFIED_REASON = "專員詳細資料的區域未含此地址編號"
 
 
 def preferred_gender_label(value) -> str:
@@ -211,6 +212,122 @@ def find_lemon_orders(
             session.close()
 
 
+def _order_area_id(session, base_url: str, order: dict) -> str:
+    """訂單地址的區域編號（訂單修改頁地址下方的編號，例如 44）。"""
+    purchase_id = str(order.get("purchase_id") or "")
+    if not purchase_id:
+        return ""
+    for path in (f"/purchase/change_date/{purchase_id}", f"/purchase/edit/{purchase_id}"):
+        try:
+            resp = session.get(f"{base_url}{path}", headers=orders.HEADERS, allow_redirects=True)
+        except Exception:
+            continue
+        if resp.status_code != 200:
+            continue
+        match = re.search(r'name=["\'](?:area_id|areaId)["\'][^>]*value=["\'](\d+)["\']', resp.text) or \
+            re.search(r'value=["\'](\d+)["\'][^>]*name=["\'](?:area_id|areaId)["\']', resp.text)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def _parse_cleaner_rows(html: str) -> dict[str, dict]:
+    """居家專員列表（/cleaner1）：每列第一欄是區域編號清單，第二欄第一行是姓名。"""
+    rows = {}
+    soup = BeautifulSoup(html or "", "html.parser")
+    for tr in soup.find_all("tr"):
+        cells = tr.find_all("td")
+        if len(cells) < 2:
+            continue
+        lines = [x.strip() for x in cells[1].stripped_strings if x.strip()]
+        if not lines:
+            continue
+        name = re.sub(r"\s+", "", lines[0])
+        user_m = re.search(r"/user/edit/(\d+)", str(tr))
+        rows[name] = {
+            "areas": set(re.findall(r"\d+", cells[0].get_text(" "))),
+            "user_id": user_m.group(1) if user_m else "",
+        }
+    return rows
+
+
+def _gender_from_user_edit(html: str) -> str:
+    """專員詳細資料（/user/edit/{id}）的性別；讀不到回傳空字串。"""
+    soup = BeautifulSoup(html or "", "html.parser")
+    for tag in soup.find_all("input", attrs={"type": "radio"}):
+        name = str(tag.get("name") or "")
+        if not re.search(r"gender|sex|性別", name, re.I) or not tag.has_attr("checked"):
+            continue
+        label = soup.find("label", attrs={"for": tag.get("id")}) if tag.get("id") else None
+        text = (label.get_text(strip=True) if label else "") or \
+            (tag.parent.get_text(strip=True) if tag.parent is not None else "") or str(tag.get("value") or "")
+        if "女" in text:
+            return "女"
+        if "男" in text:
+            return "男"
+    for select in soup.find_all("select"):
+        if not re.search(r"gender|sex|性別", str(select.get("name") or ""), re.I):
+            continue
+        option = select.find("option", selected=True)
+        text = option.get_text(strip=True) if option else ""
+        if "女" in text:
+            return "女"
+        if "男" in text:
+            return "男"
+    return ""
+
+
+def _staff_profile(session, base_url: str, name: str, cache: dict, need_gender: bool = False) -> dict:
+    """查專員的服務區域編號（居家專員列表）與性別（詳細資料）；同一次分析共用 cache。"""
+    name = re.sub(r"\s+", "", str(name or ""))
+    profile = cache.get(name)
+    if profile is None:
+        profile = {"areas": None, "user_id": "", "gender": None, "error": ""}
+        try:
+            resp = session.get(f"{base_url}/cleaner1", params={"area_id": "", "keyword": name},
+                               headers=orders.HEADERS, allow_redirects=True)
+            row = _parse_cleaner_rows(resp.text).get(name) if resp.status_code == 200 else None
+            if row:
+                profile.update(row)
+            else:
+                profile["error"] = "居家專員列表查無此人"
+        except Exception as exc:
+            profile["error"] = f"查詢居家專員失敗：{exc}"
+        cache[name] = profile
+    if need_gender and profile["gender"] is None:
+        profile["gender"] = ""
+        if profile.get("user_id"):
+            try:
+                resp = session.get(f"{base_url}/user/edit/{profile['user_id']}", headers=orders.HEADERS,
+                                   allow_redirects=True)
+                if resp.status_code == 200:
+                    profile["gender"] = _gender_from_user_edit(resp.text)
+            except Exception:
+                pass
+    return profile
+
+
+def gender_rule_ok(label: str, genders: list[str]) -> bool:
+    """喜愛專員性別：限女＝全部女生；1女＝至少 1 位女生（2 女或 1 女 1 男都可以）；男生同理。
+    genders 是整組服務人員（含訂單上保留的正式專員）的性別，讀不到的是空字串。"""
+    label = str(label or "").strip()
+    females = sum(1 for g in genders if g == "女")
+    males = sum(1 for g in genders if g == "男")
+    if label in ("", "不限", "無法取得"):
+        return True
+    if label == "限女":
+        return bool(genders) and females == len(genders)
+    if label == "限男":
+        return bool(genders) and males == len(genders)
+    if label == "1女":
+        return females >= 1
+    if label == "1男":
+        return males >= 1
+    if label == "1男1女":
+        return females >= 1 and males >= 1
+    return True
+
+
 def _lemon_slot_indexes(order: dict, slot_count: int) -> list[int]:
     current_staff = list(order.get("current_staff") or _split_staff(order.get("staff", "")))
     indexes = [i for i, name in enumerate(current_staff) if "檸檬人" in name]
@@ -257,15 +374,23 @@ def _match_names_to_slots(names: list[str], slots: list[dict], target_indexes: l
     return walk(0, set(wanted), {})
 
 
-def _build_candidate_rows_and_names(slots: list[dict], target_indexes: list[int]) -> tuple[list[dict], list[str]]:
+def _available_names(slots: list[dict], target_indexes: list[int]) -> dict[str, float]:
+    """排班修改頁檸檬人槽位可選的正式專員（該日期時段有空）與星等。"""
     candidate_labels = {}
     for index in target_indexes:
         for label in slots[index]:
             name, rating = _staff_name_and_rating(label)
             if name and "檸檬人" not in name:
                 candidate_labels[name] = max(candidate_labels.get(name, 0.0), rating)
+    return candidate_labels
+
+
+def _build_candidate_rows_and_names(slots: list[dict], target_indexes: list[int], allowed_names=None) -> tuple[list[dict], list[str]]:
+    candidate_labels = _available_names(slots, target_indexes)
+    if allowed_names is not None:
+        candidate_labels = {k: v for k, v in candidate_labels.items() if k in set(allowed_names)}
     if len(candidate_labels) < len(target_indexes):
-        raise RuntimeError("目前真實班表沒有足夠的正式專員可替換")
+        raise RuntimeError("目前該日期時段有空、且符合該地址資格的正式專員不足")
     candidate_rows = [
         {"staff_id": name, "name": name, "rating": rating, "available": True}
         for name, rating in sorted(candidate_labels.items(), key=lambda item: (-item[1], item[0]))
@@ -273,14 +398,22 @@ def _build_candidate_rows_and_names(slots: list[dict], target_indexes: list[int]
     return candidate_rows, sorted(candidate_labels)
 
 
-def _build_recommendations(order: dict, slots: list[dict], target_indexes: list[int], limit: int = 3) -> tuple[list[dict], list[str]]:
-    candidate_rows, candidate_names = _build_candidate_rows_and_names(slots, target_indexes)
+def _build_recommendations(order: dict, slots: list[dict], target_indexes: list[int], limit: int = 3,
+                           allowed_names=None, gender_label: str = "", gender_of=None) -> tuple[list[dict], list[str]]:
+    candidate_rows, candidate_names = _build_candidate_rows_and_names(slots, target_indexes, allowed_names)
+    current_staff = list(order.get("current_staff") or _split_staff(order.get("staff", "")))
+    kept = [_staff_name_and_rating(current_staff[i])[0] for i in range(len(current_staff)) if i not in target_indexes]
+    gender_of = gender_of or (lambda _name: "")
+    gender_rejected = 0
     plan_order = dict(order)
     plan_order["people_needed"] = len(target_indexes)
     ranked = build_assignment_plan(plan_order, candidate_rows, limit=max(40, int(limit) * 10))
     recommendations = []
     for result in ranked:
         names = [member.name for member in result.staff]
+        if not gender_rule_ok(gender_label, [gender_of(n) for n in kept + names]):
+            gender_rejected += 1
+            continue
         assignment = _match_names_to_slots(names, slots, target_indexes)
         if not assignment:
             continue
@@ -296,6 +429,8 @@ def _build_recommendations(order: dict, slots: list[dict], target_indexes: list[
         if len(recommendations) >= max(1, int(limit)):
             break
     if not recommendations:
+        if gender_rejected:
+            raise RuntimeError(f"沒有符合喜愛專員性別「{gender_label}」的組合（含訂單上保留的專員一起判斷）")
         raise RuntimeError("班表雖有候選人，但沒有符合『組合平均星等至少 4 分』及槽位限制的組合")
     return recommendations, candidate_names
 
@@ -330,7 +465,8 @@ def _batch_entry_conflicts(left: dict, right: dict) -> bool:
     return bool(set(left.get("selected_names") or []) & set(right.get("selected_names") or []))
 
 
-def _get_schedule_context(session, base_url: str, order: dict, limit: int = 3) -> dict:
+def _get_schedule_context(session, base_url: str, order: dict, limit: int = 3, gender_label: str = "",
+                          staff_cache: dict | None = None) -> dict:
     try:
         csrf, origin_ids, slots = _get_schedule_edit_info(
             session, base_url, order["service_date"], order["purchase_id"]
@@ -371,15 +507,42 @@ def _get_schedule_context(session, base_url: str, order: dict, limit: int = 3) -
             "csrf": csrf,
             "origin_ids": origin_ids,
         }
+    staff_cache = {} if staff_cache is None else staff_cache
+    area_id = ""
+    qualified_names: list[str] = []
+    unqualified_names: list[str] = []
+    unknown_names: list[str] = []
     try:
         target_indexes = _lemon_slot_indexes(order, len(slots))
-        recommendations, candidate_names = _build_recommendations(order, slots, target_indexes, limit=limit)
+        area_id = _order_area_id(session, base_url, order)
+        if not area_id:
+            raise RuntimeError("讀不到訂單地址的區域編號（訂單修改頁地址下方），無法判斷專員地址資格")
+        for name in sorted(_available_names(slots, target_indexes)):
+            profile = _staff_profile(session, base_url, name, staff_cache)
+            if profile.get("areas") is None:
+                unknown_names.append(f"{name}（{profile.get('error') or '查不到區域'}）")
+            elif area_id in profile["areas"]:
+                qualified_names.append(name)
+            else:
+                unqualified_names.append(name)
+        need_gender = str(gender_label or "").strip() not in ("", "不限", "無法取得")
+
+        def gender_of(name):
+            return _staff_profile(session, base_url, name, staff_cache, need_gender=True).get("gender") or "" if need_gender else ""
+
+        recommendations, candidate_names = _build_recommendations(
+            order, slots, target_indexes, limit=limit, allowed_names=qualified_names,
+            gender_label=gender_label, gender_of=gender_of,
+        )
     except Exception as exc:
         return {
             "ok": False,
             "error": f"班表解析/推薦失敗：{exc}",
             "recommendations": [],
-            "candidate_names": [],
+            "candidate_names": qualified_names,
+            "unqualified_names": unqualified_names,
+            "unknown_names": unknown_names,
+            "area_id": area_id,
             "candidate_count": 0,
             "slots": slots,
             "target_indexes": [],
@@ -391,6 +554,9 @@ def _get_schedule_context(session, base_url: str, order: dict, limit: int = 3) -
         "error": "",
         "recommendations": recommendations,
         "candidate_names": candidate_names,
+        "unqualified_names": unqualified_names,
+        "unknown_names": unknown_names,
+        "area_id": area_id,
         "candidate_count": len(candidate_names),
         "slots": slots,
         "target_indexes": target_indexes,
@@ -464,31 +630,30 @@ def _resolve_member_context(session, phone: str, member_token: str, member_cache
     return payload
 
 
-def _build_qualification_text(candidate_names: list[str], roster_names: list[str], schedule_error: str = "", member_error: str = "") -> tuple[str, str]:
+def _build_qualification_text(candidate_names: list[str], unqualified_names: list[str], schedule_error: str = "",
+                               member_error: str = "", area_id: str = "", unknown_names: list[str] | None = None) -> tuple[str, str]:
+    """符合＝該日期時段有空、且詳細資料區域含此地址編號；未符合＝有空但區域未含此編號。"""
     qualified_list = sorted(dict.fromkeys(str(x) for x in candidate_names if str(x)))
-    roster_list = sorted(dict.fromkeys(str(x) for x in roster_names if str(x)))
-    candidate_set = set(qualified_list)
+    unqualified_list = sorted(dict.fromkeys(str(x) for x in unqualified_names if str(x)))
+    area_note = f"區域編號 {area_id}" if area_id else "此地址區域編號"
 
-    if schedule_error:
-        qualified_text = f"無法判定：{schedule_error}"
-    elif qualified_list:
+    if qualified_list:
         qualified_text = "、".join(qualified_list)
         if member_error:
-            qualified_text += "（會員資料缺失，僅供候選，不列為完整合格名單）"
+            qualified_text += "（會員資料缺失，喜愛專員性別未判斷）"
+    elif schedule_error and not area_id:
+        qualified_text = f"無法判定：{schedule_error}"
     else:
         qualified_text = "無"
 
-    if member_error:
-        unqualified_text = f"無法判定：{member_error}"
-    elif schedule_error:
+    if unqualified_list:
+        unqualified_text = "、".join(unqualified_list) + f"（詳細資料區域未含{area_note}）"
+    elif schedule_error and not area_id:
         unqualified_text = f"無法判定：{schedule_error}"
     else:
-        unqualified_list = [name for name in roster_list if name not in candidate_set]
-        if unqualified_list:
-            unqualified_text = "、".join(unqualified_list) + f"（{UNQUALIFIED_REASON}）"
-        else:
-            unqualified_text = "無"
-
+        unqualified_text = "無"
+    if unknown_names:
+        unqualified_text += "；無法判定：" + "、".join(unknown_names)
     return qualified_text, unqualified_text
 
 
@@ -501,23 +666,31 @@ def analyze_lemon_orders(
     limit: int = 3,
 ) -> list[dict]:
     member_cache: dict[str, dict] = {}
+    staff_cache: dict[str, dict] = {}
     analyzed: list[dict] = []
     for order in found_orders or []:
         row = dict(order)
-        schedule_context = _get_schedule_context(session, base_url, order, limit=limit)
         member_context = _resolve_member_context(session, order.get("phone", ""), member_token, member_cache, token_error=token_error)
+        schedule_context = _get_schedule_context(
+            session, base_url, order, limit=limit,
+            gender_label=member_context.get("preferred_gender_label", "") if member_context.get("ok") else "",
+            staff_cache=staff_cache,
+        )
 
         qualified_text, unqualified_text = _build_qualification_text(
             schedule_context.get("candidate_names", []),
-            member_context.get("roster_names", []),
+            schedule_context.get("unqualified_names", []),
             schedule_error=schedule_context.get("error", ""),
             member_error=member_context.get("error", ""),
+            area_id=schedule_context.get("area_id", ""),
+            unknown_names=schedule_context.get("unknown_names", []),
         )
 
         row.update(
             {
                 "member_id": member_context.get("member_id", ""),
                 "喜愛專員性別": member_context.get("preferred_gender_label", "無法取得"),
+                "地址區域編號": schedule_context.get("area_id", ""),
                 "會員狀態": member_context.get("error", "") or "OK",
                 "班表狀態": schedule_context.get("error", "") or "OK",
                 "符合該地址資格人員": qualified_text,
@@ -607,7 +780,8 @@ def load_recommendations(env: str, email: str, password: str, order: dict, limit
         if base_url is None:
             base_url = apply_env(orders, env)
     try:
-        context = _get_schedule_context(session, base_url, order, limit=limit)
+        context = _get_schedule_context(session, base_url, order, limit=limit,
+                                        gender_label=str(order.get("喜愛專員性別") or ""))
         if not context.get("ok"):
             raise RuntimeError(context.get("error") or "無法讀取後台換班頁，可能此訂單沒有可編輯的班表")
         return {
@@ -714,6 +888,7 @@ def _build_batch_display_df(analyzed_orders: list[dict]) -> pd.DataFrame:
                 "姓名": item.get("name", ""),
                 "電話": item.get("phone", ""),
                 "地址": item.get("address", ""),
+                "地址區域編號": item.get("地址區域編號", ""),
                 "目前服務人員": item.get("staff", ""),
                 "喜愛專員性別": item.get("喜愛專員性別", ""),
                 "符合該地址資格人員": item.get("符合該地址資格人員", ""),
@@ -853,7 +1028,9 @@ def render(backend_email: str, backend_password: str, env: str) -> None:
         "操作流程",
         [
             "依服務日期搜尋含『檸檬人』的訂單；適用一般單與保留單。",
-            "搜尋後會一次抓出每筆訂單的真實 schedule/edit 可換班候選，並同步讀取會員編輯頁的喜愛專員性別與 roster。",
+            "搜尋後讀取每筆訂單地址的區域編號（訂單修改頁地址下方），以及排班修改頁該時段有空的正式專員。",
+            "符合該地址資格＝居家專員詳細資料的區域含此編號；只從符合資格且有空的人裡推薦。",
+            "喜愛專員性別連同訂單上保留的專員一起判斷：限女＝全部女生、1女＝至少 1 位女生（男生同理）。",
             "表格會先自動套用同日同時段不衝突的 Top1~Top3 預設方案，讓你可直接批次勾選處理。",
             "按下批次寫入前仍需手動勾選確認；每筆送出前都會重新讀取後台，候選人若失效會停止該筆。",
         ],
@@ -911,6 +1088,7 @@ def render(backend_email: str, backend_password: str, env: str) -> None:
                     "姓名": x.get("name", ""),
                     "電話": x.get("phone", ""),
                     "地址": x.get("address", ""),
+                    "地址區域編號": x.get("地址區域編號", ""),
                     "目前服務人員": x.get("staff", ""),
                     "喜愛專員性別": x.get("喜愛專員性別", ""),
                     "符合該地址資格人員": x.get("符合該地址資格人員", ""),
@@ -968,6 +1146,7 @@ def render(backend_email: str, backend_password: str, env: str) -> None:
                 {
                     "批次狀態": detail_row.get("批次狀態", ""),
                     "喜愛專員性別": detail_row.get("喜愛專員性別", ""),
+                    "地址區域編號": detail_row.get("地址區域編號", ""),
                     "符合該地址資格人員": detail_row.get("符合該地址資格人員", ""),
                     "未符合資格人員": detail_row.get("未符合資格人員", ""),
                 }
