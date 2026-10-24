@@ -516,6 +516,30 @@ def execute_restore(env_name, backend_email, backend_password, rows, progress=No
                         results[other["order_no"]]["placeholder"] = "、".join(names)
         return added
 
+    opened_tried = set()
+
+    def open_lemon_slots(stuck_rows):
+        """修改日期選不到原日期時段（當天該時段沒有空的人）：比照手動做法，先替檸檬人勾原日期
+        班別（人數＝原專員人數，只用當天沒有任何班別的檸檬人），讓訂單能先改回原日期、
+        暫配檸檬人，再到排班修改換回原專員。"""
+        added = False
+        for row in stuck_rows:
+            key = (row["orig_date"], row["orig_period"], row["order_no"])
+            if key in opened_tried:
+                continue
+            opened_tried.add(key)
+            try:
+                shift = qo.ensure_lemon_cleaner_shifts(
+                    session, base_url, row["orig_date"], row["orig_period"], str(max(1, len(row["orig_staff"]))),
+                )
+            except Exception:
+                continue
+            names = shift.get("assigned") or []
+            if names:
+                added = True
+                results[row["order_no"]]["lemon_opened"] = "、".join(names)
+        return added
+
     def move_back(row, result):
         """改回原日期並配回原專員；回傳 'done'／'unfinished'／'date_failed'／'stop'。"""
         now_date, now_period, _staff, _name = _order_now(session, row["order_no"])
@@ -577,6 +601,8 @@ def execute_restore(env_name, backend_email, backend_password, rows, progress=No
                 results[row["order_no"]]["status"] = f"已改回原日期，補配專員失敗：{exc}"
                 still_unfinished.append(row)
         unfinished, date_failed = still_unfinished, still_date_failed
+        if date_failed and open_lemon_slots(date_failed):
+            progressed = True
         if not progressed and unfinished:
             # 卡住（例如兩組人員同時段對調、又沒有空閒人員可暫時頂替）：用安全補檸檬人
             # 找當天沒有任何班別的檸檬人勾這個時段，讓卡住的訂單先換給檸檬人騰出位置
@@ -598,6 +624,11 @@ def execute_restore(env_name, backend_email, backend_password, rows, progress=No
                 f"最後核對不一致：目前 {now_date} {now_period} {'、'.join(now_staff) or '無'}，請到後台確認"
             )
             result.pop("restored_at", None)
+        if result.get("lemon_opened"):
+            result["status"] += (
+                f"（原日期時段沒有空的人，已先替 {result['lemon_opened']} 勾 {row['orig_date']} 班別讓訂單改回原日期；"
+                "如不需要請到排班管理清除）"
+            )
         if result.get("placeholder"):
             result["status"] += (
                 f"（曾借 {result['placeholder']} 暫時頂替，已替其勾 {row['orig_date']} 班別；"

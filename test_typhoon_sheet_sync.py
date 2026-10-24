@@ -328,11 +328,45 @@ class RestoreTests(unittest.TestCase):
 
     def test_execute_stops_when_original_date_not_selectable(self):
         rows = tss.plan_restore("dev", "a", "b", RESTORE_SETTINGS, client=self.client)
+        lemon_calls = []
         with patch.object(tss.tt, "_change_date_options", lambda *a, **k: {}), \
                 patch.object(tss.qo, "_update_order_service_date", lambda *a, **k: self.fail("不應送出")), \
+                patch.object(tss.qo, "ensure_lemon_cleaner_shifts",
+                             lambda *a: lemon_calls.append(a[2:]) or {"assigned": []}), \
                 patch.object(tss, "_assign_original_staff", lambda *a, **k: {"all_original": True, "missing": [], "message": ""}):
             results = tss.execute_restore("dev", "a", "b", rows[:1])
         self.assertTrue(results[0]["status"].startswith("返回失敗：修改日期選不到"))
+        self.assertEqual(len(lemon_calls), 1)  # 試過先勾檸檬人，仍選不到才停
+
+    def test_lemon_shifts_opened_when_original_slot_full(self):
+        rows = tss.plan_restore("dev", "a", "b", RESTORE_SETTINGS, client=self.client)
+        opened = []
+
+        def options(*a, **k):
+            # 原日期時段要先替檸檬人勾班才選得到
+            return {"2026-10-23": {"09:00-12:00": [], "14:00-17:00": []}} if opened else {}
+
+        def add_lemon(session, base_url, day, period, count):
+            opened.append((day, period, count))
+            return {"assigned": [f"檸檬人{i}" for i in range(1, int(count) + 1)]}
+
+        def change_date(session, base_url, order_no, day, period, phone=""):
+            self.state[order_no][0:2] = [day, period]
+            return True, ""
+
+        def assign(session, base_url, order_no, day, period, wanted, reserved=()):
+            self.state[order_no][2] = list(wanted)
+            return {"all_original": True, "missing": [], "message": ""}
+
+        with patch.object(tss.tt, "_change_date_options", options), \
+                patch.object(tss.qo, "ensure_lemon_cleaner_shifts", add_lemon), \
+                patch.object(tss.qo, "_update_order_service_date", change_date), \
+                patch.object(tss, "_assign_original_staff", assign):
+            results = tss.execute_restore("dev", "a", "b", rows[:1])
+        self.assertTrue(results[0]["status"].startswith("已返回原班表"), results[0]["status"])
+        self.assertEqual(opened, [(rows[0]["orig_date"], rows[0]["orig_period"], str(len(rows[0]["orig_staff"])))])
+        self.assertIn("檸檬人1", results[0]["status"])
+        self.assertEqual(tss.check_mark(results[0]), "✅ 一致")
 
     def test_assign_original_staff_picks_names_on_schedule_edit(self):
         slots = [{"宋芳儀\n (2)": "11", "李佩蓉 (4)": "12"}, {"陳佩琪 (3)": "21", "宋芳儀 (2)": "11"}]
