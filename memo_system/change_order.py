@@ -172,6 +172,7 @@ TAIWAN_PUBLIC_HOLIDAYS = {
     date(2026, 6, 19),
     date(2026, 9, 25),
     date(2026, 10, 10),
+    date(2026, 10, 26),  # 光復節（10/25 週日）補假
     date(2026, 12, 25),
 }
 
@@ -473,6 +474,33 @@ def _change_processing_date(notified_at: Union[date, datetime] = None) -> date:
     return processing_date
 
 
+_WEEKDAY_LABELS = "一二三四五六日"
+
+
+def _md_label(d: date) -> str:
+    return f"{d.month}/{d.day}({_WEEKDAY_LABELS[d.weekday()]})"
+
+
+def change_date_text(notified_at: Union[date, datetime] = None) -> str:
+    """J 欄／計算依據開頭的異動日期，例：「10/25(日)異動，順延至10/27(二)處理」。
+
+    超過 17:30 或非工作日通知時，註明順延後的處理日，避免看不出為何算成服務當天異動。
+    """
+    notified_at = notified_at if notified_at is not None else datetime.now(ZoneInfo("Asia/Taipei"))
+    if isinstance(notified_at, datetime) and notified_at.tzinfo is not None:
+        notified_at = notified_at.astimezone(ZoneInfo("Asia/Taipei"))
+    notified_date = notified_at.date() if isinstance(notified_at, datetime) else notified_at
+    processing = _change_processing_date(notified_at)
+    text = f"{_md_label(notified_date)}異動"
+    if processing != notified_date:
+        text += f"，順延至{_md_label(processing)}處理"
+    return text
+
+
+def _with_change_date(text: str, today: Union[date, datetime] = None) -> str:
+    return f"{change_date_text(today)}：{text}"
+
+
 def _count_workdays_before(service_date: date, today: Union[date, datetime] = None) -> int:
     """
     計算通知日到服務日前一日之間還剩幾個工作天（不含服務日）。
@@ -769,8 +797,10 @@ def _format_hours(hours) -> str:
 
 
 def _format_change_fee_j(order: dict, change_fee_info: dict) -> str:
-    """依客戶付款型態產生 J 欄異動費文案。"""
+    """依客戶付款型態產生 J 欄異動費文案（開頭加上異動日期）。"""
     timing = _change_timing_label(change_fee_info)
+    if change_fee_info.get("change_date_text"):
+        timing = f"{change_fee_info['change_date_text']}：{timing}"
     amount = _format_money(change_fee_info.get("change_fee"))
     if change_fee_info.get("tier") == "free":
         return f"{timing}，免收異動費${amount}"
@@ -810,7 +840,8 @@ def calc_change_fee(order: dict, service_date: date, change_person: int = None,
     else:
         tier = "far"   # near=服務前0-1工作天, far=服務前2-3工作天, free=4工作天以上
 
-    workday_note = _workday_note({"workdays": workdays})
+    date_text = change_date_text(today)
+    workday_note = f"{date_text}：{_workday_note({'workdays': workdays})}"
 
     if pricing_tier(order) == "vip":
         hours = order.get("service_hours", 0)
@@ -859,6 +890,7 @@ def calc_change_fee(order: dict, service_date: date, change_person: int = None,
         "rate_amount": rate_amount,
         "rate_percent": rate_percent,
         "calc_note": calc_note,
+        "change_date_text": date_text,
     }
 
 
@@ -1048,7 +1080,7 @@ def build_addtime_row(order: dict, time_fee_info: dict, service_note: str,
     """加時 → 異動服務收款（Sheet 狀態：待收款；後台欄位：待加收）"""
     i_value = _format_service_datetime(service_date, order.get("period_text", ""))
     timing = _time_change_timing_label(service_date, today=today)
-    j_value = _format_people_hours_fee_j(f"{timing}加時", "待收", time_fee_info)
+    j_value = _with_change_date(_format_people_hours_fee_j(f"{timing}加時", "待收", time_fee_info), today)
     return {
         "A": "清潔", "B": _pending_status_for_order(order, "charge"), "C": TYPE_CHARGE,
         "D": order.get("line_url", ""),
@@ -1069,7 +1101,7 @@ def build_reducetime_row(order: dict, time_fee_info: dict, service_note: str,
     """減時 → 異動服務退款（待退款），其餘欄位結構同異動待退款"""
     i_value = _format_service_datetime(service_date, order.get("period_text", ""))
     timing = _time_change_timing_label(service_date, today=today)
-    j_value = _format_people_hours_fee_j(f"{timing}減時", "待退", time_fee_info)
+    j_value = _with_change_date(_format_people_hours_fee_j(f"{timing}減時", "待退", time_fee_info), today)
     return {
         "A": "清潔", "B": _pending_status_for_order(order, "refund"), "C": TYPE_REFUND,
         "D": order.get("line_url", ""),
@@ -1092,7 +1124,7 @@ def build_weekday_to_weekend_row(order: dict, time_fee_info: dict, service_note:
                                   today: date = None) -> dict:
     """異動平日轉週末 → Sheet 狀態待收款，每人時差額 $100。"""
     i_value = _format_service_datetime(service_date, order.get("period_text", ""))
-    j_value = _format_people_hours_fee_j("異動平日轉週末", "待收", time_fee_info)
+    j_value = _with_change_date(_format_people_hours_fee_j("異動平日轉週末", "待收", time_fee_info), today)
     return {
         "A": "清潔", "B": _pending_status_for_order(order, "charge"), "C": TYPE_CHARGE,
         "D": order.get("line_url", ""),
@@ -1112,7 +1144,7 @@ def build_weekend_to_weekday_row(order: dict, time_fee_info: dict, service_note:
                                   today: date = None) -> dict:
     """異動週末轉平日 → 待退款，每人時差額 $100。"""
     i_value = _format_service_datetime(service_date, order.get("period_text", ""))
-    j_value = _format_people_hours_fee_j("異動週末轉平日", "待退", time_fee_info)
+    j_value = _with_change_date(_format_people_hours_fee_j("異動週末轉平日", "待退", time_fee_info), today)
     return {
         "A": "清潔", "B": _pending_status_for_order(order, "refund"), "C": TYPE_REFUND,
         "D": order.get("line_url", ""),
@@ -1143,10 +1175,11 @@ def build_manual_refund_row(order: dict, amount, refund_type_label: str, service
     """
     amount = round(amount or 0)
     i_value = _format_service_datetime(service_date, order.get("period_text", ""))
-    j_value = (
+    j_value = _with_change_date(
         f"{refund_type_label}，{service_note}，退費 ${amount}"
         if service_note else
-        f"{refund_type_label}，退費 ${amount}"
+        f"{refund_type_label}，退費 ${amount}",
+        today,
     )
     return {
         "A": "清潔", "B": _pending_status_for_order(order, "refund"), "C": refund_type_label,

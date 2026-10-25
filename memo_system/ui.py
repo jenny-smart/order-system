@@ -1455,7 +1455,8 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
             "billing_units": None, "rate_amount": None, "rate_percent": rate_percent,
             "service_amount": service_amount, "travel_fee": travel_fee,
             "refund_amount": refund_amount,
-            "calc_note": (f"服務前{workdays}個工作天異動，退款情境收 {rate_percent}% 異動費："
+            "calc_note": (f"{info.get('change_date_text') or change_order.change_date_text()}："
+                          f"服務前{workdays}個工作天異動，退款情境收 {rate_percent}% 異動費："
                           f"總金額{total} - 車馬費{travel_fee} = 服務費{service_amount}；"
                           f"服務費{service_amount} × {rate_percent}% = 異動費${change_fee}；退款${refund_amount}"),
         })
@@ -1470,6 +1471,8 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
             row["J"] = f"服務前{workdays}個工作天異動，收{rate_percent}%異動費${change_fee}，退款${refund_amount}"
         else:
             row["J"] = f"服務前{workdays}個工作天異動，收異動費${change_fee}，退款${refund_amount}"
+        date_text = (fee_info or {}).get("change_date_text") or change_order.change_date_text()
+        row["J"] = f"{date_text}：{row['J']}"
         return row
 
     def render_calc_amount_html(row):
