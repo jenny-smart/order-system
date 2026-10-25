@@ -40,3 +40,19 @@ def test_web_click_logs_start_success_and_errors():
         st.success("不重複記")
     assert [c.kwargs["status"] for c in write.call_args_list] == ["執行", "成功"]
     assert write.call_args_list[0].kwargs["function"] == "批次成單／執行"
+
+
+def test_write_runs_in_background_thread_without_blocking():
+    started = []
+
+    class FakeThread:
+        def __init__(self, target, args, name, daemon):
+            started.append((target, args, daemon))
+
+        def start(self):
+            pass
+
+    with patch.object(unified_log.threading, "Thread", FakeThread):
+        unified_log.write(function="按鈕", status="執行")
+    assert len(started) == 1 and started[0][2] is False  # 非 daemon：命令列結束前會寫完
+    assert started[0][1][2][2] == "按鈕"  # 時間與內容在呼叫當下就組好

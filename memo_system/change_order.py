@@ -592,6 +592,33 @@ def _parse_order_row(row) -> dict:
     }
 
 
+def _schedule_slot_count(session: requests.Session, order: dict) -> int:
+    """排班修改頁（/schedule/edit）的人員位置數＝訂單人數；尚未配班或只有檸檬人時也有位置。"""
+    purchase_id = str(order.get("purchase_id") or "")
+    service_date = order.get("service_date")
+    if not purchase_id or not service_date:
+        return 0
+    date_text = service_date.strftime("%Y-%m-%d") if hasattr(service_date, "strftime") else str(service_date)
+    try:
+        resp = session.get(f"{BASE_URL}/schedule/edit", params={"date": date_text, "purchase_id": purchase_id}, timeout=20)
+    except Exception:
+        return 0
+    if resp.status_code != 200:
+        return 0
+    return len(re.findall(r'name=["\']originShiftId\[\]["\']', resp.text or ""))
+
+
+def _fill_cleaner_count(order: dict, session: requests.Session, log=None) -> dict:
+    """訂單列表的人數是數專員連結；沒有連結（未配班、檸檬人）時改讀排班修改頁的人員位置數。"""
+    if order and not order.get("cleaner_count"):
+        count = _schedule_slot_count(session, order)
+        if count:
+            order["cleaner_count"] = count
+            if log:
+                log(f"ℹ️ {order.get('order_no')} 訂單列表沒有專員連結，改用排班修改頁人員位置數：{count} 人")
+    return order
+
+
 def fetch_order_basic(keyword: str, session: requests.Session, ui_logger=None, by="orderNo"):
     """
     依電話或訂單編號查詢 /purchase，回傳該訂單基本資料 dict（取第一筆符合的列）。
@@ -617,6 +644,7 @@ def fetch_order_basic(keyword: str, session: requests.Session, ui_logger=None, b
     if not result:
         log("⚠️ 查無資料")
         return None
+    _fill_cleaner_count(result, session, log)
 
     log(f"✅ 查到訂單 {result['order_no']}，總金額 {result['total']}，"
         f"{result['cleaner_count']} 人，{result['period_text']}")
@@ -675,6 +703,8 @@ def fetch_upcoming_paid_orders_by_phone(phone: str, session: requests.Session, u
         log("⚠️ 查無「已付款」且有服務日期的訂單")
         return []
 
+    for order in result:
+        _fill_cleaner_count(order, session, log)
     log(f"✅ 找到 {len(result)} 筆已付款可異動訂單（含未服務與近 2 場已服務）")
     return result
 

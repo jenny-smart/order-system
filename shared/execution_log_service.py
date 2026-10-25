@@ -8,6 +8,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import threading
 import traceback as _traceback_module
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -83,26 +84,28 @@ def log_execution(
         unified_message = f"{unified_message}\n{traceback_text}".strip()
     unified_log.write(function=function_name, run_type=run_type, area=area, period=date, target=target,
                       status=_normalize_status(status), message=unified_message)
+    row = [
+        _now_tw(),
+        str(function_name or ""),
+        str(run_type or ""),
+        str(area or ""),
+        str(date or ""),
+        str(target or ""),
+        _normalize_status(status),
+        unified_message,
+    ]
+    # 在背景執行緒寫入，不讓畫面等 Google Sheets（非 daemon：命令列結束前會寫完）。
+    try:
+        threading.Thread(target=_append_row, args=(row,), name="execution-log", daemon=False).start()
+    except Exception:
+        _append_row(row)
+
+
+def _append_row(row: list) -> None:
     try:
         client = build_gsheet_client()
         _ensure_sheet(client)
         ws = client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
-
-        result = _normalize_status(status)
-        msg = str(message or "")
-        if traceback_text:
-            msg = f"{msg}\n{traceback_text}".strip()
-
-        row = [
-            _now_tw(),
-            str(function_name or ""),
-            str(run_type or ""),
-            str(area or ""),
-            str(date or ""),
-            str(target or ""),
-            result,
-            msg,
-        ]
         ws.append_row(row, value_input_option="USER_ENTERED", insert_data_option="INSERT_ROWS")
     except Exception as e:
         print(f"[execution_log_service] 寫入執行 Log 失敗（不影響主流程）: {e}")
