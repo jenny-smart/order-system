@@ -78,6 +78,7 @@ COL_BANK_INCOME = 5     # E
 COL_BANK_NOTE = 6       # F
 COL_CUSTOMER_NAME = 11  # K
 COL_ORDER_AMOUNT = 12   # L
+COL_STATUS_NOTE = 13    # M
 COL_RECONCILED_AT = 16  # P
 COL_PAID_AT = 17        # Q
 COL_INVOICE_NO = 18     # R
@@ -108,7 +109,7 @@ def today_tw() -> _date:
     return datetime.now(ZoneInfo("Asia/Taipei")).date()
 
 
-def default_date_until_tw(days_back: int = 1) -> str:
+def default_date_until_tw(days_back: int = 0) -> str:
     """
     v2026-07-07 新增：查詢 ATM 待付款清單時，UI 預設帶入的「訂購日期迄」
     （通常是「前一天」）要用這個函式算，不要用 date.today() - timedelta(...)。
@@ -489,6 +490,13 @@ def process_atm_rows(
             payway = str(purchase.get("payway") or "").strip()
             if payway != "2":
                 raise ValueError(f"訂單 {order_no} 付款方式不是 ATM（後台 payway={payway or '空白'}）")
+            raw_status = purchase.get("purchase_status")
+            status_code = "" if raw_status is None else str(raw_status).strip()
+            if status_code in {"2", "3"}:
+                status_name = "取消訂單" if status_code == "2" else "已退款"
+                raise ValueError(f"訂單 {order_no} 後台狀態為「{status_name}」，禁止歸入對帳或重新標記已付款")
+            if status_code not in {"0", "1"}:
+                raise ValueError(f"訂單 {order_no} 後台付款狀態無法確認，已停止對帳")
             log(f"找到 purchase_id={purchase_id}")
 
             updates = []
@@ -538,6 +546,8 @@ def process_atm_rows(
 
             paid_at = str(purchase.get("paid_at") or "").strip()
             invoice_no = str(purchase.get("invoice_no") or "").strip()
+            if str(purchase.get("purchase_status") or "").strip() != "1" or not paid_at:
+                raise ValueError(f"訂單 {order_no} 最終狀態並非已付款，禁止寫回對帳完成")
 
             updates.append((COL_RECONCILED_AT, _now_text()))
             if paid_at:
@@ -1115,10 +1125,17 @@ def search_atm_unpaid_orders(session, date_until: Optional[str] = None, ui_logge
         return []
 
     items = data.get("data", [])
-    log(f"查到 {len(items)} 筆待付款 ATM 訂單")
+    log(f"後台回傳 {len(items)} 筆 ATM 訂單，開始核對付款狀態")
 
     rows = []
     for item in items:
+        raw_status = item.get("purchase_status")
+        status_code = "" if raw_status is None else str(raw_status).strip()
+        if status_code != "0":
+            order_no = str(item.get("order_no") or "").strip() or "無訂單編號"
+            status_name = {"1": "已付款", "2": "取消訂單", "3": "已退款"}.get(status_code, "未知狀態")
+            log(f"⚠️ 略過 {order_no}：實際狀態為「{status_name}」")
+            continue
         date_clean = str(item.get("date_clean") or "")
         year_month = date_clean[:7].replace("-", ".") if len(date_clean) >= 7 else ""
         order_no = item.get("order_no", "")
@@ -1142,6 +1159,7 @@ def search_atm_unpaid_orders(session, date_until: Optional[str] = None, ui_logge
         })
         log(f"  - {year_month}　{order_no}　{name}　總金額{total} - 車馬費{fare} = {net_amount}")
 
+    log(f"狀態核對完成：{len(rows)} 筆待付款 ATM 訂單可進入對帳區")
     return rows
 
 
@@ -1283,6 +1301,37 @@ def append_change_order_charges(region: str, rows: List[Dict], ui_logger=None) -
     return result
 
 
+def flag_cancelled_pending_orders(region: str, session, ui_logger=None) -> Dict:
+    """排程複查待對帳區；取消訂單在同列 M 欄標記。"""
+    log = make_logger(ui_logger)
+    ws = get_atm_worksheet(region)
+    all_values = memo.with_retry(ws.get_all_values)
+    last_a_row = max(
+        (idx for idx, row in enumerate(all_values, start=1)
+         if row and str(row[0]).strip()),
+        default=0,
+    )
+    updates = []
+    checked = 0
+    for row_num, row in enumerate(all_values, start=1):
+        if row_num <= last_a_row:
+            continue
+        order_no = memo.safe_cell(row, COL_ORDER_NO)
+        if not order_no or memo.safe_cell(row, COL_RECON_STATUS) == "已更新系統":
+            continue
+        checked += 1
+        purchase = find_purchase_by_order_no(session, order_no)
+        raw_status = purchase.get("purchase_status") if purchase else None
+        status_code = "" if raw_status is None else str(raw_status).strip()
+        if status_code == "2" and memo.safe_cell(row, COL_STATUS_NOTE) != "檢查訂單狀態":
+            updates.append({"range": f"M{row_num}", "values": [["檢查訂單狀態"]]})
+            log(f"⚠️ {region} 第{row_num}列 {order_no} 已取消，M欄已註記")
+
+    if updates:
+        memo.with_retry(ws.batch_update, updates, value_input_option="RAW")
+    return {"checked": checked, "flagged": len(updates)}
+
+
 def run_scheduled_unpaid_sync(ui_logger=None, date_until: Optional[str] = None) -> Dict:
     """沿用 ATM 對帳查詢／貼上功能，排程同步台北與台中待付款清單。"""
     log = make_logger(ui_logger)
@@ -1308,6 +1357,9 @@ def run_scheduled_unpaid_sync(ui_logger=None, date_until: Optional[str] = None) 
             memo.set_runtime_credentials(email, password)
             session = memo.login(ui_logger=ui_logger)
             try:
+                status_check = flag_cancelled_pending_orders(
+                    region=region, session=session, ui_logger=ui_logger,
+                )
                 rows = search_atm_unpaid_orders(
                     session=session, date_until=date_until or today_tw().isoformat(),
                     ui_logger=ui_logger,
@@ -1315,6 +1367,7 @@ def run_scheduled_unpaid_sync(ui_logger=None, date_until: Optional[str] = None) 
                 results[region] = paste_atm_unpaid_list(
                     region=region, rows=rows, ui_logger=ui_logger,
                 )
+                results[region]["status_check"] = status_check
             finally:
                 session.close()
         except Exception as exc:
