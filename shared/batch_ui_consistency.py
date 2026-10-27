@@ -33,7 +33,8 @@ def _region_credentials(region: str, fallback_email: str, fallback_password: str
 region_credentials = _region_credentials
 
 
-def resolve_target_rows(batch_opt, sheet_name, region, row_spec="", auto_no_slot=False, auto_missing_o=False, o_texts=None):
+def resolve_target_rows(batch_opt, sheet_name, region, row_spec="", auto_no_slot=False, auto_missing_o=False, o_texts=None,
+                        service_start=None, service_end=None):
     """依列號＋自動篩選取得要執行的列；範圍內不符合條件或非本區的列略過，不中止整批。
 
     回傳 (target_rows, invalid_rows, region_mismatch_rows, held_rows)。held_rows 是
@@ -43,14 +44,17 @@ def resolve_target_rows(batch_opt, sheet_name, region, row_spec="", auto_no_slot
     explicit_rows = _parse_rows(batch_opt, row_spec)
     requested_rows = set(explicit_rows)
     if auto_no_slot:
-        requested_rows.update(_auto_filter_rows(batch_opt, sheet_name, "no_schedule", region=region, allow_failed=True))
+        requested_rows.update(_auto_filter_rows(batch_opt, sheet_name, "no_schedule", region=region, allow_failed=True,
+                                                service_start=service_start, service_end=service_end))
     if auto_missing_o:
-        requested_rows.update(_auto_filter_rows(batch_opt, sheet_name, "missing_order", region=region, allow_failed=True, o_texts=o_texts))
+        requested_rows.update(_auto_filter_rows(batch_opt, sheet_name, "missing_order", region=region, allow_failed=True,
+                                                o_texts=o_texts, service_start=service_start, service_end=service_end))
     requested_rows = sorted(requested_rows)
     if not requested_rows and not (auto_no_slot or auto_missing_o):
         raise ValueError("沒有指定列號，也沒有自動篩選到符合條件的列。")
 
-    candidates = _safe_load_candidates(batch_opt, sheet_name, allow_failed=True)
+    candidates = _safe_load_candidates(batch_opt, sheet_name, allow_failed=True,
+                                       service_start=service_start, service_end=service_end)
     candidate_map = {int(row["__sheet_row__"]): row for _, row in candidates.iterrows()}
     target_rows, invalid, region_mismatch = [], [], []
     for row_no in requested_rows:
@@ -64,7 +68,8 @@ def resolve_target_rows(batch_opt, sheet_name, region, row_spec="", auto_no_slot
         target_rows.append(row_no)
 
     modes = [mode for mode, on in (("no_schedule", auto_no_slot), ("missing_order", auto_missing_o)) if on]
-    held = _held_for_request(batch_opt, sheet_name, region, explicit_rows, modes, o_texts=o_texts)
+    held = _held_for_request(batch_opt, sheet_name, region, explicit_rows, modes, o_texts=o_texts,
+                             service_start=service_start, service_end=service_end)
     held_set = set(held)
     invalid = [row_no for row_no in invalid if row_no not in held_set]
     return target_rows, invalid, region_mismatch, held

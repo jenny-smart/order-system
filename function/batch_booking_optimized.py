@@ -201,7 +201,8 @@ def render(backend_email: str, backend_password: str, env: str) -> None:
     from shared import dev_sheet_copy
     from shared.batch_ui_consistency import region_credentials, resolve_target_rows
     from shared.hybrid_batch_runner import run_process_web_hybrid
-    from shared.selected_row_status_guard import held_message, render_o_text_filter, render_stage_filter
+    from shared.selected_row_status_guard import (held_message, render_o_text_filter, render_service_date_filter,
+                                                  render_stage_filter, validate_service_date_range)
 
     step("4", "執行設定")
     c1, c2, c3 = st.columns(3)
@@ -226,6 +227,7 @@ def render(backend_email: str, backend_password: str, env: str) -> None:
     st.caption("指定範圍及自動篩選可包含失敗列；調整後可直接重試，不必清空 N 欄結果。")
     st.caption("三種批次共用建單條件：訂單編號空白＋狀態未安排＋「預約條件」空白或在本次預約對象內；其他列會略過並在執行過程註明原因。")
     render_stage_filter(st, "batch_opt_booking_stages")
+    service_start, service_end = render_service_date_filter(st, "batch_opt_service_date")
     auto_no_slot = st.checkbox("自動篩選：狀態未安排＋訂單編號空白＋無班表", value=False, key="batch_opt_auto_no_slot")
     auto_missing_o = st.checkbox("自動篩選：狀態未安排＋訂單編號空白＋O欄找不到訂單編號", value=False, key="batch_opt_auto_missing_o")
     o_texts = render_o_text_filter(st, sys.modules[__name__], dev_sheet_copy.read_sheet(st, env, sheet_name), region, "batch_opt_o_texts") if auto_missing_o else []
@@ -243,6 +245,11 @@ def render(backend_email: str, backend_password: str, env: str) -> None:
         return
     if not selected_actions:
         st.error("請至少選擇一個執行項目。")
+        return
+    try:
+        validate_service_date_range(service_start, service_end)
+    except ValueError as exc:
+        st.error(str(exc))
         return
     if dev_sheet_copy.is_dev(env):
         # 測試機：先複製分頁，後續篩選、建單、回填都改用副本。
@@ -266,6 +273,7 @@ def render(backend_email: str, backend_password: str, env: str) -> None:
         target_rows, invalid, region_mismatch, held = resolve_target_rows(
             batch_opt, sheet_name, region, row_spec,
             auto_no_slot=auto_no_slot, auto_missing_o=auto_missing_o, o_texts=o_texts,
+            service_start=service_start, service_end=service_end,
         )
         if held:
             ui_log(f"⏭️ {held_message(batch_opt, sheet_name, held)}：" + "、".join(map(str, held)))

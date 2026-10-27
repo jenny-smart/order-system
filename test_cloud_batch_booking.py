@@ -51,6 +51,20 @@ class CloudCandidatesTest(unittest.TestCase):
         self.assertNotIn(4, [x[0] for x in cloud.load_pending('sheet', retry_failed=True)])
         self.assertNotIn(5, [x[0] for x in cloud.load_pending('sheet', retry_failed=True)])
 
+    def test_service_date_bounds_are_inclusive_and_allow_end_only(self):
+        self.df.loc[self.df['__sheet_row__'].eq(2), '日期'] = '2026/10/04'
+        self.df.loc[self.df['__sheet_row__'].eq(3), '日期'] = '2026-10-20'
+        self.assertEqual([x[0] for x in cloud.load_pending(
+            'sheet', retry_failed=True, service_end='2026-10-04')], [2])
+        self.assertEqual([x[0] for x in cloud.load_pending(
+            'sheet', retry_failed=True, service_start='2026-10-20')], [3])
+        self.assertEqual([x[0] for x in cloud.load_pending(
+            'sheet', retry_failed=True, service_start='2026-10-04', service_end='2026-10-20')], [2, 3])
+
+    def test_service_end_cannot_precede_start(self):
+        with self.assertRaisesRegex(ValueError, '服務迄日不可早於服務起日'):
+            cloud.load_pending('sheet', service_start='2026-10-20', service_end='2026-10-04')
+
     def test_runner_forwards_exception_to_pending_and_processing(self):
         account = {'email': 'test', 'password': 'test'}
         with patch.object(cloud, 'load_pending', side_effect=[[(3, '台北', '')], [], []]) as pending, \
@@ -94,6 +108,16 @@ class CloudDispatchTest(unittest.TestCase):
         import json
         self.assertEqual(json.loads(post.call_args.kwargs['json']['inputs']['o_texts']), ['系統未產生新訂單編號', '（O欄空白）'])
 
+    def test_service_date_bounds_are_sent_to_workflow(self):
+        with patch.object(ui, '_token', return_value='test'), patch.object(ui, '_latest_run', return_value=None), \
+             patch.object(ui, 'load_config', return_value={}), \
+             patch.object(ui.requests, 'post', return_value=Mock(status_code=204)) as post:
+            ui._dispatch('sheet', 50, 0, 'all', '台北', False,
+                         service_start='2026-12-01', service_end='2027-01-31')
+        inputs = post.call_args.kwargs['json']['inputs']
+        self.assertEqual(inputs['service_start'], '2026-12-01')
+        self.assertEqual(inputs['service_end'], '2027-01-31')
+
     def test_o_texts_env_is_parsed_safely(self):
         with patch.dict('os.environ', {'O_TEXTS_JSON': '["無訂單編號", "a\\"b"]'}):
             self.assertEqual(cloud._o_texts_from_env(), ['無訂單編號', 'a"b'])
@@ -114,7 +138,9 @@ class CloudDispatchTest(unittest.TestCase):
                 cols[1].text_input.return_value = 'sheet'
                 cols[0].number_input.return_value = 50
                 cols[1].number_input.return_value = 0
-                st.columns.side_effect = [cols, cols[:2]]
+                cols[0].date_input.return_value = None
+                cols[1].date_input.return_value = None
+                st.columns.side_effect = [cols, cols[:2], cols[:2]]
                 st.checkbox.side_effect = lambda *a, **kw: {
                     'optimized_cloud_retry_failed': retry,
                     'optimized_cloud_confirm': True,

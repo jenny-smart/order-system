@@ -86,7 +86,9 @@ class CloudDevTest(unittest.TestCase):
         cols[1].text_input.return_value = "台北202610"
         cols[0].number_input.return_value = 50
         cols[1].number_input.return_value = 0
-        st.columns.side_effect = [cols, cols[:2]]
+        cols[0].date_input.return_value = None
+        cols[1].date_input.return_value = None
+        st.columns.side_effect = [cols, cols[:2], cols[:2]]
         st.checkbox.side_effect = lambda *a, **kw: kw.get("key") == "optimized_cloud_confirm"
         st.button.side_effect = lambda *a, **kw: kw.get("key") == "optimized_cloud_start"
         st.multiselect.return_value = ["可約"]
