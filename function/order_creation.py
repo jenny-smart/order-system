@@ -150,7 +150,9 @@ def render_batch(backend_email, backend_password, env):
     step("3", "執行項目")
     import function.batch_booking_optimized as batch_opt
     from shared import dev_sheet_copy
-    from shared.selected_row_status_guard import _held_for_request, held_message, render_o_text_filter, render_stage_filter
+    from shared.selected_row_status_guard import (_held_for_request, filter_row_numbers_by_service_date, held_message,
+                                                  render_o_text_filter, render_service_date_filter, render_stage_filter,
+                                                  validate_service_date_range)
     default_actions = dev_sheet_copy.default_actions(env)
     selected_actions = st.multiselect("執行項目", options=dev_sheet_copy.action_options(env), default=default_actions, label_visibility="collapsed")
     st.markdown('<div class="hint-box">可自由組合，例如只寄確認信、只改日曆，或全流程一起跑。</div>', unsafe_allow_html=True)
@@ -158,6 +160,7 @@ def render_batch(backend_email, backend_password, env):
     st.caption("指定範圍及自動篩選可包含失敗列；調整後可直接重試，不必清空 N 欄結果。")
     st.caption("三種批次共用建單條件：訂單編號空白＋狀態未安排＋「預約條件」空白或在本次預約對象內；其他列會略過並在執行過程註明原因。")
     render_stage_filter(st, "batch_booking_stages")
+    service_start, service_end = render_service_date_filter(st, "batch_service_date")
     auto_no_slot_rows = st.checkbox("自動篩選：狀態未安排＋訂單編號空白＋無班表", value=False, key="auto_no_slot_rows")
     auto_missing_o_rows = st.checkbox("自動篩選：狀態未安排＋訂單編號空白＋O欄找不到訂單編號", value=False, key="auto_missing_o_rows")
     o_texts = render_o_text_filter(st, batch_opt, dev_sheet_copy.read_sheet(st, env, sheet_name), region, "batch_o_texts") if auto_missing_o_rows else []
@@ -177,6 +180,10 @@ def render_batch(backend_email, backend_password, env):
             st.error("請輸入工作表名稱"); st.stop()
         if not selected_actions:
             st.error("請至少選擇一個執行項目"); st.stop()
+        try:
+            validate_service_date_range(service_start, service_end)
+        except ValueError as e:
+            st.error(str(e)); st.stop()
         if dev_sheet_copy.is_dev(env):
             # 測試機：先複製分頁，後續篩選、建單、回填都改用副本。
             _source_sheet = sheet_name.strip()
@@ -204,7 +211,8 @@ def render_batch(backend_email, backend_password, env):
                 try:
                     modes = [m for m, on in (("no_schedule", auto_no_slot_rows), ("missing_order", auto_missing_o_rows)) if on]
                     held_only = _held_for_request(batch_opt, sheet_name.strip(), region, modes=modes,
-                                                  mode_scope=candidate_rows or None, o_texts=o_texts)
+                                                  mode_scope=candidate_rows or None, o_texts=o_texts,
+                                                  service_start=service_start, service_end=service_end)
                 except Exception:
                     held_only = []
                 if held_only:
@@ -215,6 +223,13 @@ def render_batch(backend_email, backend_password, env):
                 target_rows = parse_row_input(row_input)
             except Exception as e:
                 st.error(f"列號格式錯誤：{e}"); st.stop()
+        try:
+            target_rows, date_excluded_rows = filter_row_numbers_by_service_date(
+                batch_opt, sheet_name.strip(), target_rows, service_start, service_end)
+        except Exception as e:
+            st.error(f"服務日期篩選失敗：{e}"); st.stop()
+        if not target_rows:
+            st.info("指定範圍內沒有符合服務起迄日的列。"); st.stop()
         logs = []
         def ui_log(msg):
             logs.append(format_log_message(msg))
@@ -227,14 +242,18 @@ def render_batch(backend_email, backend_password, env):
             if auto_no_slot_rows or auto_missing_o_rows:
                 modes = [m for m, on in (("no_schedule", auto_no_slot_rows), ("missing_order", auto_missing_o_rows)) if on]
                 held_rows = _held_for_request(batch_opt, sheet_name.strip(), region, modes=modes,
-                                              mode_scope=candidate_rows or None, o_texts=o_texts)
+                                              mode_scope=candidate_rows or None, o_texts=o_texts,
+                                              service_start=service_start, service_end=service_end)
             else:
-                held_rows = _held_for_request(batch_opt, sheet_name.strip(), region, target_rows)
+                held_rows = _held_for_request(batch_opt, sheet_name.strip(), region, target_rows,
+                                              service_start=service_start, service_end=service_end)
         except Exception as e:
             held_rows = []
             ui_log(f"⚠️ 無法計算未選對象略過列數：{e}")
         if held_rows:
             ui_log(f"⏭️ {held_message(batch_opt, sheet_name.strip(), held_rows)}：" + "、".join(map(str, held_rows)))
+        if date_excluded_rows:
+            ui_log("⏭️ 略過不在服務起迄日內的列：" + "、".join(map(str, date_excluded_rows)))
         with st.spinner("執行中，請稍候…"):
             row_label = "、".join(map(str, target_rows))
             ui_log(f"▶ 指定列 {row_label}，依列號逐筆單筆成單，不分組…")

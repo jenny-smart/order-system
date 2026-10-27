@@ -52,6 +52,16 @@ on:
         required: false
         default: '["可約"]'
         type: string
+      service_start:
+        description: Inclusive F-column service start date (YYYY-MM-DD), blank means no lower bound
+        required: false
+        default: ""
+        type: string
+      service_end:
+        description: Inclusive F-column service end date (YYYY-MM-DD), blank means no upper bound
+        required: false
+        default: ""
+        type: string
       env:
         description: prod / dev（dev 只建單，使用工作表副本）
         required: false
@@ -97,4 +107,6 @@ jobs:
           --region "${{ inputs.region }}"
           --allow-auto-lemon "${{ inputs.allow_auto_lemon }}"
           --retry-failed "${{ inputs.retry_failed }}"
+          --service-start "${{ inputs.service_start }}"
+          --service-end "${{ inputs.service_end }}"
           --env "${{ inputs.env == 'dev' && 'dev' || 'prod' }}"

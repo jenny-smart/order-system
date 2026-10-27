@@ -14,6 +14,7 @@ order-system 改為：
 """
 from __future__ import annotations
 
+from datetime import date, datetime
 import pandas as pd
 
 from shared.booking_eligibility import (DEFAULT_STAGES, HOLD_COLUMN, STAGES, booking_stage, can_create_order, can_process_row,
@@ -54,7 +55,64 @@ def _should_create_order(row):
     return orders.should_create_order(row)
 
 
-def _safe_load_candidates(batch_opt, sheet_name, allow_failed=False):
+def _service_date(value, batch_opt=None):
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = batch_opt._date_text(value) if batch_opt is not None else str(value).strip().replace("/", "-")
+    try:
+        return date.fromisoformat(str(text)[:10])
+    except (TypeError, ValueError):
+        return None
+
+
+def validate_service_date_range(service_start=None, service_end=None):
+    start = _service_date(service_start)
+    end = _service_date(service_end)
+    if service_start not in (None, "") and start is None:
+        raise ValueError("服務起日格式錯誤。")
+    if service_end not in (None, "") and end is None:
+        raise ValueError("服務迄日格式錯誤。")
+    if start and end and end < start:
+        raise ValueError("服務迄日不可早於服務起日。")
+    return start, end
+
+
+def _filter_service_dates(batch_opt, work, service_start=None, service_end=None):
+    start, end = validate_service_date_range(service_start, service_end)
+    if not start and not end:
+        return work.copy()
+    dates = work.get("日期", pd.Series("", index=work.index)).map(lambda value: _service_date(value, batch_opt))
+    mask = dates.notna()
+    if start:
+        mask &= dates.map(lambda value: value is not None and value >= start)
+    if end:
+        mask &= dates.map(lambda value: value is not None and value <= end)
+    return work[mask].copy()
+
+
+def filter_row_numbers_by_service_date(batch_opt, sheet_name, rows, service_start=None, service_end=None):
+    rows = [int(row) for row in rows]
+    if service_start in (None, "") and service_end in (None, ""):
+        return rows, []
+    _, df = _load_worksheet_unique(sheet_name)
+    selected = df[df["__sheet_row__"].astype(int).isin(set(rows))].copy()
+    allowed = set(_filter_service_dates(batch_opt, selected, service_start, service_end)["__sheet_row__"].astype(int).tolist())
+    return [row for row in rows if row in allowed], [row for row in rows if row not in allowed]
+
+
+def render_service_date_filter(st, key):
+    c1, c2 = st.columns(2)
+    start = c1.date_input("服務起日（F欄，空白＝不限）", value=None, key=f"{key}_start")
+    end = c2.date_input("服務迄日（F欄，空白＝不限）", value=None, key=f"{key}_end")
+    st.caption("日期篩選含起日與迄日；只填迄日時，F 欄日期在迄日以前（含當日）皆可成單。")
+    return start, end
+
+
+def _safe_load_candidates(batch_opt, sheet_name, allow_failed=False, service_start=None, service_end=None):
     try: _, df = _load_worksheet_unique(sheet_name)
     except Exception as exc:
         if type(exc).__name__ == "WorksheetNotFound": raise ValueError(f"找不到工作表分頁「{sheet_name}」") from exc
@@ -68,6 +126,8 @@ def _safe_load_candidates(batch_opt, sheet_name, allow_failed=False):
     create_ok = (work.apply(can_create_order, axis=1).astype(bool)
                  & (allow_failed | work["結果"].map(normalize_status).ne("失敗")))
     work = work[required_ok & (create_ok | work["訂單編號"].ne(""))].copy().reset_index(drop=True)
+    if service_start not in (None, "") or service_end not in (None, ""):
+        work = _filter_service_dates(batch_opt, work, service_start, service_end).reset_index(drop=True)
     work["日期顯示"] = work["日期"].map(batch_opt._date_text)
     work["時段顯示"] = work.apply(lambda r: f"{batch_opt._time_text(r['開始時間'])}-{batch_opt._time_text(r['結束時間'])}", axis=1)
     work["群組鍵"] = work.apply(lambda r: (batch_opt._text(r["姓名"]), batch_opt._text(r["電話"]), batch_opt._text(r["地址"])), axis=1)
@@ -86,8 +146,10 @@ def _creatable(batch_opt, work, region=None):
     return work
 
 
-def _auto_filter_rows(batch_opt, sheet_name, mode, region=None, allow_failed=False, candidates=None, o_texts=None):
-    work = candidates if candidates is not None else _safe_load_candidates(batch_opt, sheet_name, allow_failed=allow_failed)
+def _auto_filter_rows(batch_opt, sheet_name, mode, region=None, allow_failed=False, candidates=None, o_texts=None,
+                      service_start=None, service_end=None):
+    work = candidates if candidates is not None else _safe_load_candidates(
+        batch_opt, sheet_name, allow_failed=allow_failed, service_start=service_start, service_end=service_end)
     work = _creatable(batch_opt, work, region)
     if not len(work): return []
     mask = _mode_mask(batch_opt, work, mode, o_texts)
@@ -123,15 +185,19 @@ def _mode_mask(batch_opt, work, mode, o_texts=None):
     return pd.Series(False, index=work.index)
 
 
-def _held_for_request(batch_opt, sheet_name, region, rows=(), modes=(), mode_scope=None, allow_failed=True, o_texts=None):
+def _held_for_request(batch_opt, sheet_name, region, rows=(), modes=(), mode_scope=None, allow_failed=True, o_texts=None,
+                      service_start=None, service_end=None):
     """指定列號＋自動篩選中，因預約條件不在本次預約對象而略過的列；三種批次共用。"""
-    held = set(_held_rows(batch_opt, sheet_name, "all", region, allow_failed, rows=rows)) if rows else set()
+    held = set(_held_rows(batch_opt, sheet_name, "all", region, allow_failed, rows=rows,
+                          service_start=service_start, service_end=service_end)) if rows else set()
     for mode in modes:
-        held.update(_held_rows(batch_opt, sheet_name, mode, region, allow_failed, rows=mode_scope, o_texts=o_texts))
+        held.update(_held_rows(batch_opt, sheet_name, mode, region, allow_failed, rows=mode_scope, o_texts=o_texts,
+                               service_start=service_start, service_end=service_end))
     return sorted(held)
 
 
-def _held_rows(batch_opt, sheet_name, mode="all", region=None, allow_failed=False, rows=None, o_texts=None):
+def _held_rows(batch_opt, sheet_name, mode="all", region=None, allow_failed=False, rows=None, o_texts=None,
+               service_start=None, service_end=None):
     """若預約條件在本次預約對象內就會成為建單候選的列號；三種批次用來顯示略過筆數。"""
     _, df = _load_worksheet_unique(sheet_name)
     if df.empty: return []
@@ -145,6 +211,7 @@ def _held_rows(batch_opt, sheet_name, mode="all", region=None, allow_failed=Fals
     for column in required:
         required_ok &= work.get(column, pd.Series("", index=work.index)).map(batch_opt._text).ne("")
     work = work[required_ok].copy()
+    work = _filter_service_dates(batch_opt, work, service_start, service_end)
     held = work.apply(lambda row: bool(hold_reason(row)) and can_create_order({**row.to_dict(), HOLD_COLUMN: ""}), axis=1) if len(work) else pd.Series(dtype=bool)
     work = work[held.astype(bool)] if len(work) else work
     if not allow_failed and "結果" in work.columns: work = work[work["結果"].map(normalize_status).ne("失敗")]
