@@ -138,6 +138,13 @@ def _held_rows(batch_opt, sheet_name, mode="all", region=None, allow_failed=Fals
     work = df.copy()
     work["__o_col__"] = df.iloc[:, 14].map(batch_opt._text) if df.shape[1] > 14 else ""
     if rows is not None: work = work[work["__sheet_row__"].astype(int).isin({int(x) for x in rows})]
+    # 與實際候選列使用相同的必要資料門檻，避免把資料不完整、原本就不會
+    # 進批次的列算成「未選對象」，造成待成單數＋略過數大於畫面總數。
+    required = ("姓名", "電話", "地址", "日期", "開始時間", "結束時間")
+    required_ok = pd.Series(True, index=work.index)
+    for column in required:
+        required_ok &= work.get(column, pd.Series("", index=work.index)).map(batch_opt._text).ne("")
+    work = work[required_ok].copy()
     held = work.apply(lambda row: bool(hold_reason(row)) and can_create_order({**row.to_dict(), HOLD_COLUMN: ""}), axis=1) if len(work) else pd.Series(dtype=bool)
     work = work[held.astype(bool)] if len(work) else work
     if not allow_failed and "結果" in work.columns: work = work[work["結果"].map(normalize_status).ne("失敗")]

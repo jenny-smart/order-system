@@ -129,7 +129,10 @@ class CloudDispatchTest(unittest.TestCase):
                 self.assertIs(dispatch.call_args.args[6], retry)
                 self.assertEqual(dispatch.call_args.args[7], [])
                 self.assertEqual(dispatch.call_args.args[8], ['可約'])
-                self.assertEqual(st.session_state['optimized_cloud_pending_key'], ('sheet', '台北', 'all', False, retry, (), ('可約',)))
+                # 送出後工作表會被回填，先前檢查的筆數必須失效，避免完成頁仍顯示舊總數。
+                self.assertNotIn('optimized_cloud_pending_key', st.session_state)
+                self.assertNotIn('optimized_cloud_pending', st.session_state)
+                self.assertNotIn('optimized_cloud_pending_rows', st.session_state)
 
 
 class CloudStatusTest(unittest.TestCase):

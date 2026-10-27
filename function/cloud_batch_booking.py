@@ -179,6 +179,12 @@ def _sync_cloud_settings(settings):
         st.session_state['optimized_cloud_settings'] = settings
 
 
+def _clear_pending_preview():
+    """送出後移除檢查快取；執行會改寫工作表，舊筆數不能再標成目前筆數。"""
+    for key in ('optimized_cloud_pending', 'optimized_cloud_pending_rows', 'optimized_cloud_pending_key'):
+        st.session_state.pop(key, None)
+
+
 def _is_current_run(run):
     return st.session_state.get('optimized_cloud_current_run') == (run['id'], run.get('run_attempt', 1))
 
@@ -410,6 +416,7 @@ def render(env: str):
                 st.session_state['optimized_cloud_dispatch'] = _dispatch(run_sheet, int(chunk), int(max_rows), filter_mode, region, allow_auto_lemon, retry_failed, o_texts, stages, env="dev")
             else:
                 st.session_state['optimized_cloud_dispatch'] = _dispatch(run_sheet, int(chunk), int(max_rows), filter_mode, region, allow_auto_lemon, retry_failed, o_texts, stages)
+            _clear_pending_preview()
             st.success("已交給 GitHub Actions 雲端執行；可關閉瀏覽器或電腦。")
             st.markdown(f"[查看雲端執行進度](https://github.com/{REPO}/actions/workflows/{WORKFLOW})")
         except Exception as exc:

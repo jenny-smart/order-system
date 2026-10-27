@@ -55,7 +55,8 @@ def test_held_rows_match_filters_used_by_all_three_batches(monkeypatch):
             {**BASE, '__sheet_row__': 3, '預約條件': hold, '原因': '找不到訂單編號', '結果': ''},
             {**BASE, '__sheet_row__': 4, '預約條件': hold, '狀態': '暫停', '結果': ''},
             {**BASE, '__sheet_row__': 5, '預約條件': hold, '訂單編號': 'LC1', '結果': ''},
-            {**BASE, '__sheet_row__': 6, '結果': ''}]
+            {**BASE, '__sheet_row__': 6, '結果': ''},
+            {**BASE, '__sheet_row__': 7, '預約條件': hold, '電話': '', '結果': ''}]
     monkeypatch.setattr(guard, '_load_worksheet_unique', lambda name: (None, pd.DataFrame(rows)))
     batch = SimpleNamespace(_text=lambda v: str(v or '').strip(), get_region_by_address=lambda address, accounts: '台北')
     assert guard._held_rows(batch, 's') == [3]
