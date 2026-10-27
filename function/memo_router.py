@@ -277,12 +277,28 @@ class _PatchingLoader:
         _patch_module(module)
 
 
+# Streamlit 重新部署／檔案變更時會把本模組當成新模組重新 import，舊版本的 _PatchingFinder
+# 還留在 sys.meta_path；新舊兩個類別互相不認得、會一直互相呼叫（RecursionError）。
+# 因此用標記屬性（不是類別）辨認，安裝時也先移除舊版本留下的 finder。
+_FINDER_MARK = "_order_system_exec_log_finder"
+
+
+def _is_patching_finder(finder) -> bool:
+    # 舊版本（沒有標記屬性）的 finder 用類別名稱與所在模組辨認。
+    cls = type(finder)
+    return bool(getattr(finder, _FINDER_MARK, False)) or (
+        cls.__name__ == "_PatchingFinder" and cls.__module__ == __name__
+    )
+
+
 class _PatchingFinder(importlib.abc.MetaPathFinder):
+    _order_system_exec_log_finder = True
+
     def find_spec(self, fullname, path, target=None):
         if fullname not in LOG_SPECS:
             return None
-        for finder in sys.meta_path:
-            if finder is self or isinstance(finder, _PatchingFinder):
+        for finder in list(sys.meta_path):
+            if finder is self or _is_patching_finder(finder):
                 continue
             find = getattr(finder, "find_spec", None)
             if find is None:
@@ -297,7 +313,11 @@ class _PatchingFinder(importlib.abc.MetaPathFinder):
 
 def install_execution_log() -> None:
     """把執行 Log 包裝套到 memo_system 模組上（可重複呼叫）。"""
-    if not any(isinstance(f, _PatchingFinder) for f in sys.meta_path):
+    current = [f for f in sys.meta_path if isinstance(f, _PatchingFinder)]
+    stale = [f for f in sys.meta_path if _is_patching_finder(f) and not isinstance(f, _PatchingFinder)]
+    for finder in stale:
+        sys.meta_path.remove(finder)
+    if not current:
         sys.meta_path.insert(0, _PatchingFinder())
     for module_name in LOG_SPECS:
         module = sys.modules.get(module_name)
