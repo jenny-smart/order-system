@@ -36,6 +36,7 @@ SETTING_FIELDS = [
     ("new_period_col", "新時段欄"),
     ("change_date_col", "異動日期欄"),
     ("change_period_col", "異動時段欄"),
+    ("updated_at_col", "更新時間欄"),
     ("start_row", "起始列"),
 ]
 SETTINGS_HEADERS = ["後台帳號"] + [label for _key, label in SETTING_FIELDS] + ["更新時間"]
@@ -43,7 +44,7 @@ DEFAULT_SETTINGS = {
     "spreadsheet_id": "", "worksheet": "", "order_col": "A",
     "orig_date_col": "F", "orig_period_col": "G", "orig_staff_col": "I",
     "new_date_col": "J", "new_period_col": "K",
-    "change_date_col": "O", "change_period_col": "P", "start_row": "2",
+    "change_date_col": "O", "change_period_col": "P", "updated_at_col": "Q", "start_row": "2",
 }
 
 
@@ -76,7 +77,7 @@ def validate_settings(settings):
         raise ValueError("請輸入 Google 試算表 ID 或網址")
     if not str(settings["worksheet"]).strip():
         raise ValueError("請輸入工作表名稱")
-    required = ("order_col", "new_date_col", "new_period_col", "change_date_col", "change_period_col")
+    required = ("order_col", "new_date_col", "new_period_col", "change_date_col", "change_period_col", "updated_at_col")
     for key in required:
         column_index(settings[key])
     for key in ("orig_date_col", "orig_period_col", "orig_staff_col"):
@@ -86,11 +87,11 @@ def validate_settings(settings):
     if str(settings["orig_staff_col"]).strip():
         used.append(str(settings["orig_staff_col"]).strip().upper())
     if len(set(used)) != len(used):
-        raise ValueError("訂單編號欄、原專員欄、新日期欄、新時段欄、異動日期欄、異動時段欄不可重複")
+        raise ValueError("訂單編號欄、原專員欄、新日期欄、新時段欄、異動日期欄、異動時段欄、更新時間欄不可重複")
     protected = {str(settings[k]).strip().upper() for k in ("order_col", "orig_date_col", "orig_period_col", "orig_staff_col", "new_date_col", "new_period_col") if str(settings[k]).strip()}
-    for key in ("change_date_col", "change_period_col"):
+    for key in ("change_date_col", "change_period_col", "updated_at_col"):
         if str(settings[key]).strip().upper() in protected:
-            raise ValueError("異動日期欄／異動時段欄不可和訂單編號、原日期時段、原專員、新日期時段同一欄")
+            raise ValueError("異動日期欄／異動時段欄／更新時間欄不可和訂單編號、原日期時段、原專員、新日期時段同一欄")
     try:
         start_row = int(settings["start_row"])
     except Exception:
@@ -124,6 +125,11 @@ def _row_to_settings(headers, row):
     if any(h for h in headers) and "原專員欄" not in headers:
         # 舊版設定沒有原專員欄：留空，避免預設的 I 和既有新日期欄撞欄
         settings["orig_staff_col"] = ""
+    if any(h for h in headers) and "更新時間欄" not in headers:
+        # 舊版設定沒有更新時間欄：預設 O，和既有欄位撞欄時往後找空欄
+        used = {str(settings[k]).strip().upper() for k, _l in SETTING_FIELDS
+                if k not in ("spreadsheet_id", "worksheet", "start_row", "updated_at_col") and str(settings[k]).strip()}
+        settings["updated_at_col"] = next(c for c in ("O", "Q", "R", "S", "T", "U") if c not in used)
     return settings
 
 
@@ -205,11 +211,54 @@ def _same_date(left, right):
     return tt._normalize_date_text(left) == tt._normalize_date_text(right)
 
 
+HEADER_KEYWORDS = {
+    "order_col": "訂單編號", "orig_date_col": "原日期", "orig_period_col": "原時段", "orig_staff_col": "原專員",
+    "new_date_col": "新日期", "new_period_col": "新時段", "change_date_col": "異動日期",
+    "change_period_col": "異動時段", "updated_at_col": "更新時間",
+}
+READ_COLUMNS = ("order_col", "orig_date_col", "orig_period_col", "orig_staff_col", "new_date_col", "new_period_col")
+
+
+def check_headers(values, settings, keys=READ_COLUMNS):
+    """依標題列（起始列的上一列）檢查欄位設定是否對得上，避免讀錯欄而誤判、誤填。
+
+    讀取用的欄位標題必須含對應關鍵字（例：新日期欄的標題要有「新日期」）；
+    寫入用的欄位標題若不是空白也必須相符。回傳問題清單（空清單＝沒問題）。
+    """
+    header_row_no = int(settings["start_row"]) - 1
+    if header_row_no < 1 or header_row_no > len(values):
+        return []
+    header = values[header_row_no - 1]
+    problems = []
+    for key in keys:
+        letter = str(settings.get(key, "")).strip().upper()
+        if not letter:
+            continue
+        title = _cell(header, column_index(letter))
+        keyword = HEADER_KEYWORDS[key]
+        label = dict(SETTING_FIELDS)[key]
+        if keyword in title:
+            continue
+        if key in READ_COLUMNS or title:
+            problems.append(f"{label}設為 {letter}，但 {letter}{header_row_no} 標題是「{title or '空白'}」（應含「{keyword}」）")
+    return problems
+
+
+def _assert_headers(values, settings, keys):
+    problems = check_headers(values, settings, keys)
+    if problems:
+        raise ValueError("欄位設定和表單標題對不上，已停止（未寫入）：" + "；".join(problems))
+
+
 def compare_sheet_orders(env_name, backend_email, backend_password, settings, client=None, progress=None):
     """讀表單並逐筆查後台目前日期／時段；不寫入。"""
     settings = validate_settings(settings)
     worksheet = _open_target(settings, client)
-    items = read_sheet_orders(worksheet.get_all_values(), settings)
+    values = worksheet.get_all_values()
+    _assert_headers(values, settings, (
+        "order_col", "new_date_col", "new_period_col", "change_date_col", "change_period_col", "updated_at_col",
+    ))
+    items = read_sheet_orders(values, settings)
     session, _base_url = tt._login(env_name, backend_email, backend_password)
     rows = []
     for index, item in enumerate(items, 1):
@@ -259,6 +308,11 @@ def apply_sheet_updates(settings, rows, client=None):
     period_idx = column_index(settings["change_period_col"])
     date_col = settings["change_date_col"].strip().upper()
     period_col = settings["change_period_col"].strip().upper()
+    time_col = settings["updated_at_col"].strip().upper()
+    _assert_headers(values, settings, (
+        "order_col", "new_date_col", "new_period_col", "change_date_col", "change_period_col", "updated_at_col",
+    ))
+    stamp = _now_text()
     updates, results = [], []
     for row in rows:
         if row.get("status") not in PENDING_STATUSES:
@@ -271,11 +325,12 @@ def apply_sheet_updates(settings, rows, client=None):
             results.append({**row, "status": "已跳過：比對後異動欄已被修改"})
             continue
         if row["status"] == "待填異動":
-            new_values, done = (row["now_date"], row["now_period"]), "已填異動"
+            new_values, done, row_stamp = (row["now_date"], row["now_period"]), "已填異動", stamp
         else:
-            new_values, done = ("", ""), "已清除異動欄"
+            new_values, done, row_stamp = ("", ""), "已清除異動欄", ""
         updates.append({"range": f"{date_col}{row['row']}", "values": [[new_values[0]]]})
         updates.append({"range": f"{period_col}{row['row']}", "values": [[new_values[1]]]})
+        updates.append({"range": f"{time_col}{row['row']}", "values": [[row_stamp]]})
         results.append({**row, "status": done, "change_date": new_values[0], "change_period": new_values[1]})
     if updates:
         worksheet.batch_update(updates, value_input_option="USER_ENTERED")
@@ -340,7 +395,9 @@ def plan_restore(env_name, backend_email, backend_password, settings, client=Non
         if not str(settings.get(key, "")).strip():
             raise ValueError(f"返回原班表需要設定{label}")
     worksheet = _open_target(settings, client)
-    items = read_sheet_orders(worksheet.get_all_values(), settings)
+    values = worksheet.get_all_values()
+    _assert_headers(values, settings, ("order_col", "orig_date_col", "orig_period_col", "orig_staff_col"))
+    items = read_sheet_orders(values, settings)
     return plan_restore_items(env_name, backend_email, backend_password, items, progress=progress)
 
 

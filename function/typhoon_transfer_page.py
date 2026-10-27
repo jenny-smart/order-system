@@ -143,7 +143,8 @@ def _render_restore(backend_email, backend_password, env, copy_button=None):
 _SHEET_FIELD_LABELS = {
     "order_col": "訂單編號欄", "orig_date_col": "原日期欄", "orig_period_col": "原時段欄", "orig_staff_col": "原專員欄",
     "new_date_col": "新日期欄", "new_period_col": "新時段欄",
-    "change_date_col": "異動日期欄", "change_period_col": "異動時段欄", "start_row": "起始列",
+    "change_date_col": "異動日期欄", "change_period_col": "異動時段欄", "updated_at_col": "更新時間欄",
+    "start_row": "起始列",
 }
 
 
@@ -179,7 +180,7 @@ def _render_sheet_sync(backend_email, backend_password, env):
         st.text_input("工作表名稱", key="tt_sheet_worksheet")
     # 第一列：訂單編號欄＋起始列；第二列：日期／時段欄（原、新、異動）
     layout = [
-        ["order_col", "start_row"],
+        ["order_col", "start_row", "updated_at_col"],
         ["orig_date_col", "orig_period_col", "orig_staff_col", "new_date_col", "new_period_col",
          "change_date_col", "change_period_col"],
     ]
@@ -187,7 +188,10 @@ def _render_sheet_sync(backend_email, backend_password, env):
         for col, key in zip(st.columns(7), row_keys):
             with col:
                 st.text_input(_SHEET_FIELD_LABELS[key], key=f"tt_sheet_{key}")
-    st.caption("新日期／新時段只用來比對、不會修改；有異動的訂單把目前日期／時段填進異動欄，沒有異動的維持空白。")
+    st.caption(
+        "新日期／新時段只用來比對、不會修改；只有異動的訂單才把目前日期／時段填進異動欄並在更新時間欄註記時間，"
+        "沒有異動的維持空白。比對前會先檢查第 1 列標題和欄位設定是否對得上，對不上就停止、不寫入。"
+    )
     settings = {key: st.session_state.get(f"tt_sheet_{key}", "") for key in tss.DEFAULT_SETTINGS}
 
     b1, b2 = st.columns(2)
