@@ -142,11 +142,16 @@ class CompareAndApplyTests(unittest.TestCase):
         results = tss.apply_sheet_updates(SETTINGS, rows, client=self.client)
         self.assertEqual([(r["row"], r["status"]) for r in results], [(2, "已填異動"), (5, "已清除異動欄")])
         data, option = self.ws.batches[0]
+        stamp = data[2]["values"][0][0]
+        self.assertRegex(stamp, r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$")
         self.assertEqual(data, [
             {"range": "L2", "values": [["2026-11-06"]]}, {"range": "M2", "values": [["14:00-18:00"]]},
-            {"range": "L5", "values": [[""]]}, {"range": "M5", "values": [[""]]},
+            {"range": "Q2", "values": [[stamp]]},
+            {"range": "L5", "values": [[""]]}, {"range": "M5", "values": [[""]]}, {"range": "Q5", "values": [[""]]},
         ])
         self.assertEqual(option, "USER_ENTERED")
+        # 只寫有異動（填入或清除）的列，未變動的第 3 列完全不寫
+        self.assertFalse(any(u["range"].endswith("3") for u in data))
         self.assertFalse(any(u["range"][0] in "IJ" for u in data))
 
     def test_apply_skips_change_cells_edited_after_compare(self):
@@ -154,7 +159,22 @@ class CompareAndApplyTests(unittest.TestCase):
         self.ws.values[1][11] = "2026-10-30"  # 客服比對後手動填了異動日期
         results = tss.apply_sheet_updates(SETTINGS, rows, client=self.client)
         self.assertEqual(results[0]["status"], "已跳過：比對後異動欄已被修改")
-        self.assertEqual([u["range"] for u in self.ws.batches[0][0]], ["L5", "M5"])
+        self.assertEqual([u["range"] for u in self.ws.batches[0][0]], ["L5", "M5", "Q5"])
+
+    def test_wrong_column_settings_stop_before_compare(self):
+        # 設定成新格式（新日期 J、新時段 K），但表單是舊格式（I 新日期、J 新時段、K 空白）
+        wrong = {**SETTINGS, "new_date_col": "J", "new_period_col": "K"}
+        with self.assertRaises(ValueError) as ctx:
+            tss.compare_sheet_orders("dev", "a", "b", wrong, client=self.client)
+        self.assertIn("新日期欄設為 J，但 J1 標題是「新時段」", str(ctx.exception))
+        self.assertIn("新時段欄設為 K，但 K1 標題是「空白」", str(ctx.exception))
+        self.assertEqual(self.ws.batches, [])
+
+    def test_write_column_with_other_title_is_rejected(self):
+        wrong = {**SETTINGS, "updated_at_col": "H"}  # H1 是「服務時數」
+        with self.assertRaises(ValueError) as ctx:
+            tss.compare_sheet_orders("dev", "a", "b", wrong, client=self.client)
+        self.assertIn("更新時間欄設為 H", str(ctx.exception))
 
     def test_old_settings_row_without_change_columns_still_loads(self):
         old_headers = ["後台帳號", "試算表ID", "工作表名稱", "訂單編號欄", "原日期欄", "原時段欄",
