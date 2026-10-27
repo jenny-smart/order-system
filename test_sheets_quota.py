@@ -61,6 +61,20 @@ def test_gsheet_client_uses_quota_http_client():
     assert authorize.call_args.kwargs['http_client'] is quota.QuotaHTTPClient
 
 
+def test_gsheet_client_is_reused_in_streamlit_session():
+    import orders
+    import shared.gsheet as gsheet
+    fake_st = type('FakeStreamlit', (), {'session_state': {}})()
+    with patch.object(orders, 'st', fake_st), \
+         patch.object(gsheet, 'get_service_account_info', return_value={}), \
+         patch.object(gsheet.Credentials, 'from_service_account_info', return_value='creds'), \
+         patch.object(gsheet.gspread, 'authorize', return_value=object()) as authorize:
+        first = gsheet.build_gsheet_client()
+        second = gsheet.build_gsheet_client()
+    assert first is second
+    authorize.assert_called_once()
+
+
 def test_partial_abort_preserves_confirmed_results_and_stops_batch():
     def fail_after_one(**kwargs):
         kwargs['progress_callback'](1, 1, 0, '3')

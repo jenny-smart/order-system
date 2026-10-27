@@ -47,6 +47,17 @@ def get_service_account_info():
 
 
 def build_gsheet_client():
+    # Streamlit 每次互動都會重跑整支程式。沿用同一瀏覽器工作階段內的
+    # gspread client，避免每次檢查筆數都重新建立 OAuth 連線；
+    # google-auth 仍會在權杖到期時自行更新。
+    state_key = "_gsheet_client"
+    if orders.st is not None:
+        try:
+            cached = orders.st.session_state.get(state_key)
+            if cached is not None:
+                return cached
+        except Exception:
+            pass
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive",
@@ -54,7 +65,13 @@ def build_gsheet_client():
     service_account_info = get_service_account_info()
     creds = Credentials.from_service_account_info(service_account_info, scopes=scopes)
     from shared.sheets_quota import QuotaHTTPClient
-    return gspread.authorize(creds, http_client=QuotaHTTPClient)
+    client = gspread.authorize(creds, http_client=QuotaHTTPClient)
+    if orders.st is not None:
+        try:
+            orders.st.session_state[state_key] = client
+        except Exception:
+            pass
+    return client
 
 
 def load_worksheet(sheet_name):

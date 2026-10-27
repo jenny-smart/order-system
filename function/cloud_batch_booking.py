@@ -397,11 +397,12 @@ def render(env: str):
     if st.button("檢查待成單筆數", disabled=not sheet, key="optimized_cloud_check"):
         try:
             validate_service_date_range(service_start, service_end)
-            from shared.cloud_batch_booking import load_pending
-            rows = [row_no for row_no, _, _ in load_pending(
-                dev_sheet_copy.read_sheet(st, env, sheet), filter_mode=filter_mode, selected_region=region, allow_auto_lemon=allow_auto_lemon,
-                retry_failed=retry_failed, o_texts=o_texts, service_start=service_start, service_end=service_end,
-            )]
+            with st.spinner("正在讀取 Google Sheets 並計算待成單筆數，資料較多時請稍候…"):
+                from shared.cloud_batch_booking import load_pending
+                rows = [row_no for row_no, _, _ in load_pending(
+                    dev_sheet_copy.read_sheet(st, env, sheet), filter_mode=filter_mode, selected_region=region, allow_auto_lemon=allow_auto_lemon,
+                    retry_failed=retry_failed, o_texts=o_texts, service_start=service_start, service_end=service_end,
+                )]
             st.session_state.optimized_cloud_pending = len(rows)
             st.session_state.optimized_cloud_pending_rows = rows
             st.session_state.optimized_cloud_pending_key = pending_key
