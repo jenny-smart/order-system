@@ -584,6 +584,40 @@ def _to_int_amount(value) -> Optional[int]:
         return None
 
 
+def _proxy_reserve_customer_name(item: Dict) -> str:
+    """從訂單備註擷取「代客保留：姓名」，供 ATM 清單顯示實際客人姓名。
+
+    代客保留訂單仍屬於檸檬保留會員；此函式只改對帳候選清單的顯示／配對姓名，
+    不修改後台會員或訂單。已加上「取消」前綴的舊保留備註不採用。
+    """
+    note_texts = []
+    note_key = re.compile(r"memo|note|notice|remark|備註", re.IGNORECASE)
+
+    def collect(value):
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if note_key.search(str(key)):
+                    if isinstance(child, (dict, list)):
+                        collect(child)
+                    elif child is not None:
+                        note_texts.append(str(child))
+                elif isinstance(child, (dict, list)):
+                    collect(child)
+        elif isinstance(value, list):
+            for child in value:
+                collect(child)
+
+    collect(item or {})
+    pattern = re.compile(
+        r"(?<!取消)代客保留\s*[：:]\s*([^\r\n；;，,。|｜]+)"
+    )
+    for text in note_texts:
+        match = pattern.search(text)
+        if match:
+            return match.group(1).strip()
+    return ""
+
+
 def _digits(value: str) -> str:
     return re.sub(r"\D", "", str(value or ""))
 
@@ -1122,7 +1156,9 @@ def search_atm_unpaid_orders(session, date_until: Optional[str] = None, ui_logge
         date_clean = str(item.get("date_clean") or "")
         year_month = date_clean[:7].replace("-", ".") if len(date_clean) >= 7 else ""
         order_no = item.get("order_no", "")
-        name = item.get("name", "")
+        # 代客保留使用檸檬保留會員建單，但 ATM 對帳需要拿實際客人姓名比對
+        # 銀行備註。備註若有「代客保留：XXX」，待付款清單的姓名改顯示 XXX。
+        name = _proxy_reserve_customer_name(item) or item.get("name", "")
         total = item.get("total") or 0
         fare = item.get("fare") or 0
         net_amount = total - fare
