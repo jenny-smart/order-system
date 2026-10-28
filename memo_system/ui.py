@@ -1146,7 +1146,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         step("3", "待付款清單查詢")
         c1, c2 = st.columns([1, 2])
         with c1: region = region_selectbox("要貼到哪個地區的工作表", "atm_list_region", email)
-        with c2: date_until = st.date_input("訂購日期-迄（預設為前一天）", value=date.fromisoformat(atm.default_date_until_tw()), key="atm_list_date_until")
+        with c2: date_until = st.date_input("訂購日期-迄（預設為當日）", value=date.fromisoformat(atm.default_date_until_tw()), key="atm_list_date_until")
 
         search_btn = st.button("🔍 查詢待付款 ATM 名單", use_container_width=True, disabled=not st.session_state.credentials_ready)
 
