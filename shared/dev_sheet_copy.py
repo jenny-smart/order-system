@@ -5,6 +5,7 @@
 - prod：完全不變，直接使用輸入的分頁。
 - dev：第一次執行時把原分頁複製成「原名_devMMDD-HHMMSS」，之後同一個瀏覽器工作階段
   對同一原分頁一律沿用該副本（檢查筆數、重跑失敗列都在同一份），按「改用新的測試副本」才重建。
+- dev：也可輸入先前建立的測試副本名稱，跨瀏覽器工作階段繼續使用同一分頁。
 - dev 不提供「改 Google 日曆」，避免測試資料改到正式日曆。
 """
 from __future__ import annotations
@@ -69,6 +70,22 @@ def current_copy(st, env, sheet_name: str) -> str:
     return str(_copies(st).get(str(sheet_name or "").strip(), "") or "")
 
 
+def use_existing_copy(st, env, sheet_name: str, copy_name: str) -> str:
+    """dev 指定既有的系統測試副本；避免誤把正式原分頁當成測試分頁。"""
+    source = str(sheet_name or "").strip()
+    target = str(copy_name or "").strip()
+    if not is_dev(env):
+        raise ValueError("只有測試機 dev 可以沿用測試工作表。")
+    if not source:
+        raise ValueError("請先輸入原工作表名稱。")
+    if not target:
+        raise ValueError("請輸入既有測試工作表名稱。")
+    if not target.startswith(f"{source}_dev"):
+        raise ValueError(f"測試工作表名稱必須以「{source}_dev」開頭，以免誤寫正式分頁。")
+    _copies(st)[source] = target
+    return target
+
+
 def read_sheet(st, env, sheet_name: str) -> str:
     """只讀用途（檢查筆數、篩選選項）：dev 已有副本就讀副本，否則讀原分頁。"""
     return current_copy(st, env, sheet_name) or str(sheet_name or "").strip()
@@ -93,6 +110,19 @@ def render_notice(st, env, sheet_name: str, key: str) -> None:
     if not source:
         st.info("🧪 測試機 dev：執行時會先複製輸入的工作表分頁，所有讀取與回填都在副本進行，原分頁不受影響。")
         return
+    existing = st.text_input(
+        "沿用既有測試工作表（選填，不另開新分頁）",
+        placeholder=f"例如：{source}_dev1028-080000",
+        key=f"{key}_dev_copy_existing",
+        help="貼上先前由測試機建立的完整分頁名稱，再按「沿用此工作表」。",
+    )
+    if st.button("沿用此測試工作表", key=f"{key}_dev_copy_use", disabled=not str(existing or "").strip()):
+        try:
+            use_existing_copy(st, env, source, existing)
+        except ValueError as exc:
+            st.error(str(exc))
+        else:
+            st.rerun()
     copy = current_copy(st, env, source)
     if not copy:
         st.info(f"🧪 測試機 dev：按下執行時會先把「{source}」複製成測試副本，所有讀取與回填都在副本進行，原分頁不受影響。")
@@ -100,4 +130,5 @@ def render_notice(st, env, sheet_name: str, key: str) -> None:
     st.info(f"🧪 測試機 dev：沿用測試副本「{copy}」（原分頁「{source}」不受影響）。")
     if st.button("下次執行改用新的測試副本", key=f"{key}_dev_copy_reset"):
         _copies(st).pop(source, None)
+        st.session_state.pop(f"{key}_dev_copy_existing", None)
         st.rerun()
