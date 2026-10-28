@@ -39,7 +39,7 @@ class AtmStatusGuardTests(unittest.TestCase):
              patch.object(atm.memo, "with_retry", side_effect=lambda fn, *a, **k: fn(*a, **k)):
             result = atm.flag_cancelled_pending_orders("台北", object())
         self.assertEqual(result, {"checked": 2, "flagged": 1})
-        self.assertEqual(ws.batch_update.call_args.args[0], [{"range": "M5", "values": [["檢查訂單狀態"]]}])
+        self.assertEqual(ws.batch_update.call_args.args[0], [{"range": "M5", "values": [["取消訂單"]]}])
 
 
 if __name__ == "__main__":
