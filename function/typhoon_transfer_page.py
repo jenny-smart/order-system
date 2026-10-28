@@ -189,7 +189,8 @@ def _render_sheet_sync(backend_email, backend_password, env):
             with col:
                 st.text_input(_SHEET_FIELD_LABELS[key], key=f"tt_sheet_{key}")
     st.caption(
-        "新日期／新時段只用來比對、不會修改；只有異動的訂單才把目前日期／時段填進異動欄並在更新時間欄註記時間，"
+        "新日期／新時段原則上只用來比對；若後台狀態為取消訂單，會在確認更新後把新日期註記為「取消訂單」。"
+        "其他有異動的訂單會把目前日期／時段填進異動欄並在更新時間欄註記時間，"
         "沒有異動的維持空白。比對前會先檢查第 1 列標題和欄位設定是否對得上，對不上就停止、不寫入。"
     )
     settings = {key: st.session_state.get(f"tt_sheet_{key}", "") for key in tss.DEFAULT_SETTINGS}
@@ -238,6 +239,7 @@ def _render_sheet_sync(backend_email, backend_password, env):
     failed = [r for r in rows if r["status"].startswith("查詢失敗")]
     summary = (
         f"共 {len(rows)} 筆：待填異動 {_count('待填異動')} 筆、待清除異動欄 {_count('待清除異動欄')} 筆、"
+        f"待註記取消訂單 {_count('待註記取消訂單')} 筆、已註記取消訂單 {_count('已註記取消訂單')} 筆、"
         f"已填異動 {_count('已填異動')} 筆、已清除 {_count('已清除異動欄')} 筆、未變動 {_count('未變動')} 筆、"
         f"查詢失敗 {len(failed)} 筆"
     )
@@ -258,8 +260,8 @@ def _render_sheet_sync(backend_email, backend_password, env):
 
     compared = st.session_state.get("tt_sheet_compared_settings", {})
     if pending:
-        target = f"{compared.get('worksheet', '')} 的 {compared.get('change_date_col', '')}／{compared.get('change_period_col', '')} 欄"
-        if st.button(f"✍️ 更新 {len(pending)} 筆異動到 {target}", type="primary",
+        target = f"{compared.get('worksheet', '')} 的追蹤欄位"
+        if st.button(f"✍️ 更新 {len(pending)} 筆結果到 {target}", type="primary",
                      use_container_width=True, key="tt_sheet_apply"):
             try:
                 applied = tss.apply_sheet_updates(compared, rows)
@@ -274,16 +276,21 @@ def _render_sheet_sync(backend_email, backend_password, env):
     if applied is not None:
         filled = sum(1 for r in applied if r["status"] == "已填異動")
         cleared = sum(1 for r in applied if r["status"] == "已清除異動欄")
+        cancelled = sum(1 for r in applied if r["status"] == "已註記取消訂單")
         written = next((r for r in applied if r.get("written_to")), None)
         where = ""
         if written:
-            col_d, col_p = compared.get("change_date_col", ""), compared.get("change_period_col", "")
-            where = f"（已讀回確認：{written['written_to']} 的 {col_d}／{col_p} 欄）"
-        st.success(f"已填入 {filled} 筆異動、清除 {cleared} 筆{where}")
+            verified_cols = []
+            if filled or cleared:
+                verified_cols.extend((compared.get("change_date_col", ""), compared.get("change_period_col", "")))
+            if cancelled:
+                verified_cols.append(compared.get("new_date_col", ""))
+            where = f"（已讀回確認：{written['written_to']} 的 {'／'.join(filter(None, verified_cols))} 欄）"
+        st.success(f"已填入 {filled} 筆異動、清除 {cleared} 筆、註記取消訂單 {cancelled} 筆{where}")
         if written and written.get("sheet_url"):
             st.link_button("開啟寫入的工作表", written["sheet_url"])
         for r in applied:
-            if r["status"] not in ("已填異動", "已清除異動欄"):
+            if r["status"] not in ("已填異動", "已清除異動欄", "已註記取消訂單"):
                 st.warning(f"第 {r['row']} 列 {r['order_no']}：{r['status']}")
 
 

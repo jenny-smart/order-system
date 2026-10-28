@@ -161,6 +161,46 @@ class CompareAndApplyTests(unittest.TestCase):
         self.assertEqual(results[0]["status"], "已跳過：比對後異動欄已被修改")
         self.assertEqual([u["range"] for u in self.ws.batches[0][0]], ["L5", "M5", "Q5"])
 
+    def test_cancelled_order_is_noted_in_new_date_column(self):
+        sheet = [
+            SHEET[0],
+            ["LC00219999", "取消客", "", "", "", "2026-10-23", "08:30-12:30", "4",
+             "2027-03-03", "08:30-12:30", "", "", ""],
+        ]
+        ws = _Worksheet(sheet)
+        client = _Client(ws)
+
+        def fetch_cancelled(session, order_no):
+            return _block(order_no, "2027-03-03", "08:30 - 12:30", status="取消訂單")
+
+        with patch.object(tss.qo, "_fetch_purchase_block_for_order_no", fetch_cancelled):
+            rows = tss.compare_sheet_orders("dev", "a", "b", SETTINGS, client=client)
+        self.assertEqual(rows[0]["status"], "待註記取消訂單")
+
+        results = tss.apply_sheet_updates(SETTINGS, rows, client=client)
+        self.assertEqual(results[0]["status"], "已註記取消訂單")
+        self.assertEqual(ws.values[1][8], "取消訂單")
+        self.assertEqual([u["range"] for u in ws.batches[0][0]], ["I2", "Q2"])
+
+    def test_cancelled_order_skips_new_date_edited_after_compare(self):
+        sheet = [
+            SHEET[0],
+            ["LC00219999", "取消客", "", "", "", "2026-10-23", "08:30-12:30", "4",
+             "2027-03-03", "08:30-12:30", "", "", ""],
+        ]
+        ws = _Worksheet(sheet)
+        client = _Client(ws)
+
+        def fetch_cancelled(session, order_no):
+            return _block(order_no, "2027-03-03", "08:30 - 12:30", status="取消訂單")
+
+        with patch.object(tss.qo, "_fetch_purchase_block_for_order_no", fetch_cancelled):
+            rows = tss.compare_sheet_orders("dev", "a", "b", SETTINGS, client=client)
+        ws.values[1][8] = "客服已修改"
+        results = tss.apply_sheet_updates(SETTINGS, rows, client=client)
+        self.assertEqual(results[0]["status"], "已跳過：比對後新日期欄已被修改")
+        self.assertEqual(ws.batches, [])
+
     def test_wrong_column_settings_stop_before_compare(self):
         # 設定成新格式（新日期 J、新時段 K），但表單是舊格式（I 新日期、J 新時段、K 空白）
         wrong = {**SETTINGS, "new_date_col": "J", "new_period_col": "K"}

@@ -516,11 +516,14 @@ def track_orders(env_name, backend_email, backend_password, items, progress=None
             now_date, now_period = qo._parse_service_date_time_loose(joined)
             now_period = _compact_period(now_period)
             status_match = re.search(r"付款狀態[：:]\s*([^\n]+)", joined)
+            payment_status = status_match.group(1).strip() if status_match else ""
             row.update({
                 "目前日期": now_date, "目前時段": now_period,
-                "付款狀態": status_match.group(1).strip() if status_match else "",
+                "付款狀態": payment_status,
                 "狀態": _tracking_status(item, now_date, now_period),
             })
+            if payment_status == "取消訂單":
+                row["表單新日期"] = "取消訂單"
             if not row["姓名"]:
                 for idx, line in enumerate(lines):
                     if re.fullmatch(r"09\d{8}", str(line).strip()):

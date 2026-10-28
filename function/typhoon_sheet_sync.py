@@ -5,8 +5,9 @@
 1. 依設定（試算表 ID、工作表名稱、訂單編號／原日期／原時段／新日期／新時段／
    異動日期／異動時段欄、起始列）讀取表單。
 2. 逐筆查後台目前的服務日期／時段，和表單的新日期／新時段比對（compare_sheet_orders）。
-   新日期／新時段只讀不改。
+   一般訂單的新日期／新時段只讀不改；取消訂單則準備在新日期欄註記「取消訂單」。
 3. 客服確認後才寫入（apply_sheet_updates）：
+   - 取消訂單 → 新日期欄填入「取消訂單」；
    - 和新日期／新時段不同 → 異動欄填入目前日期／時段；
    - 相同但異動欄還有舊值 → 清成空白；
    - 相同且異動欄空白 → 不動。
@@ -251,7 +252,7 @@ def _assert_headers(values, settings, keys):
 
 
 def compare_sheet_orders(env_name, backend_email, backend_password, settings, client=None, progress=None):
-    """讀表單並逐筆查後台目前日期／時段；不寫入。"""
+    """讀表單並逐筆查後台目前日期／時段與取消狀態；不寫入。"""
     settings = validate_settings(settings)
     worksheet = _open_target(settings, client)
     values = worksheet.get_all_values()
@@ -277,7 +278,9 @@ def compare_sheet_orders(env_name, backend_email, backend_password, settings, cl
                 if re.fullmatch(r"09\d{8}", str(line).strip()):
                     row["name"] = str(lines[i - 1]).strip() if i else ""
                     break
-            if not row["now_date"] or not row["now_period"]:
+            if row["payment_status"] == "取消訂單":
+                row["status"] = "已註記取消訂單" if item["sheet_date"] == "取消訂單" else "待註記取消訂單"
+            elif not row["now_date"] or not row["now_period"]:
                 row["status"] = "查詢失敗：讀不到目前日期／時段"
             elif _same_date(row["now_date"], item["sheet_date"]) and row["now_period"] == tt._compact_period(item["sheet_period"]):
                 row["status"] = "待清除異動欄" if (item["change_date"] or item["change_period"]) else "未變動"
@@ -291,21 +294,23 @@ def compare_sheet_orders(env_name, backend_email, backend_password, settings, cl
     return rows
 
 
-PENDING_STATUSES = ("待填異動", "待清除異動欄")
+PENDING_STATUSES = ("待填異動", "待清除異動欄", "待註記取消訂單")
 
 
 def apply_sheet_updates(settings, rows, client=None):
-    """寫入異動欄：「待填異動」填入目前日期／時段，「待清除異動欄」清成空白。
+    """寫入追蹤結果：異動日期／時段，或在新日期欄註記「取消訂單」。
 
-    只寫異動日期／異動時段兩欄。寫入前重讀格子；和比對時讀到的值不同
+    寫入前重讀格子；和比對時讀到的值不同
     （比對後被手動改過）或該列訂單編號已變動就跳過。回傳每列結果。
     """
     settings = validate_settings(settings)
     worksheet = _open_target(settings, client)
     values = worksheet.get_all_values()
     order_idx = column_index(settings["order_col"])
+    new_date_idx = column_index(settings["new_date_col"])
     date_idx = column_index(settings["change_date_col"])
     period_idx = column_index(settings["change_period_col"])
+    new_date_col = settings["new_date_col"].strip().upper()
     date_col = settings["change_date_col"].strip().upper()
     period_col = settings["change_period_col"].strip().upper()
     time_col = settings["updated_at_col"].strip().upper()
@@ -321,6 +326,14 @@ def apply_sheet_updates(settings, rows, client=None):
         if _cell(current, order_idx) != row["order_no"]:
             results.append({**row, "status": "已跳過：該列訂單編號已變動"})
             continue
+        if row["status"] == "待註記取消訂單":
+            if _cell(current, new_date_idx) != row["sheet_date"]:
+                results.append({**row, "status": "已跳過：比對後新日期欄已被修改"})
+                continue
+            updates.append({"range": f"{new_date_col}{row['row']}", "values": [["取消訂單"]]})
+            updates.append({"range": f"{time_col}{row['row']}", "values": [[stamp]]})
+            results.append({**row, "status": "已註記取消訂單", "sheet_date": "取消訂單"})
+            continue
         if _cell(current, date_idx) != row["change_date"] or _cell(current, period_idx) != row["change_period"]:
             results.append({**row, "status": "已跳過：比對後異動欄已被修改"})
             continue
@@ -334,7 +347,7 @@ def apply_sheet_updates(settings, rows, client=None):
         results.append({**row, "status": done, "change_date": new_values[0], "change_period": new_values[1]})
     if updates:
         worksheet.batch_update(updates, value_input_option="USER_ENTERED")
-        results = _verify_written(worksheet, results, date_idx, period_idx)
+        results = _verify_written(worksheet, results, new_date_idx, date_idx, period_idx)
     return results
 
 
@@ -346,17 +359,27 @@ def _target_label(worksheet):
     return f"{book_title}／{worksheet.title}" if book_title else worksheet.title
 
 
-def _verify_written(worksheet, results, date_idx, period_idx):
-    """寫入後重讀工作表，確認異動欄真的變成要寫的值；不符就標示出來，不假裝成功。"""
+def _verify_written(worksheet, results, new_date_idx, date_idx, period_idx):
+    """寫入後重讀工作表，確認追蹤結果真的寫入；不符就標示出來。"""
     values = worksheet.get_all_values()
     label = _target_label(worksheet)
     url = getattr(worksheet, "url", "")
     checked = []
     for row in results:
-        if row["status"] not in ("已填異動", "已清除異動欄"):
+        if row["status"] not in ("已填異動", "已清除異動欄", "已註記取消訂單"):
             checked.append(row)
             continue
         current = values[row["row"] - 1] if row["row"] - 1 < len(values) else []
+        if row["status"] == "已註記取消訂單":
+            got = _cell(current, new_date_idx)
+            if got == "取消訂單":
+                checked.append({**row, "written_to": label, "sheet_url": url})
+            else:
+                checked.append({
+                    **row, "written_to": label, "sheet_url": url,
+                    "status": f"寫入後讀回不符（新日期欄讀到：{got}）",
+                })
+            continue
         got_date, got_period = _cell(current, date_idx), _cell(current, period_idx)
         ok = _same_date(got_date, row["change_date"]) and tt._compact_period(got_period) == tt._compact_period(row["change_period"])
         if not row["change_date"] and not row["change_period"]:

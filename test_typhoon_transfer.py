@@ -258,6 +258,19 @@ class TrackingTests(unittest.TestCase):
         self.assertTrue(rows[2]["狀態"].startswith("查詢失敗"))
         self.assertEqual(tt.tracking_tsv(rows).split("\n")[0].split("\t"), tt.TRACK_HEADERS)
 
+    def test_track_cancelled_order_notes_new_date(self):
+        items = [{"order_no": "LC00215208", "name": "王璿瑋", "expected_date": "2027-03-03",
+                  "expected_period": "08:30-12:30"}]
+
+        def fetch(session, order_no):
+            return _block(order_no, "2027-03-03", "08:30 - 12:30", status="取消訂單")
+
+        with patch.object(tt, "_login", lambda *a: (None, "")), \
+                patch.object(tt.qo, "_fetch_purchase_block_for_order_no", fetch):
+            rows = tt.track_orders("dev", "a", "b", items)
+        self.assertEqual(rows[0]["付款狀態"], "取消訂單")
+        self.assertEqual(rows[0]["表單新日期"], "取消訂單")
+
 
 class LemonShiftTests(unittest.TestCase):
     def test_defaults(self):
