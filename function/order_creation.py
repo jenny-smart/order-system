@@ -97,21 +97,15 @@ def parse_row_input(row_text: str):
     return sorted(rows)
 
 
-def _shared_auto_filter(sheet_name, region, mode, candidate_rows=None, o_texts=None):
-    """與批次建單優化、雲端批次共用同一自動篩選條件（shared.selected_row_status_guard）。"""
+def find_auto_filter_rows(sheet_name, region, modes, candidate_rows=None):
+    """與批次建單優化、雲端批次共用同一自動篩選條件（無班表／系統未產生新訂單編號）。"""
     import function.batch_booking_optimized as batch_opt
     from shared.selected_row_status_guard import _auto_filter_rows
-    rows = _auto_filter_rows(batch_opt, sheet_name, mode, region=region, allow_failed=True, o_texts=o_texts)
     candidate_set = {int(x) for x in (candidate_rows or [])}
-    return [row for row in rows if not candidate_set or row in candidate_set]
-
-
-def find_no_slot_rows(sheet_name, region, candidate_rows=None):
-    return _shared_auto_filter(sheet_name, region, "no_schedule", candidate_rows)
-
-
-def find_missing_order_in_o_rows(sheet_name, region, candidate_rows=None, o_texts=None):
-    return _shared_auto_filter(sheet_name, region, "missing_order", candidate_rows, o_texts)
+    rows = set()
+    for mode in modes:
+        rows.update(_auto_filter_rows(batch_opt, sheet_name, mode, region=region, allow_failed=True))
+    return sorted(row for row in rows if not candidate_set or row in candidate_set)
 
 
 def format_log_message(msg):
@@ -130,42 +124,31 @@ def format_log_message(msg):
 
 
 def render_batch(backend_email, backend_password, env):
-    step("3", "批次建單")
-    info_panel("功能說明", [
-        "適合已將多筆訂單整理在 Google Sheet 的批次處理情境。",
-        "可依列號建立訂單、寄確認信、改 Google 日曆，並回填結果。",
-        "勾自動篩選時，可在輸入的列號範圍內篩出「未安排、訂單編號空白、無班表」或「O欄找不到訂單編號」的列。",
-    ])
-    info_panel("使用說明", ["先選擇執行區域與工作表名稱。", "輸入要執行的列號，例如 2、2,3,5 或 5-10。", "勾選要執行的項目後按開始執行。"])
-    step("4", "執行設定")
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        region = st.selectbox("執行區域", ["台北", "台中", "桃園", "新竹", "高雄"])
-    with c2:
-        sheet_name = st.text_input("工作表名稱", value="", placeholder="例：202604")
-    with c3:
-        row_input = st.text_input("執行列號", value="", placeholder="例：2,3,5-7")
-    st.markdown('<div class="hint-box">💡 列號支援：單列 <code>2</code>、逗號分隔 <code>2,3,5</code>、區間 <code>2,3,5-7</code></div>', unsafe_allow_html=True)
-    st.markdown("<hr>", unsafe_allow_html=True)
-    step("3", "執行項目")
     import function.batch_booking_optimized as batch_opt
     from shared import dev_sheet_copy
-    from shared.selected_row_status_guard import (_held_for_request, filter_row_numbers_by_service_date, held_message,
-                                                  render_o_text_filter, render_service_date_filter, render_stage_filter,
+    from shared.selected_row_status_guard import (_held_for_request, filter_modes, filter_row_numbers_by_service_date,
+                                                  held_message, render_run_options, render_target_section,
                                                   validate_service_date_range)
+    info_panel("批次建單", [
+        "依列號逐筆建立訂單，可寄確認信、改 Google 日曆，並回填結果。",
+        "勾自動篩選時，在輸入的列號範圍內（空白＝全部）篩出 O 欄「無班表」或「系統未產生新訂單編號」的列。",
+    ])
+    step("3", "工作表與列號")
+    c1, c2, c3 = st.columns(3)
+    region = c1.selectbox("執行區域", ["台北", "台中", "桃園", "新竹", "高雄"])
+    sheet_name = c2.text_input("工作表名稱", value="", placeholder="例：台北202610")
+    row_input = c3.text_input("執行列號", value="", placeholder="例：2,3,5-7", help="單列 2、逗號 2,3,5、區間 5-7。")
+    dev_sheet_copy.render_notice(st, env, sheet_name, "batch_booking", region=region,
+                                 credentials=(backend_email.strip(), backend_password.strip()))
+    step("4", "要約哪些列")
+    _target = render_target_section(st, "batch")
+    service_start, service_end = _target["service_start"], _target["service_end"]
+    auto_modes = filter_modes(_target["filter_mode"])
+    step("5", "執行項目")
     default_actions = dev_sheet_copy.default_actions(env)
-    selected_actions = st.multiselect("執行項目", options=dev_sheet_copy.action_options(env), default=default_actions, label_visibility="collapsed")
-    st.markdown('<div class="hint-box">可自由組合，例如只寄確認信、只改日曆，或全流程一起跑。</div>', unsafe_allow_html=True)
-    batch_allow_auto_lemon = auto_lemon_checkbox("batch_allow_auto_lemon")
-    st.caption("指定範圍及自動篩選可包含失敗列；調整後可直接重試，不必清空 N 欄結果。")
-    st.caption("三種批次共用建單條件：訂單編號空白＋狀態未安排＋「預約條件」空白或在本次預約對象內；其他列會略過並在執行過程註明原因。")
-    render_stage_filter(st, "batch_booking_stages")
-    service_start, service_end = render_service_date_filter(st, "batch_service_date")
-    auto_no_slot_rows = st.checkbox("自動篩選：狀態未安排＋訂單編號空白＋無班表", value=False, key="auto_no_slot_rows")
-    auto_missing_o_rows = st.checkbox("自動篩選：狀態未安排＋訂單編號空白＋O欄找不到訂單編號", value=False, key="auto_missing_o_rows")
-    o_texts = render_o_text_filter(st, batch_opt, dev_sheet_copy.read_sheet(st, env, sheet_name), region, "batch_o_texts") if auto_missing_o_rows else []
-    dev_sheet_copy.render_notice(st, env, sheet_name, "batch_booking")
-    st.markdown("<hr>", unsafe_allow_html=True)
+    selected_actions = st.multiselect("執行項目", options=dev_sheet_copy.action_options(env), default=default_actions,
+                                      label_visibility="collapsed", help="可自由組合，例如只寄確認信、只改日曆，或全流程一起跑。")
+    batch_allow_auto_lemon = render_run_options(st, "batch")["auto_lemon"]
     run_clicked = st.button("🚀  開始執行", use_container_width=True)
     with st.expander("📄  執行過程", expanded=True):
         log_box = st.empty()
@@ -193,25 +176,19 @@ def render_batch(backend_email, backend_password, env):
                 st.error(f"建立測試副本失敗：{e}"); st.stop()
             st.info(f"🧪 測試機 dev：本次使用測試副本「{sheet_name}」（原分頁「{_source_sheet}」不受影響）。")
         candidate_rows = []
-        if auto_no_slot_rows or auto_missing_o_rows:
+        if auto_modes:
             try:
                 candidate_rows = parse_row_input(row_input) if row_input.strip() else []
             except Exception as e:
                 st.error(f"列號格式錯誤：{e}"); st.stop()
             try:
-                target_set = set()
-                if auto_no_slot_rows:
-                    target_set.update(find_no_slot_rows(sheet_name.strip(), region, candidate_rows))
-                if auto_missing_o_rows:
-                    target_set.update(find_missing_order_in_o_rows(sheet_name.strip(), region, candidate_rows, o_texts))
-                target_rows = sorted(target_set)
+                target_rows = find_auto_filter_rows(sheet_name.strip(), region, auto_modes, candidate_rows)
             except Exception as e:
                 st.error(f"自動篩選列號失敗：{e}"); st.stop()
             if not target_rows:
                 try:
-                    modes = [m for m, on in (("no_schedule", auto_no_slot_rows), ("missing_order", auto_missing_o_rows)) if on]
-                    held_only = _held_for_request(batch_opt, sheet_name.strip(), region, modes=modes,
-                                                  mode_scope=candidate_rows or None, o_texts=o_texts,
+                    held_only = _held_for_request(batch_opt, sheet_name.strip(), region, modes=auto_modes,
+                                                  mode_scope=candidate_rows or None,
                                                   service_start=service_start, service_end=service_end)
                 except Exception:
                     held_only = []
@@ -239,10 +216,9 @@ def render_batch(backend_email, backend_password, env):
         total_fail = 0
         total_processed = 0
         try:
-            if auto_no_slot_rows or auto_missing_o_rows:
-                modes = [m for m, on in (("no_schedule", auto_no_slot_rows), ("missing_order", auto_missing_o_rows)) if on]
-                held_rows = _held_for_request(batch_opt, sheet_name.strip(), region, modes=modes,
-                                              mode_scope=candidate_rows or None, o_texts=o_texts,
+            if auto_modes:
+                held_rows = _held_for_request(batch_opt, sheet_name.strip(), region, modes=auto_modes,
+                                              mode_scope=candidate_rows or None,
                                               service_start=service_start, service_end=service_end)
             else:
                 held_rows = _held_for_request(batch_opt, sheet_name.strip(), region, target_rows,
