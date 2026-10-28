@@ -36,6 +36,18 @@ class DevSheetCopyTest(unittest.TestCase):
     def test_read_sheet_before_copy_reads_original(self):
         self.assertEqual(dsc.read_sheet(_st(), "dev", "台中202610"), "台中202610")
 
+    def test_dev_can_reuse_existing_copy_without_creating_another(self):
+        st, creator = _st(), Mock()
+        existing = "台北202610_dev1028-080000"
+        self.assertEqual(dsc.use_existing_copy(st, "dev", "台北202610", existing), existing)
+        self.assertEqual(dsc.read_sheet(st, "dev", "台北202610"), existing)
+        self.assertEqual(dsc.resolve_run_sheet(st, "dev", "台北202610", creator), existing)
+        creator.assert_not_called()
+
+    def test_existing_copy_must_match_source_prefix(self):
+        with self.assertRaisesRegex(ValueError, "台北202610_dev"):
+            dsc.use_existing_copy(_st(), "dev", "台北202610", "台中202610_dev1028-080000")
+
     def test_dev_actions_exclude_calendar(self):
         self.assertNotIn("改 Google 日曆", dsc.action_options("dev"))
         self.assertEqual(dsc.default_actions("dev"), ["建單"])
