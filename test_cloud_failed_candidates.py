@@ -11,11 +11,11 @@ import shared.booking_eligibility as booking_eligibility
 
 def test_failed_rows_excluded_from_candidates_and_auto_filters():
     source = Path(__file__).parent / 'shared' / 'selected_row_status_guard.py'
-    names = {'_scalar', 'normalize_status', '_first_series', '_safe_load_candidates', '_auto_filter_rows', '_mode_mask', '_creatable', '_o_label'}
+    names = {'_scalar', 'normalize_status', '_first_series', '_safe_load_candidates', '_auto_filter_rows', '_mode_mask', '_creatable'}
     tree = ast.parse(source.read_text())
     base = {'姓名': '王小明', '電話': '0912345678', '地址': '台北市',
             '日期': '2026-11-10', '開始時間': '09:00', '結束時間': '12:00',
-            '狀態': '未安排', '訂單編號': '', '原因': '無班表；找不到訂單編號'}
+            '狀態': '未安排', '訂單編號': '', '原因': '無班表；系統未產生新訂單編號'}
     rows = [
         {**base, '__sheet_row__': 2, '結果': ''},
         {**base, '__sheet_row__': 3, '結果': '失敗'},
@@ -25,7 +25,7 @@ def test_failed_rows_excluded_from_candidates_and_auto_filters():
         {**base, '__sheet_row__': 7, '結果': '', '預約條件': '未回覆'},
     ]
     namespace = {'pd': pd, 're': re, '_load_worksheet_unique': lambda _: (None, pd.DataFrame(rows)),
-                 'O_BLANK_OPTION': '（O欄空白）', '_ORDER_NO_PATTERN': r'(?:LC|TT|KK)\d+',
+                 'STORED_VALUE_REASONS': ('系統未產生新訂單編號', '餘額不足'),
                  **{k: getattr(booking_eligibility, k) for k in ('HOLD_COLUMN', 'can_create_order', 'can_process_row', 'normalize_status')}}
     exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names], type_ignores=[]), str(source), 'exec'), namespace)
     batch = SimpleNamespace(REQUIRED_COLUMNS=list(base), _text=lambda v: str(v or '').strip(),
@@ -35,5 +35,5 @@ def test_failed_rows_excluded_from_candidates_and_auto_filters():
     assert candidates['__sheet_row__'].tolist() == [2, 6]
     pending = candidates[candidates['訂單編號'].eq('')]
     assert pending['__sheet_row__'].tolist() == [2]
-    for mode in ('no_schedule', 'missing_order'):
+    for mode in ('no_schedule', 'stored_value'):
         assert namespace['_auto_filter_rows'](batch, '台北202611', mode) == [2]

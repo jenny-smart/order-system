@@ -201,37 +201,32 @@ def render(backend_email: str, backend_password: str, env: str) -> None:
     from shared import dev_sheet_copy
     from shared.batch_ui_consistency import region_credentials, resolve_target_rows
     from shared.hybrid_batch_runner import run_process_web_hybrid
-    from shared.selected_row_status_guard import (held_message, render_o_text_filter, render_service_date_filter,
-                                                  render_stage_filter, validate_service_date_range)
+    from shared.selected_row_status_guard import (filter_modes, held_message, render_run_options, render_target_section,
+                                                  validate_service_date_range)
 
-    step("4", "執行設定")
+    step("3", "工作表與列號")
     c1, c2, c3 = st.columns(3)
     regions = list(ACCOUNTS.keys()) or ["台北"]
     default_index = regions.index("台北") if "台北" in regions else 0
-    with c1:
-        region = st.selectbox("執行區域", regions, index=default_index, key="batch_opt_region")
-    with c2:
-        sheet_name = st.text_input("工作表名稱", placeholder="例：台北202610", key="batch_opt_sheet_name").strip()
-    with c3:
-        row_spec = st.text_input("執行列號", placeholder="例：2,3,5-7", key="batch_opt_row_spec").strip()
-    st.markdown('<div class="hint-box">💡 列號支援：單列 <code>2</code>、逗號分隔 <code>2,3,5</code>、區間 <code>2,3,5-7</code>。範圍內不符合條件的列會略過，不會中止整批。</div>', unsafe_allow_html=True)
-    st.markdown("<hr>", unsafe_allow_html=True)
+    region = c1.selectbox("執行區域", regions, index=default_index, key="batch_opt_region")
+    sheet_name = c2.text_input("工作表名稱", placeholder="例：台北202610", key="batch_opt_sheet_name").strip()
+    row_spec = c3.text_input("執行列號", placeholder="例：2,3,5-7", key="batch_opt_row_spec",
+                             help="單列 2、逗號 2,3,5、區間 5-7；範圍內不符合條件的列會略過，不中止整批。").strip()
+    dev_sheet_copy.render_notice(st, env, sheet_name, "batch_opt", region=region,
+                                 credentials=region_credentials(region, backend_email, backend_password))
 
-    step("3", "執行項目")
+    step("4", "要約哪些列")
+    target = render_target_section(st, "batch_opt")
+    service_start, service_end = target["service_start"], target["service_end"]
+    modes = filter_modes(target["filter_mode"])
+
+    step("5", "執行項目")
     selected_actions = st.multiselect(
         "執行項目", dev_sheet_copy.action_options(env),
         default=dev_sheet_copy.default_actions(env), key="batch_opt_actions_same_ui", label_visibility="collapsed",
+        help="同組 2 筆以上先批次建單並回填，再處理日曆。",
     )
-    st.markdown('<div class="hint-box">建單與回填優先；只有勾選改日曆且該筆已有訂單編號後，才初始化 Google Calendar。</div>', unsafe_allow_html=True)
-    allow_auto_lemon = st.checkbox("查無班表時自動補檸檬人（不動其他客人已配班專員）", value=False, key="batch_opt_allow_auto_lemon")
-    st.caption("指定範圍及自動篩選可包含失敗列；調整後可直接重試，不必清空 N 欄結果。")
-    st.caption("三種批次共用建單條件：訂單編號空白＋狀態未安排＋「預約條件」空白或在本次預約對象內；其他列會略過並在執行過程註明原因。")
-    render_stage_filter(st, "batch_opt_booking_stages")
-    service_start, service_end = render_service_date_filter(st, "batch_opt_service_date")
-    auto_no_slot = st.checkbox("自動篩選：狀態未安排＋訂單編號空白＋無班表", value=False, key="batch_opt_auto_no_slot")
-    auto_missing_o = st.checkbox("自動篩選：狀態未安排＋訂單編號空白＋O欄找不到訂單編號", value=False, key="batch_opt_auto_missing_o")
-    o_texts = render_o_text_filter(st, sys.modules[__name__], dev_sheet_copy.read_sheet(st, env, sheet_name), region, "batch_opt_o_texts") if auto_missing_o else []
-    dev_sheet_copy.render_notice(st, env, sheet_name, "batch_opt")
+    allow_auto_lemon = render_run_options(st, "batch_opt")["auto_lemon"]
 
     run_clicked = st.button("🚀  開始執行", use_container_width=True, key="batch_opt_same_ui_run")
     with st.expander("📄  執行過程", expanded=True):
@@ -272,7 +267,7 @@ def render(backend_email: str, backend_password: str, env: str) -> None:
         batch_opt = sys.modules[__name__]
         target_rows, invalid, region_mismatch, held = resolve_target_rows(
             batch_opt, sheet_name, region, row_spec,
-            auto_no_slot=auto_no_slot, auto_missing_o=auto_missing_o, o_texts=o_texts,
+            modes=modes,
             service_start=service_start, service_end=service_end,
         )
         if held:

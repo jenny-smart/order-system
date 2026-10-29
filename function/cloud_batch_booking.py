@@ -21,8 +21,7 @@ import streamlit as st
 from accounts import ACCOUNTS
 from shared import dev_sheet_copy
 from shared.cloud_booking_progress import PAUSED_PHASE
-from shared.selected_row_status_guard import (render_o_text_filter, render_service_date_filter, render_stage_filter,
-                                              validate_service_date_range)
+from shared.selected_row_status_guard import render_run_options, render_target_section, validate_service_date_range
 
 REPO = "jenny-smart/order-system"
 WORKFLOW = "optimized-cloud-batch-booking.yml"
@@ -42,7 +41,7 @@ def _token():
     return ""
 
 
-def _dispatch(sheet, chunk_size, max_rows, filter_mode, region, allow_auto_lemon, retry_failed=False, o_texts=(),
+def _dispatch(sheet, chunk_size, max_rows, filter_mode, region, allow_auto_lemon, retry_failed=False,
               stages=("可約",), env="prod", service_start=None, service_end=None):
     token = _token()
     if not token:
@@ -60,7 +59,6 @@ def _dispatch(sheet, chunk_size, max_rows, filter_mode, region, allow_auto_lemon
             "filter_mode":filter_mode, "region":region,
             "allow_auto_lemon":"true" if allow_auto_lemon else "false",
             "retry_failed":"true" if retry_failed else "false",
-            "o_texts": json.dumps(list(o_texts or []), ensure_ascii=False),
             "stages": json.dumps(list(stages), ensure_ascii=False),
             "service_start": service_start.isoformat() if hasattr(service_start, "isoformat") else str(service_start or ""),
             "service_end": service_end.isoformat() if hasattr(service_end, "isoformat") else str(service_end or ""),
@@ -337,63 +335,37 @@ def render(env: str):
     if active:
         st.info(f"⏳ 雲端成單執行中（{active}），進度見頁面最下方「雲端成單進度」；同一環境一次只跑一個，新送出的會排隊。")
 
-    st.markdown("#### 4　執行設定")
-    c1, c2, c3 = st.columns(3)
+    st.markdown("#### 3　工作表")
+    c1, c2 = st.columns(2)
     regions = list(ACCOUNTS.keys()) or ["台北"]
     default_index = regions.index("台北") if "台北" in regions else 0
     region = c1.selectbox("執行區域", regions, index=default_index, key="optimized_cloud_region")
-    sheet = c2.text_input("工作表名稱", placeholder="例：台北202610", key="optimized_cloud_sheet").strip()
-    c3.text_input("執行列號", value="雲端依下方篩選自動取得", disabled=True, key="optimized_cloud_rows_hint")
-    st.info("💡 雲端版由篩選條件自動取得列號；中斷重跑會先反查後台，避免重複建單。")
+    sheet = c2.text_input("工作表名稱", placeholder="例：台北202610", key="optimized_cloud_sheet",
+                          help="雲端依下方條件自動取得列號；中斷重跑會先反查後台，避免重複建單。").strip()
+    dev_sheet_copy.render_notice(st, env, sheet, "optimized_cloud", region=region)
 
-    st.markdown("#### 3　執行項目")
+    st.markdown("#### 4　要約哪些列")
+    target = render_target_section(st, "optimized_cloud")
+    stages, service_start, service_end, filter_mode = (target["stages"], target["service_start"],
+                                                       target["service_end"], target["filter_mode"])
+
+    st.markdown("#### 5　執行項目")
     cloud_actions = ["建單"] if is_dev else ["建單", "寄確認信", "改 Google 日曆"]
     st.multiselect(
         "執行項目", cloud_actions,
         default=cloud_actions, disabled=True,
         key="optimized_cloud_actions", label_visibility="collapsed",
     )
-    allow_auto_lemon = st.checkbox(
-        "查無班表時自動補檸檬人（不動其他客人已配班專員）",
-        value=False, key="optimized_cloud_allow_auto_lemon",
-    )
-    retry_failed = st.checkbox(
-        "我確認已調整，重試失敗列",
-        value=False, key="optimized_cloud_retry_failed",
-        help="已補班、要自動補檸檬人，或客人已重新儲值時勾選；仍依區域及篩選條件選取未安排、訂單編號空白的列。",
-    )
-    st.caption("三種批次共用建單條件：訂單編號空白＋狀態未安排＋「預約條件」空白或在本次預約對象內；其他列會略過並在執行過程註明原因。")
-    stages = render_stage_filter(st, "optimized_cloud_booking_stages")
-    service_start, service_end = render_service_date_filter(st, "optimized_cloud_service_date")
-    auto_no_slot = st.checkbox(
-        "自動篩選：狀態未安排＋訂單編號空白＋無班表",
-        value=False, key="optimized_cloud_no_schedule",
-    )
-    auto_missing_o = st.checkbox(
-        "自動篩選：狀態未安排＋訂單編號空白＋O欄找不到訂單編號",
-        value=False, key="optimized_cloud_missing_o",
-    )
-    if auto_missing_o:
-        import function.batch_booking_optimized as batch_opt
-        o_texts = render_o_text_filter(st, batch_opt, dev_sheet_copy.read_sheet(st, env, sheet), region, "optimized_cloud_o_texts", allow_failed=retry_failed)
-    else:
-        o_texts = []
+    run_options = render_run_options(st, "optimized_cloud", retry_option=True)
+    allow_auto_lemon, retry_failed = run_options["auto_lemon"], run_options["retry_failed"]
     c1, c2 = st.columns(2)
     chunk = c1.number_input("每輪最多處理列數", 1, 200, 50, 10, key="optimized_cloud_chunk")
     max_rows = c2.number_input("本次最多處理列數（0＝全部）", 0, 5000, 0, 10, key="optimized_cloud_max")
 
-    modes = []
-    if auto_no_slot:
-        modes.append("no_schedule")
-    if auto_missing_o:
-        modes.append("missing_order")
-    filter_mode = "both" if len(modes) == 2 else (modes[0] if modes else "all")
-    pending_key = (sheet, region, filter_mode, allow_auto_lemon, retry_failed, tuple(o_texts), tuple(stages),
+    pending_key = (sheet, region, filter_mode, allow_auto_lemon, retry_failed, tuple(stages),
                    str(service_start or ""), str(service_end or ""))
     _sync_cloud_settings(pending_key + (int(chunk), int(max_rows)))
-    st.caption("雲端預設略過 N 欄結果為「失敗」的列；調整後勾選「重試失敗列」，不必清空結果。要補檸檬人時請同時勾選上方補檸檬人選項。同一次執行中，每列處理後不會在下一輪重複執行。")
 
-    dev_sheet_copy.render_notice(st, env, sheet, "optimized_cloud")
     if st.button("檢查待成單筆數", disabled=not sheet, key="optimized_cloud_check"):
         try:
             validate_service_date_range(service_start, service_end)
@@ -401,7 +373,7 @@ def render(env: str):
                 from shared.cloud_batch_booking import load_pending
                 rows = [row_no for row_no, _, _ in load_pending(
                     dev_sheet_copy.read_sheet(st, env, sheet), filter_mode=filter_mode, selected_region=region, allow_auto_lemon=allow_auto_lemon,
-                    retry_failed=retry_failed, o_texts=o_texts, service_start=service_start, service_end=service_end,
+                    retry_failed=retry_failed, service_start=service_start, service_end=service_end,
                 )]
             st.session_state.optimized_cloud_pending = len(rows)
             st.session_state.optimized_cloud_pending_rows = rows
@@ -424,11 +396,11 @@ def render(env: str):
                 st.info(f"🧪 測試機 dev：本次使用測試副本「{run_sheet}」（原分頁「{sheet}」不受影響）。")
                 st.session_state['optimized_cloud_dispatch'] = _dispatch(
                     run_sheet, int(chunk), int(max_rows), filter_mode, region, allow_auto_lemon, retry_failed,
-                    o_texts, stages, env="dev", service_start=service_start, service_end=service_end)
+                    stages, env="dev", service_start=service_start, service_end=service_end)
             else:
                 st.session_state['optimized_cloud_dispatch'] = _dispatch(
                     run_sheet, int(chunk), int(max_rows), filter_mode, region, allow_auto_lemon, retry_failed,
-                    o_texts, stages, service_start=service_start, service_end=service_end)
+                    stages, service_start=service_start, service_end=service_end)
             _clear_pending_preview()
             st.success("已交給 GitHub Actions 雲端執行；可關閉瀏覽器或電腦。")
             st.markdown(f"[查看雲端執行進度](https://github.com/{REPO}/actions/workflows/{WORKFLOW})")
