@@ -29,22 +29,18 @@ class CloudCandidatesTest(unittest.TestCase):
         self.df.loc[self.df['__sheet_row__'].eq(3), '結果'] = ''
         self.assertEqual([x[0] for x in cloud.load_pending('sheet')], [2, 3])
 
-    def test_stored_value_filter_retries_failed_rows_without_retry_flag(self):
-        # 截圖情境：N 欄失敗、O 欄「系統未產生新訂單編號」，客人儲值後要能直接篩出重新成單。
-        self.df.loc[self.df['__sheet_row__'].eq(3), '原因'] = '系統未產生新訂單編號'
-        self.assertEqual([x[0] for x in cloud.load_pending('sheet', filter_mode='stored_value')], [3])
-        self.assertEqual([x[0] for x in cloud.load_pending('sheet', filter_mode='both')], [2, 3])
-        # 無班表的失敗列仍要勾「重試失敗列」才會重跑。
-        self.df.loc[self.df['__sheet_row__'].eq(3), '原因'] = '無班表'
-        self.assertEqual([x[0] for x in cloud.load_pending('sheet', filter_mode='both')], [2])
-        self.assertEqual([x[0] for x in cloud.load_pending('sheet', filter_mode='both', retry_failed=True)], [2, 3])
-
-    def test_explicit_retry_applies_to_all_filter_modes(self):
-        for mode in ('all', 'no_schedule'):
+    def test_auto_filters_include_failed_rows_without_retry_flag(self):
+        # 截圖情境：N 欄失敗、O 欄「無班表」或「系統未產生新訂單編號」，不勾重試也要篩得出來。
+        for reason, mode in (('系統未產生新訂單編號', 'stored_value'), ('無班表', 'no_schedule')):
             with self.subTest(mode=mode):
-                self.assertIn(3, [x[0] for x in cloud.load_pending('sheet', filter_mode=mode, retry_failed=True)])
-                self.assertNotIn(3, [x[0] for x in cloud.load_pending('sheet', filter_mode=mode)])
-                self.assertNotIn(3, [x[0] for x in cloud.load_pending('sheet', filter_mode=mode, allow_auto_lemon=True)])
+                self.df.loc[self.df['__sheet_row__'].eq(3), '原因'] = reason
+                self.assertIn(3, [x[0] for x in cloud.load_pending('sheet', filter_mode=mode)])
+                self.assertIn(3, [x[0] for x in cloud.load_pending('sheet', filter_mode='both')])
+
+    def test_retry_flag_controls_failed_rows_without_auto_filter(self):
+        self.assertIn(3, [x[0] for x in cloud.load_pending('sheet', retry_failed=True)])
+        self.assertNotIn(3, [x[0] for x in cloud.load_pending('sheet')])
+        self.assertNotIn(3, [x[0] for x in cloud.load_pending('sheet', allow_auto_lemon=True)])
 
     def test_local_optimized_includes_failed_rows(self):
         # order-system 本機優化入口直接呼叫 _safe_load_candidates(allow_failed=True)（原版 monkeypatch batch_opt._load_candidates）。
