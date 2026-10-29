@@ -251,7 +251,10 @@ def render_target_section(st, key):
     no_schedule = c1.checkbox("自動篩選：O欄「無班表」", value=False, key=f"{key}_auto_no_slot")
     stored_value = c2.checkbox("自動篩選：O欄「系統未產生新訂單編號」", value=False, key=f"{key}_auto_stored_value",
                                help="多半是儲值金不足沒成單；客人儲值完成後，勾這個篩出來重新成單。")
-    st.caption("只建「狀態未安排＋訂單編號空白」且預約條件在本次對象內的列；兩個自動篩選可複選，都不勾＝依列號。")
+    if not stages:
+        st.warning("「本次預約對象」沒有選任何階段：只會約「預約條件」欄空白的列。排程有填預約條件（例如可約）時，請至少選一項。")
+    st.caption("只建「狀態未安排＋訂單編號空白」且預約條件在本次對象內的列；兩個自動篩選可複選，都不勾＝依列號。"
+               "自動篩選會包含 N 欄「失敗」的列。")
     return {"stages": stages, "service_start": service_start, "service_end": service_end,
             "filter_mode": filter_mode(no_schedule, stored_value)}
 
@@ -264,8 +267,8 @@ def render_run_options(st, key, retry_option=False):
     retry_failed = True
     if retry_option:
         retry_failed = c2.checkbox("重試 N 欄「失敗」的列", value=False, key=f"{key}_retry_failed",
-                                   help="雲端預設略過 N 欄「失敗」的列；已補班或要補檸檬人時勾選，不必清空 N 欄。"
-                                        "「系統未產生新訂單編號」篩選不受此限。")
+                                   help="沒勾自動篩選時，雲端預設略過 N 欄「失敗」的列；已補班或要補檸檬人時勾選，"
+                                        "不必清空 N 欄。勾了自動篩選（無班表／系統未產生新訂單編號）時不需要勾這個。")
     return {"auto_lemon": auto_lemon, "retry_failed": retry_failed}
 
 
