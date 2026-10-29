@@ -63,9 +63,17 @@ runtime_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
 runtime_dir.chmod(0o700)
 for name in ("memo_system", "config"):
     (runtime_dir / name).mkdir(exist_ok=True)
-for name in ("__init__.py", "atm.py", "atm_schedule.py", "memo.py", "env.py"):
+for name in ("__init__.py", "atm.py", "atm_schedule.py", "memo.py"):
     shutil.copy2(Path(repo_dir) / "memo_system" / name, runtime_dir / "memo_system" / name)
 shutil.copy2(Path(repo_dir) / "accounts.py", runtime_dir / "accounts.py")
+# memo.py 的 login()／atm.py 的 _atm_sheet_config() 各自 lazy-import 這些
+# 共用模組（lemon_backend_login 正本在 tool-system/tools/common/，此 repo
+# 放在 shared/ 套件下；year_roots 在 repo 根目錄），執行副本沒有的話排程
+# 會整個失敗（ModuleNotFoundError），查詢、貼上、複查取消訂單全部不會跑。
+(runtime_dir / "shared").mkdir(exist_ok=True)
+for name in ("__init__.py", "lemon_backend_login.py"):
+    shutil.copy2(Path(repo_dir) / "shared" / name, runtime_dir / "shared" / name)
+shutil.copy2(Path(repo_dir) / "year_roots.py", runtime_dir / "year_roots.py")
 runtime_config = dict(config, calendar_file="taiwan_work_calendar.json")
 (runtime_dir / "config" / "atm_schedule.json").write_text(json.dumps(runtime_config, ensure_ascii=False), encoding="utf-8")
 (runtime_dir / "config" / "taiwan_work_calendar.json").write_text(json.dumps(calendar, ensure_ascii=False), encoding="utf-8")
