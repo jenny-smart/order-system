@@ -293,6 +293,51 @@ _LOADED_AT = 0.0
 RELOAD_SECONDS = 600  # 常駐程式每 10 分鐘重讀一次，改 K 欄模式不必重啟
 
 
+def _get_service_account_info() -> dict:
+    """自帶一份服務帳號憑證解析，不依賴 orders.py／shared.gsheet（shared.gsheet
+    本身又 import orders，一樣會循環帶到整個 orders.py）。ATM 本機排程等
+    獨立執行環境沒有部署 orders.py，若在這裡 import orders 會讓整段年度
+    根目錄查詢 ModuleNotFoundError，連帶讓呼叫方（例如 ATM 待付款複查）
+    整個失敗。內容與 shared/gsheet.py 的 get_service_account_info 一致。"""
+    import json
+    import os
+
+    try:
+        import streamlit as st
+
+        if "gcp_service_account" in st.secrets:
+            return dict(st.secrets["gcp_service_account"])
+        if "GOOGLE_SERVICE_ACCOUNT" in st.secrets:
+            return dict(st.secrets["GOOGLE_SERVICE_ACCOUNT"])
+    except Exception:
+        pass
+
+    raw_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
+    if raw_json:
+        return json.loads(raw_json)
+
+    candidate_files = []
+    try:
+        from accounts import GOOGLE_SERVICE_ACCOUNT_FILE
+
+        if GOOGLE_SERVICE_ACCOUNT_FILE:
+            candidate_files.append(GOOGLE_SERVICE_ACCOUNT_FILE)
+    except Exception:
+        pass
+    candidate_files.append("google_service_account.json")
+
+    for fp in candidate_files:
+        if fp and os.path.exists(fp):
+            with open(fp, "r", encoding="utf-8") as f:
+                return json.load(f)
+
+    raise FileNotFoundError(
+        "找不到 Google 憑證。請在 Streamlit secrets 設定 gcp_service_account 或 "
+        "GOOGLE_SERVICE_ACCOUNT，或提供 GOOGLE_SERVICE_ACCOUNT_JSON，或放置 "
+        "google_service_account.json。"
+    )
+
+
 def _master_id() -> str:
     import os
 
@@ -323,10 +368,8 @@ def get_year_roots() -> Optional[YearRoots]:
         from google.oauth2.service_account import Credentials
         from googleapiclient.discovery import build
 
-        from orders import get_service_account_info
-
         creds = Credentials.from_service_account_info(
-            get_service_account_info(),
+            _get_service_account_info(),
             scopes=["https://www.googleapis.com/auth/spreadsheets",
                     "https://www.googleapis.com/auth/drive.readonly"],
         )
