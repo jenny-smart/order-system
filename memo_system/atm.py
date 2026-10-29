@@ -1310,6 +1310,7 @@ def append_change_order_charges(region: str, rows: List[Dict], ui_logger=None) -
 def flag_cancelled_pending_orders(region: str, session, ui_logger=None) -> Dict:
     """排程複查待對帳區；取消訂單在同列 M 欄標記。"""
     log = make_logger(ui_logger)
+    log(f"===== 開始複查「{region}」待對帳列是否已取消 =====")
     ws = get_atm_worksheet(region)
     all_values = memo.with_retry(ws.get_all_values)
     last_a_row = max(
@@ -1335,6 +1336,7 @@ def flag_cancelled_pending_orders(region: str, session, ui_logger=None) -> Dict:
 
     if updates:
         memo.with_retry(ws.batch_update, updates, value_input_option="RAW")
+    log(f"===== 「{region}」複查完成：檢查 {checked} 筆，{len(updates)} 筆取消訂單已標註 =====")
     return {"checked": checked, "flagged": len(updates)}
 
 
