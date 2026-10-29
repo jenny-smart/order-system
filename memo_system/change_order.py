@@ -1,11 +1,15 @@
 # ============================================================
 # 檔名：change_order.py
-# 版本：v3.4
+# 版本：v3.5
 # 模組：清潔異動模組：車馬費 / 異動服務收款 / 異動服務退款
 # 建立日期：2026-06-22
 # 最後更新：2026-08-27
 #
 # Change Log
+# v3.5
+# - 階段 A 寫入清潔異動工作表時，Google Sheets 回 429（每分鐘讀取額度用完）
+#   會等額度恢復後自動重試，不再直接失敗；每列改成一次 batch_update 寫入，
+#   不再逐格 update_acell，大幅減少 API 呼叫次數。
 # v3.4
 # - 服務異動的工作天、訂單篩選與加減時判斷統一使用台灣時區日期，避免
 #   Streamlit Cloud 在台灣凌晨仍以 UTC 前一天計算。
@@ -1206,13 +1210,15 @@ def append_rows_to_sheet(region: str, rows: list, ui_logger=None):
         if ui_logger:
             ui_logger(msg)
 
-    ws = get_worksheet(region)
+    from . import memo
+
+    ws = memo.with_retry(get_worksheet, region)
 
     # 不能用 get_all_values() 的列數判斷起始列：
     # 工作表很多空白列掛了資料驗證下拉選單，即使沒選值，
     # Google Sheets 仍可能把那些列算進「有內容」，導致抓到的列數是整個格線上限（例如 922），
     # 而不是實際資料的最後一列。改成只看 B 欄（狀態）實際有值的最後一列。
-    b_values = ws.col_values(2)  # B 欄
+    b_values = memo.with_retry(ws.col_values, 2)  # B 欄
     last_data_row = len(b_values)
     while last_data_row > 0 and not b_values[last_data_row - 1].strip():
         last_data_row -= 1
@@ -1226,7 +1232,7 @@ def append_rows_to_sheet(region: str, rows: list, ui_logger=None):
 
     needed_rows = start_row + len(rows) - 1
     if needed_rows > ws.row_count:
-        ws.add_rows(needed_rows - ws.row_count)
+        memo.with_retry(ws.add_rows, needed_rows - ws.row_count)
 
     written = 0
     written_pending_charges = []
@@ -1234,11 +1240,15 @@ def append_rows_to_sheet(region: str, rows: list, ui_logger=None):
     for i, row in enumerate(rows):
         target_row = start_row + i
         try:
-            for col in col_letters:
-                if col in row and row[col] != "":
-                    ws.update_acell(f"{col}{target_row}", row[col])
-            ws.update_acell(f"AD{target_row}", datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d %H:%M:%S"))
-            ws.update_acell(f"AE{target_row}", "建立異動")
+            # 整列一次寫入；USER_ENTERED 與原本 update_acell 的寫入方式一致。
+            # gspread 會把 range 改成含分頁名稱，重試時要傳新的 dict，避免分頁名稱被加兩次。
+            cells = [
+                {"range": f"{col}{target_row}", "values": [[row[col]]]}
+                for col in col_letters if col in row and row[col] != ""
+            ]
+            cells.append({"range": f"AD{target_row}", "values": [[datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d %H:%M:%S")]]})
+            cells.append({"range": f"AE{target_row}", "values": [["建立異動"]]})
+            memo.with_retry(lambda: ws.batch_update([dict(c) for c in cells], value_input_option="USER_ENTERED"))
             written += 1
             if row.get("B") == STATUS_PENDING_CHARGE:
                 written_pending_charges.append(row)

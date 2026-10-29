@@ -75,6 +75,9 @@ SLEEP_SECONDS = float(secret_value("SLEEP_SECONDS", getattr(env, "SLEEP_SECONDS"
 REQUEST_TIMEOUT = 30
 MAX_RETRIES = 3
 RETRY_BACKOFF = 1.2
+# Google Sheets 讀寫額度是「每分鐘每個服務帳號」計算，所有人共用同一個帳號；
+# 遇到 429 時要等到下一分鐘額度恢復，原本 1~2 秒的重試間隔不夠。
+RATE_LIMIT_WAITS = (15, 25, 30)
 
 CURRENT_ROW_LOGS: List[str] = []
 
@@ -108,17 +111,25 @@ def blank_result():
     }
 
 
+def is_rate_limited(exc: Exception) -> bool:
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    return status == 429 or "[429]" in str(exc) or "Quota exceeded" in str(exc)
+
+
 def with_retry(fn, *args, **kwargs):
-    last_err = None
-    for attempt in range(1, MAX_RETRIES + 1):
+    attempt = 0
+    rate_limit_waits = list(RATE_LIMIT_WAITS)
+    while True:
         try:
             return fn(*args, **kwargs)
         except Exception as e:
-            last_err = e
-            if attempt >= MAX_RETRIES:
-                break
+            if is_rate_limited(e) and rate_limit_waits:
+                time.sleep(rate_limit_waits.pop(0))
+                continue
+            attempt += 1
+            if attempt >= MAX_RETRIES or is_rate_limited(e):
+                raise
             time.sleep(RETRY_BACKOFF * attempt)
-    raise last_err
 
 
 def session_get(session: requests.Session, url: str, **kwargs):
