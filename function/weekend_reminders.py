@@ -29,6 +29,11 @@ TRACKING_HEADERS = [
 NOTICE_STATUSES = ["待通知", "已排程", "已通知", "發送失敗"]
 REPLY_STATUSES = ["未回覆", "已回覆", "需追蹤"]
 TRACKED_ORDER_STATUSES = {"已付款", "取消訂單", "已退款"}
+# 內勤工作表單（台北）的「週末提醒」分頁以 IMPORTRANGE 帶入追蹤表 A:H，I 欄回覆狀態為手動填寫；
+# 新增追蹤列前要先在該分頁插入同樣位置的空白列，I 欄才不會錯位。
+STAFF_SHEET_CATEGORY = "內勤工作表單"
+STAFF_SHEET_AREA = "台北"
+STAFF_SHEET_TITLE = "週末提醒"
 
 
 def upcoming_weekend(reference=None):
@@ -429,19 +434,24 @@ def load_tracking_rows():
     return [dict(zip(TRACKING_HEADERS, row + [""] * (len(TRACKING_HEADERS) - len(row)))) for row in values[1:] if row and row[0]]
 
 
+def _order_key(item):
+    return reminder_key({"訂單編號": item.get("order_no", ""), "服務日期": item.get("service_date", "")})
+
+
 def merge_tracking_rows(order_rows, existing_rows, scheduled_at=""):
-    existing = {row.get("訂單編號", ""): dict(row) for row in existing_rows}
+    """以「訂單編號＋服務日期」比對；訂單改期後的新日期視為新增，避免漏提醒。"""
+    existing = {reminder_key(row): dict(row) for row in existing_rows}
 
     status_updates = []
     for item in order_rows:
-        order_no = item.get("order_no", "")
-        old = existing.get(order_no)
+        key = _order_key(item)
+        old = existing.get(key)
         order_status = item.get("order_status", "")
         if old and order_status and old.get("訂單狀態") != order_status:
             updated = dict(old)
             updated["訂單狀態"] = order_status
             status_updates.append(updated)
-            existing[order_no] = updated
+            existing[key] = updated
     if status_updates:
         save_tracking_rows(status_updates)
 
@@ -449,7 +459,7 @@ def merge_tracking_rows(order_rows, existing_rows, scheduled_at=""):
     for item in order_rows:
         if item.get("order_status") != "已付款":
             continue
-        old = existing.get(item["order_no"], {})
+        old = existing.get(_order_key(item), {})
         message = item.get("message", "")
         merged.append({
             "資料狀態": "已存在" if old else "新增",
@@ -485,18 +495,15 @@ def _tracking_message(raw, old):
         return ""
 
 
-def save_tracking_rows(rows):
-    """依訂單編號 upsert；狀態首次改變時自動補台北時間。"""
-    worksheet = _tracking_worksheet()
-    existing_rows = load_tracking_rows()
-    existing = {row.get("訂單編號", ""): row for row in existing_rows}
-    now = datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d %H:%M")
+def plan_tracking_rows(existing_rows, rows, now):
+    """依訂單編號＋服務日期 upsert；回傳（排序後全部列, 新增列的工作表列號, 本次寫入筆數）。"""
+    existing = {reminder_key(row): row for row in existing_rows}
     incoming = {}
     if hasattr(rows, "to_dict"):
         rows = rows.to_dict("records")
     for raw in rows:
         row = {header: str(raw.get(header, "") or "") for header in TRACKING_HEADERS}
-        old = existing.get(row["訂單編號"], {})
+        old = existing.get(reminder_key(row), {})
         if not row["通知內容"]:
             row["通知內容"] = _tracking_message(raw, old)
         if not row["訂單狀態"]:
@@ -506,13 +513,58 @@ def save_tracking_rows(rows):
         if row["回覆狀態"] == "已回覆" and not row["回覆時間"]:
             row["回覆時間"] = old.get("回覆時間") or now
         row["最後更新"] = now
-        incoming[row["訂單編號"]] = row
+        incoming[reminder_key(row)] = row
+    new_keys = set(incoming) - set(existing)
     existing.update(incoming)
     all_rows = list(existing.values())
     all_rows.sort(key=lambda item: (item.get("服務日期", ""), item.get("服務時間", ""), item.get("訂單編號", "")), reverse=True)
+    new_positions = [index + 2 for index, row in enumerate(all_rows) if reminder_key(row) in new_keys]
+    return all_rows, new_positions, len(incoming)
+
+
+def _row_runs(positions):
+    """把遞增列號合併成連續區段 [(起始列, 列數)]。"""
+    runs = []
+    for position in sorted(positions):
+        if runs and runs[-1][0] + runs[-1][1] == position:
+            runs[-1] = (runs[-1][0], runs[-1][1] + 1)
+        else:
+            runs.append((position, 1))
+    return runs
+
+
+def insert_staff_sheet_rows(positions):
+    """在內勤工作表單「週末提醒」分頁插入空白列（列號為新增後的最終位置，由上往下插入）。"""
+    if not positions:
+        return
+    from year_roots import root_file_id
+
+    client = orders.build_gsheet_client()
+    spreadsheet = client.open_by_key(root_file_id(STAFF_SHEET_CATEGORY, STAFF_SHEET_AREA))
+    worksheet = spreadsheet.worksheet(STAFF_SHEET_TITLE)
+    spreadsheet.batch_update({"requests": [
+        {"insertDimension": {
+            "range": {
+                "sheetId": worksheet.id, "dimension": "ROWS",
+                "startIndex": start - 1, "endIndex": start - 1 + count,
+            },
+            "inheritFromBefore": False,
+        }}
+        for start, count in _row_runs(positions)
+    ]})
+
+
+def save_tracking_rows(rows):
+    """依訂單編號＋服務日期 upsert；狀態首次改變時自動補台北時間。
+    有新增列時，先在內勤工作表單「週末提醒」插入對應空白列再寫入追蹤表。"""
+    worksheet = _tracking_worksheet()
+    existing_rows = load_tracking_rows()
+    now = datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d %H:%M")
+    all_rows, new_positions, count = plan_tracking_rows(existing_rows, rows, now)
+    insert_staff_sheet_rows(new_positions)
     matrix = [TRACKING_HEADERS] + [[row.get(header, "") for header in TRACKING_HEADERS] for row in all_rows]
     old_row_count = len(worksheet.get_all_values())
     worksheet.update(range_name="A1", values=matrix)
     if old_row_count > len(matrix):
         worksheet.batch_clear([f"A{len(matrix) + 1}:Q{old_row_count}"])
-    return len(incoming)
+    return count

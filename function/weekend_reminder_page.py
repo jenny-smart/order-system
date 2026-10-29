@@ -109,7 +109,7 @@ def render(backend_email, backend_password, env):
                 column_config={
                     "選取": st.column_config.CheckboxColumn("儲存", help="只儲存勾選訂單，不會發送 LINE"),
                     "資料狀態": st.column_config.TextColumn(
-                        "資料狀態", help="新增＝Google Sheet 尚無此訂單編號；已存在＝將更新原列，不會重複新增。",
+                        "資料狀態", help="新增＝Google Sheet 尚無此訂單編號＋服務日期（改期後的新日期也算新增）；已存在＝將更新原列，不會重複新增。",
                     ),
                     "LINE": st.column_config.LinkColumn("LINE", display_text="開啟聊天"),
                     "通知狀態": st.column_config.SelectboxColumn("通知狀態", options=NOTICE_STATUSES, required=True),
@@ -153,7 +153,8 @@ def render(backend_email, backend_password, env):
                         ]
                         st.success(
                             f"已儲存 {len(_selected)} 筆：新增 {_new_count} 筆、"
-                            f"更新 {_updated_count} 筆；同訂單編號不會重複。"
+                            f"更新 {_updated_count} 筆；同訂單編號＋服務日期不會重複，"
+                            "新增列已先插入內勤工作表單「週末提醒」。"
                         )
                         log_execution(
                             function_name="週末服務提醒：儲存勾選名單", status="成功",
