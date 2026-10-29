@@ -1165,12 +1165,23 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                 atm_list_ui_log("===== 開始查詢 ATM 待付款名單 =====")
                 with st.spinner("查詢中，請稍候…"):
                     session = get_session(ui_logger=atm_list_ui_log)
+                    # 每次更新待付款資料時，先複查「台北/台中」ATM 工作表裡既有、
+                    # 還沒對帳完成的列是否已經是取消訂單；是的話在 M 欄標註「取消訂單」，
+                    # 不然這些列會一直停在待對帳、沒人發現已經取消了。
+                    status_check = atm.flag_cancelled_pending_orders(region=region, session=session, ui_logger=atm_list_ui_log)
+                    if status_check.get("flagged"):
+                        atm_list_ui_log(f"⚠️ 複查發現 {status_check['flagged']} 筆取消訂單，已在 M 欄標註「取消訂單」")
                     rows = atm.search_atm_unpaid_orders(session=session, date_until=date_until.strftime("%Y-%m-%d"), ui_logger=atm_list_ui_log)
                 st.session_state.atm_list_rows = rows
+                st.session_state.atm_list_status_check = status_check
                 atm_list_ui_log("===== 查詢完成 =====")
                 st.rerun()
             except Exception as e:
                 atm_list_ui_log(f"❌ 查詢失敗：{e}"); st.error(str(e))
+
+        status_check = st.session_state.get("atm_list_status_check")
+        if status_check and status_check.get("flagged"):
+            st.warning(f"⚠️ 複查發現 {status_check['flagged']} 筆既有列是取消訂單，已在 M 欄標註「取消訂單」（共複查 {status_check.get('checked', 0)} 筆）")
 
         rows = st.session_state.get("atm_list_rows")
         if rows is not None:
