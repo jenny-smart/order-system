@@ -35,7 +35,7 @@ def test_progress_storage_failure_does_not_abort_booking():
 
 def test_live_group_callback_reports_completed_rows_before_finish():
     rows = [(2, '台北', ''), (3, '台北', '')]
-    def pending(sheet, excluded, *args):
+    def pending(sheet, excluded, *args, **kwargs):
         return [row for row in rows if row[0] not in excluded]
     def run_group(**kwargs):
         kwargs['progress_callback'](1, 1, 0, '3')
@@ -87,7 +87,7 @@ def test_held_count_is_published_and_old_rows_default_to_zero():
     assert decode(['123:2', 'sheet', '成單中', '3', '2', '1', '7', '10', '22', 'time'])['held'] == 0
     assert decode(['123:2', 'sheet', '成單中', '3', '2', '1', '7', '10', '22', 'time', '4'])['held'] == 4
     rows = [(2, '台北', '')]
-    with patch.object(cloud, 'load_pending', side_effect=lambda sheet, excluded, *a: [r for r in rows if r[0] not in excluded]), \
+    with patch.object(cloud, 'load_pending', side_effect=lambda sheet, excluded, *a, **k: [r for r in rows if r[0] not in excluded]), \
          patch.object(cloud, 'ACCOUNTS', {'台北': {'email': 'test', 'password': 'test'}}), \
          patch.object(cloud, 'run_process_web_hybrid', return_value={'success_count': 1, 'fail_count': 0}), \
          patch.object(cloud, 'held_rows', return_value=[5, 6]), \
@@ -137,7 +137,7 @@ def test_pause_after_group_stops_cleanly_and_reports_remaining():
     rows = [(2, '台北', ''), (3, '台北', ''), (4, '台北', '')]
     done = set()
 
-    def pending(sheet, excluded, *args):
+    def pending(sheet, excluded, *args, **kwargs):
         return [row for row in rows if row[0] not in excluded and row[0] not in done]
 
     def run_group(**kwargs):

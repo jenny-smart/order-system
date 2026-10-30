@@ -211,7 +211,7 @@ def render(backend_email: str, backend_password: str, env: str) -> None:
     region = c1.selectbox("執行區域", regions, index=default_index, key="batch_opt_region")
     sheet_name = c2.text_input("工作表名稱", placeholder="例：台北202610", key="batch_opt_sheet_name").strip()
     row_spec = c3.text_input("執行列號", placeholder="例：2,3,5-7", key="batch_opt_row_spec",
-                             help="單列 2、逗號 2,3,5、區間 5-7；範圍內不符合條件的列會略過，不中止整批。").strip()
+                             help="單列 2、逗號 2,3,5、區間 5-7；空白＝不限（需勾自動篩選）。有填時只在這些列裡，再依預約對象與自動篩選挑出要約的列（AND）。").strip()
     dev_sheet_copy.render_notice(st, env, sheet_name, "batch_opt", region=region,
                                  credentials=region_credentials(region, backend_email, backend_password))
 

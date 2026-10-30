@@ -34,17 +34,19 @@ region_credentials = _region_credentials
 
 
 def resolve_target_rows(batch_opt, sheet_name, region, row_spec="", modes=(), service_start=None, service_end=None):
-    """依列號＋自動篩選取得要執行的列；範圍內不符合條件或非本區的列略過，不中止整批。
+    """依 執行列號 AND 自動篩選 AND 預約條件 取得要執行的列；範圍內不符合條件或非本區的列略過，不中止整批。
 
     回傳 (target_rows, invalid_rows, region_mismatch_rows, held_rows)。held_rows 是
     「預約條件」不在本次預約對象而略過的列（三種批次共用）。本機入口一律允許失敗列重試。
     modes：自動篩選（no_schedule＝O欄無班表、stored_value＝O欄系統未產生新訂單編號），可複選。
     """
     explicit_rows = _parse_rows(batch_opt, row_spec)
-    requested_rows = set(explicit_rows)
+    requested_rows = set() if modes else set(explicit_rows)
     for mode in modes:
         requested_rows.update(_auto_filter_rows(batch_opt, sheet_name, mode, region=region, allow_failed=True,
                                                 service_start=service_start, service_end=service_end))
+    if modes and explicit_rows:
+        requested_rows &= set(explicit_rows)
     requested_rows = sorted(requested_rows)
     if not requested_rows and not modes:
         raise ValueError("沒有指定列號，也沒有自動篩選到符合條件的列。")
@@ -63,8 +65,8 @@ def resolve_target_rows(batch_opt, sheet_name, region, row_spec="", modes=(), se
             continue
         target_rows.append(row_no)
 
-    held = _held_for_request(batch_opt, sheet_name, region, explicit_rows, list(modes),
-                             service_start=service_start, service_end=service_end)
+    held = _held_for_request(batch_opt, sheet_name, region, () if modes else explicit_rows, list(modes),
+                             mode_scope=explicit_rows or None, service_start=service_start, service_end=service_end)
     held_set = set(held)
     invalid = [row_no for row_no in invalid if row_no not in held_set]
     return target_rows, invalid, region_mismatch, held

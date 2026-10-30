@@ -42,6 +42,27 @@ class CloudCandidatesTest(unittest.TestCase):
         self.assertNotIn(3, [x[0] for x in cloud.load_pending('sheet')])
         self.assertNotIn(3, [x[0] for x in cloud.load_pending('sheet', allow_auto_lemon=True)])
 
+    def test_rows_and_stage_and_filter_are_intersected(self):
+        from shared.booking_eligibility import booking_stages
+        self.df['預約條件'] = ''
+        self.df.loc[self.df['__sheet_row__'].eq(2), '預約條件'] = '改加'
+        self.df.loc[self.df['__sheet_row__'].eq(3), '預約條件'] = '可約'
+        # 指定的列是刻意挑的，N 欄失敗也包含（第 3 列）；第 4、5 列已有單號／已安排仍不約。
+        self.assertEqual([x[0] for x in cloud.load_pending('sheet', only_rows=[3, 4, 5])], [3])
+        # 改加 AND 列號：只約列號內的改加列。
+        with booking_stages(['改加']):
+            self.assertEqual([x[0] for x in cloud.load_pending('sheet', only_rows=[2, 3])], [2])
+            self.assertEqual([x[0] for x in cloud.load_pending('sheet', only_rows=[3])], [])
+            self.assertEqual([x[0] for x in cloud.load_pending('sheet')], [2])
+        # 自動篩選 AND 列號
+        with booking_stages(['改加', '可約']):
+            self.assertEqual([x[0] for x in cloud.load_pending('sheet', filter_mode='no_schedule', only_rows=[3])], [3])
+            self.assertEqual([x[0] for x in cloud.load_pending('sheet', filter_mode='no_schedule', only_rows=[5])], [])
+
+    def test_parse_rows_accepts_ranges_and_blank(self):
+        self.assertEqual(cloud.parse_rows('13, 15-16'), [13, 15, 16])
+        self.assertEqual(cloud.parse_rows(''), [])
+
     def test_local_optimized_includes_failed_rows(self):
         # order-system 本機優化入口直接呼叫 _safe_load_candidates(allow_failed=True)（原版 monkeypatch batch_opt._load_candidates）。
         self.assertEqual(guard._safe_load_candidates(cloud.batch_opt, 'sheet', allow_failed=True)['__sheet_row__'].tolist(), [2, 3, 4])
@@ -105,6 +126,13 @@ class CloudDispatchTest(unittest.TestCase):
                 self.assertEqual(inputs['allow_auto_lemon'], 'false')
                 self.assertNotIn('o_texts', inputs)
 
+    def test_rows_are_sent_to_workflow(self):
+        with patch.object(ui, '_token', return_value='test'), patch.object(ui, '_latest_run', return_value=None), \
+             patch.object(ui, 'load_config', return_value={}), \
+             patch.object(ui.requests, 'post', return_value=Mock(status_code=204)) as post:
+            ui._dispatch('sheet', 50, 0, 'all', '台北', False, rows='13,103')
+        self.assertEqual(post.call_args.kwargs['json']['inputs']['rows'], '13,103')
+
     def test_service_date_bounds_are_sent_to_workflow(self):
         with patch.object(ui, '_token', return_value='test'), patch.object(ui, '_latest_run', return_value=None), \
              patch.object(ui, 'load_config', return_value={}), \
@@ -133,6 +161,7 @@ class CloudDispatchTest(unittest.TestCase):
                 cols[0].date_input.return_value = None
                 cols[1].date_input.return_value = None
                 cols[2].date_input.return_value = None
+                cols[2].text_input.return_value = ''
                 st.columns.side_effect = lambda spec, **kw: cols[:spec if isinstance(spec, int) else len(spec)]
                 st.container.return_value = st
                 st.checkbox.side_effect = lambda *a, **kw: {

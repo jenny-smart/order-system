@@ -42,7 +42,7 @@ def _token():
 
 
 def _dispatch(sheet, chunk_size, max_rows, filter_mode, region, allow_auto_lemon, retry_failed=False,
-              stages=("可約",), env="prod", service_start=None, service_end=None):
+              stages=("可約",), env="prod", service_start=None, service_end=None, rows=""):
     token = _token()
     if not token:
         raise RuntimeError("尚未設定 ORDERS_GITHUB_TOKEN；需提供可啟動 order-system Actions 的 GitHub Token。")
@@ -60,6 +60,7 @@ def _dispatch(sheet, chunk_size, max_rows, filter_mode, region, allow_auto_lemon
             "allow_auto_lemon":"true" if allow_auto_lemon else "false",
             "retry_failed":"true" if retry_failed else "false",
             "stages": json.dumps(list(stages), ensure_ascii=False),
+            "rows": rows,
             "service_start": service_start.isoformat() if hasattr(service_start, "isoformat") else str(service_start or ""),
             "service_end": service_end.isoformat() if hasattr(service_end, "isoformat") else str(service_end or ""),
             "pricing_json": json.dumps(load_config()),
@@ -336,12 +337,14 @@ def render(env: str):
         st.info(f"⏳ 雲端成單執行中（{active}），進度見頁面最下方「雲端成單進度」；同一環境一次只跑一個，新送出的會排隊。")
 
     st.markdown("#### 3　工作表")
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns(3)
     regions = list(ACCOUNTS.keys()) or ["台北"]
     default_index = regions.index("台北") if "台北" in regions else 0
     region = c1.selectbox("執行區域", regions, index=default_index, key="optimized_cloud_region")
     sheet = c2.text_input("工作表名稱", placeholder="例：台北202610", key="optimized_cloud_sheet",
-                          help="雲端依下方條件自動取得列號；中斷重跑會先反查後台，避免重複建單。").strip()
+                          help="中斷重跑會先反查後台，避免重複建單。").strip()
+    row_spec = c3.text_input("執行列號（選填）", placeholder="例：13,103,120-125", key="optimized_cloud_rows",
+                             help="空白＝全部列。有填時只在這些列裡，再依下方預約對象與自動篩選挑出要約的列（AND）。").strip()
     dev_sheet_copy.render_notice(st, env, sheet, "optimized_cloud", region=region)
 
     st.markdown("#### 4　要約哪些列")
@@ -362,7 +365,7 @@ def render(env: str):
     chunk = c1.number_input("每輪最多處理列數", 1, 200, 50, 10, key="optimized_cloud_chunk")
     max_rows = c2.number_input("本次最多處理列數（0＝全部）", 0, 5000, 0, 10, key="optimized_cloud_max")
 
-    pending_key = (sheet, region, filter_mode, allow_auto_lemon, retry_failed, tuple(stages),
+    pending_key = (sheet, region, row_spec, filter_mode, allow_auto_lemon, retry_failed, tuple(stages),
                    str(service_start or ""), str(service_end or ""))
     _sync_cloud_settings(pending_key + (int(chunk), int(max_rows)))
 
@@ -370,10 +373,11 @@ def render(env: str):
         try:
             validate_service_date_range(service_start, service_end)
             with st.spinner("正在讀取 Google Sheets 並計算待成單筆數，資料較多時請稍候…"):
-                from shared.cloud_batch_booking import load_pending
+                from shared.cloud_batch_booking import load_pending, parse_rows
                 rows = [row_no for row_no, _, _ in load_pending(
                     dev_sheet_copy.read_sheet(st, env, sheet), filter_mode=filter_mode, selected_region=region, allow_auto_lemon=allow_auto_lemon,
                     retry_failed=retry_failed, service_start=service_start, service_end=service_end,
+                    only_rows=parse_rows(row_spec),
                 )]
             st.session_state.optimized_cloud_pending = len(rows)
             st.session_state.optimized_cloud_pending_rows = rows
@@ -391,16 +395,18 @@ def render(env: str):
     if st.button("🚀  開始雲端批次成單", type="primary", use_container_width=True, disabled=not(sheet and confirm), key="optimized_cloud_start"):
         try:
             validate_service_date_range(service_start, service_end)
+            from shared.cloud_batch_booking import parse_rows
+            parse_rows(row_spec)  # 列號格式錯誤時在送出前就提示
             run_sheet = dev_sheet_copy.resolve_run_sheet(st, env, sheet)
             if is_dev:
                 st.info(f"🧪 測試機 dev：本次使用測試副本「{run_sheet}」（原分頁「{sheet}」不受影響）。")
                 st.session_state['optimized_cloud_dispatch'] = _dispatch(
                     run_sheet, int(chunk), int(max_rows), filter_mode, region, allow_auto_lemon, retry_failed,
-                    stages, env="dev", service_start=service_start, service_end=service_end)
+                    stages, env="dev", service_start=service_start, service_end=service_end, rows=row_spec)
             else:
                 st.session_state['optimized_cloud_dispatch'] = _dispatch(
                     run_sheet, int(chunk), int(max_rows), filter_mode, region, allow_auto_lemon, retry_failed,
-                    stages, service_start=service_start, service_end=service_end)
+                    stages, service_start=service_start, service_end=service_end, rows=row_spec)
             _clear_pending_preview()
             st.success("已交給 GitHub Actions 雲端執行；可關閉瀏覽器或電腦。")
             st.markdown(f"[查看雲端執行進度](https://github.com/{REPO}/actions/workflows/{WORKFLOW})")

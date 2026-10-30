@@ -102,6 +102,7 @@ class CloudDevTest(unittest.TestCase):
         cols[0].date_input.return_value = None
         cols[1].date_input.return_value = None
         cols[2].date_input.return_value = None
+        cols[2].text_input.return_value = ''
         st.columns.side_effect = lambda spec, **kw: cols[:spec if isinstance(spec, int) else len(spec)]
         st.container.return_value = st
         st.checkbox.side_effect = lambda *a, **kw: kw.get("key") == "optimized_cloud_confirm"
