@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
 """服務訂單系統內的「颱風假訂單移轉」UI。"""
 
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
 import pandas as pd
 import streamlit as st
 
@@ -378,6 +381,20 @@ def _render_transfer(backend_email, backend_password, env, copy_button=None):
             )
         st.caption("注意：排班日期內檸檬人原本勾選的全日／上午／下午／晚上班別，會先清掉再套用這次選的班別。")
 
+    st.markdown("**客人備註**（移轉成功後在客人備註第一行註記，原本的備註保留）")
+    do_note = st.checkbox("移轉時在客人備註註記颱風停班停課", value=True, key="tt_note_enabled")
+    note_announce = None
+    if do_note:
+        note_announce = st.date_input(
+            "宣布日期（備註開頭的日期，通常是移轉訂單當天）",
+            value=datetime.now(ZoneInfo("Asia/Taipei")).date(), key="tt_note_announce",
+        )
+        example_day = (note_announce + timedelta(days=1)).strftime("%Y-%m-%d")
+        st.caption(
+            "範例：" + "；".join(tt.typhoon_note(region, note_announce, example_day) for region in tt.TYPHOON_NOTE_TEMPLATES)
+            + "。停班停課日期用每張訂單的原服務日期；台北／台中以外的地區沒有範本，不會註記。"
+        )
+
     if st.button("🔍 查詢颱風假訂單", type="primary", use_container_width=True, key="tt_search"):
         if not backend_email.strip() or not backend_password.strip():
             st.error("請先在上方輸入後台帳號密碼")
@@ -511,6 +528,7 @@ def _render_transfer(backend_email, backend_password, env, copy_button=None):
         try:
             results = tt.transfer_typhoon_orders(
                 env, backend_email.strip(), backend_password.strip(), plan, dates_by_day, progress=_progress,
+                note_announce_date=note_announce if do_note else None,
             )
         except Exception as exc:
             st.error(f"移轉失敗：{exc}")
@@ -544,6 +562,7 @@ def _render_transfer(backend_email, backend_password, env, copy_button=None):
                 "結果": "✅" if r.get("success") else "❌",
                 **{k: v for k, v in c.items() if k not in ("結果", "說明")},
                 "新專員": r.get("new_staff", ""),
+                "客人備註": r.get("memo_note", ""),
                 "說明": r.get("message", ""),
                 "略過日期": "；".join(r.get("attempts") or []),
             }

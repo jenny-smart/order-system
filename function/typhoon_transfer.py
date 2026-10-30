@@ -331,10 +331,69 @@ def candidate_dates_by_day(service_dates, start, end, day_type):
     return {day: target_dates(start, end, day_type, day) for day in sorted(set(service_dates))}
 
 
-def transfer_typhoon_orders(env_name, backend_email, backend_password, rows, dates_by_day, progress=None):
+# ---------------------------------------------------------
+# 移轉後在客人備註註記颱風停班停課
+# ---------------------------------------------------------
+
+TYPHOON_NOTE_TEMPLATES = {
+    "台北": "{announce} 台北市/新北市政府因颱風宣布{holiday}停班停課",
+    "台中": "{announce} 台中市政府因颱風宣布{holiday}停班停課",
+}
+
+
+def region_of_address(address):
+    from accounts import ACCOUNTS
+    return orders.get_region_by_address(address, ACCOUNTS) if address else ""
+
+
+def typhoon_note(region, announce_date, holiday_date):
+    """例：2026/10/22 台北市/新北市政府因颱風宣布10/23停班停課。
+    announce_date＝移轉訂單（宣布）的日期，holiday_date＝停班停課日（訂單原服務日期）。
+    沒有範本的地區回傳空字串。"""
+    template = TYPHOON_NOTE_TEMPLATES.get(region or "")
+    if not template:
+        return ""
+    announce, holiday = _parse_date(announce_date), _parse_date(holiday_date)
+    return template.format(announce=announce.strftime("%Y/%m/%d"), holiday=holiday.strftime("%m/%d"))
+
+
+def add_customer_memo_note(session, base_url, order_no, note):
+    """把 note 加在客人備註第一行（保留原本的客人備註；已有同一句就不重複加）。回傳 (ok, 訊息)。"""
+    edit_id = qo._fetch_order_edit_id(session, order_no)
+    if not edit_id:
+        return False, f"找不到訂單 {order_no} 的後台 ID"
+    edit_url = f"{base_url}/purchase/edit/{edit_id}"
+    resp = session.get(edit_url, headers=orders.HEADERS, allow_redirects=True)
+    if resp.status_code != 200:
+        return False, f"無法開啟訂單修改頁（HTTP {resp.status_code}）"
+    old_memo = str(qo._extract_purchase_json_from_edit_html(resp.text).get("memo") or "")
+    if note in old_memo:
+        return True, "客人備註已有颱風註記"
+    csrf_m = re.search(r'<meta name="csrf-token" content="([^"]+)"', resp.text) or re.search(
+        r'name="_token"[^>]*value="([^"]+)"', resp.text)
+    if not csrf_m:
+        return False, "無法取得 CSRF token"
+    new_memo = f"{note}\n{old_memo}" if old_memo.strip() else note
+    payload = qo._build_purchase_edit_payload_from_page(resp.text, csrf_m.group(1), overrides={"memo": new_memo})
+    post = session.post(edit_url, data=payload,
+                        headers={**orders.HEADERS, "Content-Type": "application/x-www-form-urlencoded"},
+                        allow_redirects=True)
+    if post.status_code not in (200, 302):
+        return False, f"客人備註寫入失敗（HTTP {post.status_code}）"
+    check = session.get(edit_url, headers=orders.HEADERS, allow_redirects=True)
+    saved = str(qo._extract_purchase_json_from_edit_html(check.text).get("memo") or "")
+    if note not in saved:
+        return False, "客人備註送出後讀回不到颱風註記，請到後台確認"
+    return True, "已註記客人備註"
+
+
+def transfer_typhoon_orders(env_name, backend_email, backend_password, rows, dates_by_day, progress=None,
+                            note_announce_date=None):
     """依 rows 的順序逐筆移轉；rows 每筆需有 order_no／service_date／period／phone。
 
     dates_by_day：{颱風假日期: [候選移轉日期...]}，每筆依自己的原服務日期取候選日期。
+    note_announce_date 有給時，移轉成功的訂單會在客人備註第一行註記颱風停班停課
+    （台北：台北市/新北市政府、台中：台中市政府；其他地區沒有範本則不註記）。
     """
     session, base_url = _login(env_name, backend_email, backend_password)
     results = []
@@ -346,6 +405,18 @@ def transfer_typhoon_orders(env_name, backend_email, backend_password, rows, dat
             result = transfer_one_order(session, base_url, env_name, row, dates_by_day.get(row["service_date"], []))
         except Exception as exc:
             result = {"success": False, "new_date": "", "message": str(exc), "attempts": []}
+        if result.get("success") and note_announce_date:
+            note = typhoon_note(region_of_address(row.get("address", "")), note_announce_date, row["service_date"])
+            if not note:
+                result["memo_note"] = "此地區沒有颱風備註範本，未註記"
+            else:
+                try:
+                    ok, msg = add_customer_memo_note(session, base_url, row["order_no"], note)
+                except Exception as exc:
+                    ok, msg = False, f"客人備註寫入失敗：{exc}"
+                result["memo_note"] = note if ok else f"未註記：{msg}"
+                if not ok:
+                    result["message"] = f"{result.get('message', '')}；{msg}，請手動補客人備註"
         results.append({**row, **result})
     return results
 

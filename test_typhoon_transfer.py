@@ -348,5 +348,75 @@ class NoticeCopyTests(unittest.TestCase):
         self.assertEqual(tt.parse_staff_text("宋芳儀(2) X 陳佩琪(3)"), ["宋芳儀", "陳佩琪"])
 
 
+class _MemoSession:
+    """假的訂單修改頁：purchase JSON 帶目前客人備註，POST 後更新。"""
+
+    def __init__(self, memo):
+        self.memo = memo
+        self.posts = []
+
+    def _html(self):
+        import json as _json
+        return ('<meta name="csrf-token" content="tok"><form method="post"></form>'
+                '<script>new Vue({data(){return {purchase: ' + _json.dumps({"memo": self.memo}) + '}}})</script>')
+
+    def get(self, url, **kwargs):
+        return type("R", (), {"status_code": 200, "text": self._html()})()
+
+    def post(self, url, data=None, **kwargs):
+        self.posts.append(data)
+        self.memo = data["memo"]
+        return type("R", (), {"status_code": 200, "text": ""})()
+
+
+class TyphoonNoteTests(unittest.TestCase):
+    def test_note_text_by_region(self):
+        self.assertEqual(tt.typhoon_note("台北", "2026-10-22", "2026-10-23"),
+                         "2026/10/22 台北市/新北市政府因颱風宣布10/23停班停課")
+        self.assertEqual(tt.typhoon_note("台中", "2026/10/22", "2026/10/23"),
+                         "2026/10/22 台中市政府因颱風宣布10/23停班停課")
+        self.assertEqual(tt.typhoon_note("桃園", "2026-10-22", "2026-10-23"), "")
+        self.assertEqual(tt.region_of_address("新北市新店區北新路一段73號14樓"), "台北")
+
+    def test_memo_note_prepended_kept_and_not_duplicated(self):
+        session = _MemoSession("請帶吸塵器")
+        note = "2026/10/22 台北市/新北市政府因颱風宣布10/23停班停課"
+        with patch.object(tt.qo, "_fetch_order_edit_id", lambda s, no: "1"):
+            ok, _ = tt.add_customer_memo_note(session, "https://x", "LC1", note)
+            self.assertTrue(ok)
+            self.assertEqual(session.memo, f"{note}\n請帶吸塵器")
+            ok2, msg2 = tt.add_customer_memo_note(session, "https://x", "LC1", note)
+        self.assertTrue(ok2)
+        self.assertEqual(len(session.posts), 1)  # 第二次已有同一句，不再寫
+        self.assertIn("已有", msg2)
+
+    def test_note_written_only_for_successful_transfers(self):
+        rows = [
+            {"order_no": "LC1", "service_date": "2026-10-23", "period": "09:00-12:00", "phone": "",
+             "address": "台北市大安區復興南路一段1號"},
+            {"order_no": "LC2", "service_date": "2026-10-23", "period": "09:00-12:00", "phone": "",
+             "address": "台中市西屯區台灣大道三段99號"},
+            {"order_no": "LC3", "service_date": "2026-10-23", "period": "09:00-12:00", "phone": "",
+             "address": "桃園市中壢區中正路1號"},
+        ]
+        written = []
+
+        def fake_one(session, base_url, env, row, dates):
+            ok = row["order_no"] != "LC2"
+            return {"success": ok, "new_date": "2027-03-01" if ok else "", "message": "", "attempts": []}
+
+        def fake_note(session, base_url, order_no, note):
+            written.append((order_no, note))
+            return True, "已註記客人備註"
+
+        with patch.object(tt, "_login", lambda *a: (None, "")), patch.object(tt, "transfer_one_order", fake_one), \
+                patch.object(tt, "add_customer_memo_note", fake_note):
+            results = tt.transfer_typhoon_orders("dev", "a", "b", rows, {"2026-10-23": ["2027-03-01"]},
+                                                 note_announce_date="2026-10-22")
+        self.assertEqual(written, [("LC1", "2026/10/22 台北市/新北市政府因颱風宣布10/23停班停課")])
+        self.assertNotIn("memo_note", results[1])  # 移轉失敗不註記
+        self.assertEqual(results[2]["memo_note"], "此地區沒有颱風備註範本，未註記")
+
+
 if __name__ == "__main__":
     unittest.main()
