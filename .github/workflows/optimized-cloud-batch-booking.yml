@@ -42,6 +42,11 @@ on:
         required: false
         default: "false"
         type: boolean
+      rows:
+        description: 執行列號（例 13,103,120-125）；空白＝不限，與預約條件、篩選取交集
+        required: false
+        default: ""
+        type: string
       stages:
         description: JSON list of booking stages (可約/改加/人時不足/已確認/未回覆) to book this run
         required: false
@@ -103,4 +108,5 @@ jobs:
           --retry-failed "${{ inputs.retry_failed }}"
           --service-start "${{ inputs.service_start }}"
           --service-end "${{ inputs.service_end }}"
+          --rows "${{ inputs.rows }}"
           --env "${{ inputs.env == 'dev' && 'dev' || 'prod' }}"

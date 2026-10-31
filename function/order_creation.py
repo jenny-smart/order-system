@@ -137,7 +137,8 @@ def render_batch(backend_email, backend_password, env):
     c1, c2, c3 = st.columns(3)
     region = c1.selectbox("執行區域", ["台北", "台中", "桃園", "新竹", "高雄"])
     sheet_name = c2.text_input("工作表名稱", value="", placeholder="例：台北202610")
-    row_input = c3.text_input("執行列號", value="", placeholder="例：2,3,5-7", help="單列 2、逗號 2,3,5、區間 5-7。")
+    row_input = c3.text_input("執行列號", value="", placeholder="例：2,3,5-7",
+                              help="單列 2、逗號 2,3,5、區間 5-7；空白＝不限（需勾自動篩選）。有填時只在這些列裡，再依預約對象與自動篩選挑出要約的列（AND）。")
     dev_sheet_copy.render_notice(st, env, sheet_name, "batch_booking", region=region,
                                  credentials=(backend_email.strip(), backend_password.strip()))
     step("4", "要約哪些列")
