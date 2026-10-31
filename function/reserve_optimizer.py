@@ -42,11 +42,19 @@ class ReserveRule:
     am_rate: float
     pm_rate: float
     label: str = ""
+    # 固定筆數模式：每個日期時段保留幾筆單（None 表示用保留率計算）
+    am_orders: Optional[int] = None
+    pm_orders: Optional[int] = None
 
     def rate_for(self, service_date: date, period: str) -> Optional[float]:
         if not (self.start <= service_date <= self.end):
             return None
         return self.am_rate if period in AM_PERIODS else self.pm_rate
+
+    def orders_for(self, service_date: date, period: str) -> Optional[int]:
+        if not (self.start <= service_date <= self.end):
+            return None
+        return self.am_orders if period in AM_PERIODS else self.pm_orders
 
 
 @dataclass
@@ -59,6 +67,7 @@ class SlotSnapshot:
     reserve_order_target: int
     market_people_target: int
     raw_text: str = ""
+    fixed_orders: Optional[int] = None
 
 
 def _assert_supported_env(env_name: str) -> None:
@@ -112,8 +121,27 @@ def resolve_rate(service_date: date, period: str, rules: Sequence[ReserveRule], 
     return normalize_rate(default_rate)
 
 
-def calculate_reserve_target(unassigned_people: int, reserve_rate: float) -> Tuple[int, int, int]:
+def resolve_fixed_orders(service_date: date, period: str, rules: Sequence[ReserveRule]) -> Optional[int]:
+    for rule in rules:
+        if rule.start <= service_date <= rule.end:
+            orders = rule.orders_for(service_date, period)
+            return None if orders is None else max(0, int(orders))
+    return None
+
+
+def calculate_reserve_target(
+    unassigned_people: int, reserve_rate: float, fixed_orders: Optional[int] = None,
+) -> Tuple[int, int, int]:
+    """回傳（保留人數, 保留張數, 留給市場人數）；每張保留單 2 人。
+
+    fixed_orders 有值時改用固定筆數，但不超過未配班人力可成立的張數
+    （例如設 2 筆、只剩 3 人 → 只能成立 1 筆）。
+    """
     people = max(0, int(unassigned_people or 0))
+    if fixed_orders is not None:
+        reserve_orders = min(max(0, int(fixed_orders)), people // 2)
+        reserve_people = reserve_orders * 2
+        return reserve_people, reserve_orders, max(0, people - reserve_people)
     rate = normalize_rate(reserve_rate)
     reserve_orders = int(math.floor((people * rate) / 2.0))
     reserve_people = reserve_orders * 2
@@ -219,8 +247,9 @@ def snapshot_day(lookup_result, service_date: date, rules: Sequence[ReserveRule]
     for period in periods:
         info = parsed.get(period) or {}
         people = int(info.get("unassigned_people") or 0)
-        rate = resolve_rate(service_date, period, rules)
-        reserve_people, reserve_orders, market_people = calculate_reserve_target(people, rate)
+        fixed_orders = resolve_fixed_orders(service_date, period, rules)
+        rate = 0.0 if fixed_orders is not None else resolve_rate(service_date, period, rules)
+        reserve_people, reserve_orders, market_people = calculate_reserve_target(people, rate, fixed_orders)
         rows.append(SlotSnapshot(
             service_date=date_s,
             period=period,
@@ -230,6 +259,7 @@ def snapshot_day(lookup_result, service_date: date, rules: Sequence[ReserveRule]
             reserve_order_target=reserve_orders,
             market_people_target=market_people,
             raw_text=str(info.get("raw_text") or ""),
+            fixed_orders=fixed_orders,
         ))
     return rows
 
