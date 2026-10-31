@@ -269,6 +269,8 @@ def render_reserve_cancel(backend_email: str, backend_password: str, env: str) -
     if memo_filter == PROXY_FILTER:
         memo_keyword = st.text_input("客人備註關鍵字（需含「代客保留」）", value="代客保留：", key="reserve_cancel_memo_keyword",
                                      help="例如「代客保留：王小明」只找王小明；只填「代客保留」會找出所有代客保留單。取消後客人備註前面加「取消」。")
+    delete_address = st.checkbox("取消後同步刪除檸檬保留帳號上固定地址以外的地址", value=True, key="reserve_cancel_delete_address",
+                                 help="取消勾選則只取消訂單、不刪任何地址；之後可到「檸檬保留刪除地址」頁手動刪除。")
 
     if st.button("查詢可取消保留單", width="stretch", key="reserve_cancel_search"):
         search_status = st.status("已收到查詢指令，正在搜尋保留單…", expanded=True)
@@ -401,7 +403,8 @@ def render_reserve_cancel(backend_email: str, backend_password: str, env: str) -
         disabled=not confirm or selected_count <= 0 or cancel_running,
         key="reserve_cancel_execute",
     ):
-        st.session_state.reserve_cancel_job = {"pending": selected_rows, "results": [], "total": selected_count, "status": "running"}
+        st.session_state.reserve_cancel_job = {"pending": selected_rows, "results": [], "total": selected_count, "status": "running",
+                                              "delete_address": delete_address}
         st.session_state.reserve_menu_cancel_result = []
         st.session_state.reserve_cancel_clear_selection = True
         st.rerun()
@@ -473,6 +476,9 @@ def _render_reserve_cancel_job(env, backend_email, backend_password, machine) ->
 def _render_proxy_address_cleanup(job, env, backend_email, backend_password) -> None:
     """檸檬保留單取消後，順便刪除檸檬保留帳號上固定地址以外的地址。"""
     if not any(r.get("ok") for r in job["results"]):
+        return
+    if not job.get("delete_address", True):
+        st.caption("本次設定為不刪除地址，檸檬保留帳號上的地址維持不變。")
         return
     if "address_cleanup" not in job:
         with st.spinner("已取消，正在刪除檸檬保留帳號上固定地址以外的地址…"):
