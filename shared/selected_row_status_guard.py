@@ -299,6 +299,21 @@ def hours_mismatch_reason(row) -> str:
     return f"請檢查時數：A欄{fmt(a_hours)}小時，時段{period}為{fmt(slot_hours)}小時"
 
 
+LEMON_STAFF = "檸檬人"
+
+
+def mark_lemon_staff(results):
+    """已成單但服務人員有檸檬人（尚未換成正式專員）時，在「沒班表日」欄註記哪幾位檸檬人。"""
+    for info in (results or {}).values():
+        if not info or not str(info.get("訂單編號", "") or "").strip():
+            continue
+        names = [name.strip() for name in re.split(r"[,，、/\s]+", str(info.get("服務人員", "") or ""))
+                 if LEMON_STAFF in name]
+        if names:
+            info["沒班表日期"] = "檸檬人：" + "、".join(dict.fromkeys(names))
+    return results
+
+
 def process_one_group_with_lemon_retry(session, rows_with_idx, token, gcal_service, region, backend_user_id=None, selected_actions=None, allow_auto_lemon_shift=False, used_order_nos=None, logger=print, group_no=None):
     """先以既有班表送單；只有結果為「無班表」的列才補檸檬人，補成功後只重試這些列。
 
@@ -317,14 +332,14 @@ def process_one_group_with_lemon_retry(session, rows_with_idx, token, gcal_servi
         if mismatch:
             info["原因"], info["沒班表日期"] = mismatch, ""
     if not allow_auto_lemon_shift:
-        return result
+        return mark_lemon_staff(result)
     no_slot_rows = []
     for row_no, info in (result or {}).items():
         reason = str((info or {}).get("原因", "") or "")
         if "無班表" in reason or "沒班表" in reason:
             no_slot_rows.append(int(row_no))
     if not no_slot_rows:
-        return result
+        return mark_lemon_staff(result)
     any_shift_added = False
     for row_no in no_slot_rows:
         row = row_map.get(row_no)
@@ -340,7 +355,7 @@ def process_one_group_with_lemon_retry(session, rows_with_idx, token, gcal_servi
         logger(f"🍋 第 {row_no} 列補檸檬人：成功 {len(assigned)} 人；略過 {len(skipped)} 人；{pre.get('message', '')}" + (f"；略過明細：{skipped_detail}" if skipped_detail else ""))
         if pre.get("success"): any_shift_added = True
     if not any_shift_added:
-        return result
+        return mark_lemon_staff(result)
     retry_token = orders.get_csrf_token(session)
     logger("🍋 已補檸檬人，重新查班表並再次嘗試無班表的列：" + "、".join(map(str, no_slot_rows)))
     retry_rows = [(row_no, row) for row_no, row in rows_with_idx if int(row_no) in set(no_slot_rows)]
@@ -351,4 +366,4 @@ def process_one_group_with_lemon_retry(session, rows_with_idx, token, gcal_servi
     )
     merged = dict(result or {})
     merged.update(retried or {})
-    return merged
+    return mark_lemon_staff(merged)

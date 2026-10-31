@@ -191,3 +191,16 @@ def test_no_slot_row_with_mismatched_hours_says_check_hours_and_skips_lemon():
     assert result[768]["沒班表日期"] == ""
     lemon.assert_not_called()
     assert process.call_count == 1
+
+
+def test_booked_rows_with_lemon_staff_are_noted_in_no_slot_column():
+    from unittest.mock import patch
+    import shared.selected_row_status_guard as guard
+    first = {12: {"訂單編號": "TT1", "結果": "成功", "原因": "", "服務人員": "檸檬人3,陳靜怡,檸檬人4", "沒班表日期": ""},
+             13: {"訂單編號": "TT2", "結果": "成功", "原因": "", "服務人員": "陳靜怡、宋品鈞", "沒班表日期": ""},
+             14: {"訂單編號": "", "結果": "失敗", "原因": "系統未產生新訂單編號", "服務人員": "檸檬人1", "沒班表日期": ""}}
+    rows = [(n, {"日期": "2027/01/28", "開始時間": "8:30", "結束時間": "12:30", "服務人時": ""}) for n in (12, 13, 14)]
+    with patch.object(guard.orders, "process_one_group", return_value=first):
+        result = guard.process_one_group_with_lemon_retry(None, rows, "t", None, "台北", allow_auto_lemon_shift=False, logger=lambda *_: None)
+    assert result[12]["沒班表日期"] == "檸檬人：檸檬人3、檸檬人4"
+    assert result[13]["沒班表日期"] == "" and result[14]["沒班表日期"] == ""
