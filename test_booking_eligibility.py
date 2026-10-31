@@ -145,3 +145,62 @@ def test_stage_widget_defaults_to_ready_and_sets_current_stages():
         assert current_booking_stages() == ('可約', '改加')
     finally:
         set_booking_stages(('可約',))
+
+
+def test_lemon_retry_only_reruns_no_slot_rows_and_keeps_booked_rows():
+    # 第 840 列第一次就成單、第 843 列無班表：補檸檬人後只重試 843，840 的單號不能被蓋掉。
+    from unittest.mock import patch
+    import shared.selected_row_status_guard as guard
+    calls = []
+
+    def process(session, rows, *args, **kwargs):
+        calls.append([row_no for row_no, _ in rows])
+        if len(calls) == 1:
+            return {840: {"訂單編號": "TT1", "結果": "成功", "原因": ""}, 843: {"結果": "失敗", "原因": "無班表"}}
+        return {row_no: {"訂單編號": "TT2", "結果": "成功", "原因": ""} for row_no in calls[-1]}
+
+    rows = [(840, {"日期": "2026/12/14", "開始時間": "14:00", "結束時間": "17:00", "服務人時": ""}),
+            (843, {"日期": "2027/01/04", "開始時間": "14:00", "結束時間": "17:00", "服務人時": ""})]
+    with patch.object(guard.orders, "process_one_group", side_effect=process), \
+         patch.object(guard.orders, "ensure_lemon_cleaner_shifts", return_value={"success": True, "assigned": ["檸檬人1"]}), \
+         patch.object(guard.orders, "get_csrf_token", return_value="t"):
+        result = guard.process_one_group_with_lemon_retry(None, rows, "t", None, "台北", allow_auto_lemon_shift=True, logger=lambda *_: None)
+    assert calls == [[840, 843], [843]]
+    assert result[840]["訂單編號"] == "TT1" and result[843]["訂單編號"] == "TT2"
+
+
+def test_hours_mismatch_reason_only_for_standard_slots_with_different_hours():
+    import shared.selected_row_status_guard as guard
+    row = lambda a, s, e: {"服務人時": a, "開始時間": s, "結束時間": e}
+    assert guard.hours_mismatch_reason(row("2人3小時", "8:30", "12:30")) == "請檢查時數：A欄3小時，時段08:30-12:30為4小時"
+    assert guard.hours_mismatch_reason(row("2人4小時", "8:30", "12:30")) == ""
+    assert guard.hours_mismatch_reason(row("", "8:30", "12:30")) == ""
+    assert guard.hours_mismatch_reason(row("改", "8:30", "12:30")) == ""
+
+
+def test_no_slot_row_with_mismatched_hours_says_check_hours_and_skips_lemon():
+    # 楊明勳：A 欄 2人3小時、時段 08:30-12:30，查不到班表不是真的沒班，補檸檬人也沒用。
+    from unittest.mock import patch
+    import shared.selected_row_status_guard as guard
+    first = {768: {"結果": "失敗", "原因": "無班表", "沒班表日期": "2026-12-18"}}
+    rows = [(768, {"日期": "2026/12/18", "開始時間": "8:30", "結束時間": "12:30", "服務人時": "2人3小時"})]
+    with patch.object(guard.orders, "process_one_group", return_value=first) as process, \
+         patch.object(guard.orders, "ensure_lemon_cleaner_shifts") as lemon:
+        result = guard.process_one_group_with_lemon_retry(None, rows, "t", None, "台北", allow_auto_lemon_shift=True, logger=lambda *_: None)
+    assert result[768]["原因"] == "請檢查時數：A欄3小時，時段08:30-12:30為4小時"
+    assert result[768]["沒班表日期"] == ""
+    lemon.assert_not_called()
+    assert process.call_count == 1
+
+
+def test_booked_rows_with_lemon_staff_are_noted_in_no_slot_column():
+    from unittest.mock import patch
+    import shared.selected_row_status_guard as guard
+    first = {12: {"訂單編號": "TT1", "結果": "成功", "原因": "", "服務人員": "檸檬人3,陳靜怡,檸檬人4", "沒班表日期": ""},
+             13: {"訂單編號": "TT2", "結果": "成功", "原因": "", "服務人員": "陳靜怡、宋品鈞", "沒班表日期": ""},
+             14: {"訂單編號": "", "結果": "失敗", "原因": "系統未產生新訂單編號", "服務人員": "檸檬人1", "沒班表日期": ""}}
+    rows = [(n, {"日期": "2027/01/28", "開始時間": "8:30", "結束時間": "12:30", "服務人時": ""}) for n in (12, 13, 14)]
+    with patch.object(guard.orders, "process_one_group", return_value=first):
+        result = guard.process_one_group_with_lemon_retry(None, rows, "t", None, "台北", allow_auto_lemon_shift=False, logger=lambda *_: None)
+    assert result[12]["沒班表日期"] == "檸檬人：檸檬人3、檸檬人4"
+    assert result[13]["沒班表日期"] == "" and result[14]["沒班表日期"] == ""

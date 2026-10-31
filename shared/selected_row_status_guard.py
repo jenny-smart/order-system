@@ -15,6 +15,7 @@ order-system 改為：
 from __future__ import annotations
 
 from datetime import date, datetime
+import re
 import pandas as pd
 
 from shared.booking_eligibility import (DEFAULT_STAGES, HOLD_COLUMN, STAGES, booking_stage, can_create_order, can_process_row,
@@ -277,23 +278,68 @@ def update_sheet_rows_first_header(ws, row_results):
     return orders.update_sheet_rows(ws, row_results)
 
 
+def hours_mismatch_reason(row) -> str:
+    """A 欄寫明時數、時段是標準時段，但兩者時數不同時回傳「請檢查時數…」；否則空字串。
+
+    標準時段一律照工作表時段查班表，後台卻依 A 欄時數列出可約時段，兩者不同就查不到
+    （例：A 欄 2人3小時、時段 08:30-12:30），補檸檬人也沒用。
+    """
+    try:
+        match = re.search(r"(\d+(?:\.\d+)?)\s*小時", str(row.get("服務人時", "") or ""))
+        period = orders.normalize_period_text(row.get("開始時間", ""), row.get("結束時間", ""))
+        if not match or period not in orders.STANDARD_SLOTS:
+            return ""
+        slot_hours = orders.calc_effective_hours_from_time(row.get("開始時間", ""), row.get("結束時間", ""))
+    except Exception:
+        return ""
+    a_hours = float(match.group(1))
+    if slot_hours is None or abs(a_hours - slot_hours) < 1e-9:
+        return ""
+    fmt = lambda h: f"{h:g}"
+    return f"請檢查時數：A欄{fmt(a_hours)}小時，時段{period}為{fmt(slot_hours)}小時"
+
+
+LEMON_STAFF = "檸檬人"
+
+
+def mark_lemon_staff(results):
+    """已成單但服務人員有檸檬人（尚未換成正式專員）時，在「沒班表日」欄註記哪幾位檸檬人。"""
+    for info in (results or {}).values():
+        if not info or not str(info.get("訂單編號", "") or "").strip():
+            continue
+        names = [name.strip() for name in re.split(r"[,，、/\s]+", str(info.get("服務人員", "") or ""))
+                 if LEMON_STAFF in name]
+        if names:
+            info["沒班表日期"] = "檸檬人：" + "、".join(dict.fromkeys(names))
+    return results
+
+
 def process_one_group_with_lemon_retry(session, rows_with_idx, token, gcal_service, region, backend_user_id=None, selected_actions=None, allow_auto_lemon_shift=False, used_order_nos=None, logger=print, group_no=None):
-    """先以既有班表送單；只有結果為「無班表」的列才補檸檬人，補成功後整組重試一次。"""
+    """先以既有班表送單；只有結果為「無班表」的列才補檸檬人，補成功後只重試這些列。
+
+    第一次已成單的列保留原結果：整組重試時那些時段已被自己佔用，會被誤判成無班表，
+    工作表就漏記已成立的訂單（下次可能重複建單）。"""
     result = orders.process_one_group(
         session, rows_with_idx, token, gcal_service, region, backend_user_id,
         selected_actions, allow_auto_lemon_shift=False,
         used_order_nos=used_order_nos, logger=logger, group_no=group_no,
     )
-    if not allow_auto_lemon_shift:
-        return result
     row_map = {int(row_no): row for row_no, row in rows_with_idx}
+    # 無班表但其實是 A 欄時數與時段不一致：O 欄改「請檢查時數」，也不補檸檬人。
+    for row_no, info in (result or {}).items():
+        reason = str((info or {}).get("原因", "") or "")
+        mismatch = hours_mismatch_reason(row_map.get(int(row_no), {})) if ("無班表" in reason or "沒班表" in reason) else ""
+        if mismatch:
+            info["原因"], info["沒班表日期"] = mismatch, ""
+    if not allow_auto_lemon_shift:
+        return mark_lemon_staff(result)
     no_slot_rows = []
     for row_no, info in (result or {}).items():
         reason = str((info or {}).get("原因", "") or "")
         if "無班表" in reason or "沒班表" in reason:
             no_slot_rows.append(int(row_no))
     if not no_slot_rows:
-        return result
+        return mark_lemon_staff(result)
     any_shift_added = False
     for row_no in no_slot_rows:
         row = row_map.get(row_no)
@@ -309,11 +355,15 @@ def process_one_group_with_lemon_retry(session, rows_with_idx, token, gcal_servi
         logger(f"🍋 第 {row_no} 列補檸檬人：成功 {len(assigned)} 人；略過 {len(skipped)} 人；{pre.get('message', '')}" + (f"；略過明細：{skipped_detail}" if skipped_detail else ""))
         if pre.get("success"): any_shift_added = True
     if not any_shift_added:
-        return result
+        return mark_lemon_staff(result)
     retry_token = orders.get_csrf_token(session)
-    logger("🍋 已補檸檬人，重新查班表並再次嘗試本筆／本組。")
-    return orders.process_one_group(
-        session, rows_with_idx, retry_token, gcal_service, region, backend_user_id,
+    logger("🍋 已補檸檬人，重新查班表並再次嘗試無班表的列：" + "、".join(map(str, no_slot_rows)))
+    retry_rows = [(row_no, row) for row_no, row in rows_with_idx if int(row_no) in set(no_slot_rows)]
+    retried = orders.process_one_group(
+        session, retry_rows, retry_token, gcal_service, region, backend_user_id,
         selected_actions, allow_auto_lemon_shift=False,
         used_order_nos=used_order_nos, logger=logger, group_no=group_no,
     )
+    merged = dict(result or {})
+    merged.update(retried or {})
+    return mark_lemon_staff(merged)
