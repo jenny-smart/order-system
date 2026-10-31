@@ -110,16 +110,27 @@ def render_reserve_create(backend_email: str, backend_password: str, env: str) -
     with d2:
         end = st.date_input("分析結束日期", value=date(2026, 9, 30), key="reserve_plan_end")
     periods = st.multiselect("要分析的時段", list(PERIOD_HOURS.keys()), default=["09:00-12:00", "14:00-17:00"], key="reserve_plan_periods")
+    mode = st.radio("保留方式", ["依保留率（成數）", "依固定筆數"], horizontal=True, key="reserve_plan_mode")
+    am_rate = pm_rate = 0.0
+    am_orders = pm_orders = None
     r1, r2 = st.columns(2)
-    with r1:
-        am_rate = st.slider("AM 保留率", 0, 100, 70, 5, key="reserve_am_rate") / 100.0
-    with r2:
-        pm_rate = st.slider("PM 保留率", 0, 100, 70, 5, key="reserve_pm_rate") / 100.0
+    if mode == "依固定筆數":
+        with r1:
+            am_orders = int(st.number_input("AM 每時段保留筆數", min_value=0, value=2, step=1, key="reserve_am_orders"))
+        with r2:
+            pm_orders = int(st.number_input("PM 每時段保留筆數", min_value=0, value=2, step=1, key="reserve_pm_orders"))
+        st.caption("每筆保留單 2 人；若該時段未配班人數不足，只成立能成立的筆數（例如設 2 筆、只剩 3 人 → 1 筆）。")
+    else:
+        with r1:
+            am_rate = st.slider("AM 保留率", 0, 100, 70, 5, key="reserve_am_rate") / 100.0
+        with r2:
+            pm_rate = st.slider("PM 保留率", 0, 100, 70, 5, key="reserve_pm_rate") / 100.0
     if st.button("統計班表並產生保留計畫", width="stretch", key="reserve_build_plan"):
         analysis_status = st.status("已收到分析指令，正在讀取班表…", expanded=True)
         try:
             analysis_status.write(f"分析期間：{start}～{end}；時段：{'、'.join(periods) or '未選擇'}")
-            rules = [ReserveRule(start=start, end=end, am_rate=am_rate, pm_rate=pm_rate, label="保留區間")]
+            rules = [ReserveRule(start=start, end=end, am_rate=am_rate, pm_rate=pm_rate, label="保留區間",
+                                 am_orders=am_orders, pm_orders=pm_orders)]
             plan = build_period_plan(lookup, start, end, rules, periods)
             st.session_state.reserve_menu_plan = [p.__dict__ for p in plan]
             st.session_state.pop("reserve_create_editor_rows", None)
@@ -135,7 +146,7 @@ def render_reserve_create(backend_email: str, backend_password: str, env: str) -
         return
     editor_rows = st.session_state.get("reserve_create_editor_rows")
     if not editor_rows or len(editor_rows) != len(plan_rows):
-        editor_rows = [{"執行": False, "列號": i, "日期": r["service_date"], "時段": r["period"], "未配班人數": r["unassigned_people"], "保留率": f"{int(r['reserve_rate'] * 100)}%", "建議保留張數": r["reserve_order_target"], "建立張數": r["reserve_order_target"], "預計留給市場": r["market_people_target"]} for i, r in enumerate(plan_rows, 1)]
+        editor_rows = [{"執行": False, "列號": i, "日期": r["service_date"], "時段": r["period"], "未配班人數": r["unassigned_people"], "保留率": f"固定 {r['fixed_orders']} 筆" if r.get("fixed_orders") is not None else f"{int(r['reserve_rate'] * 100)}%", "建議保留張數": r["reserve_order_target"], "建立張數": r["reserve_order_target"], "預計留給市場": r["market_people_target"]} for i, r in enumerate(plan_rows, 1)]
         st.session_state.reserve_create_editor_rows = editor_rows
     st.markdown("#### 2. 選擇日期 × 時段與建立張數")
     st.caption("可逐列勾選、輸入分析列號，或使用全選／全不選；『建立張數』可低於建議值。")
