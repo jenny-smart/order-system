@@ -145,3 +145,25 @@ def test_stage_widget_defaults_to_ready_and_sets_current_stages():
         assert current_booking_stages() == ('可約', '改加')
     finally:
         set_booking_stages(('可約',))
+
+
+def test_lemon_retry_only_reruns_no_slot_rows_and_keeps_booked_rows():
+    # 第 840 列第一次就成單、第 843 列無班表：補檸檬人後只重試 843，840 的單號不能被蓋掉。
+    from unittest.mock import patch
+    import shared.selected_row_status_guard as guard
+    calls = []
+
+    def process(session, rows, *args, **kwargs):
+        calls.append([row_no for row_no, _ in rows])
+        if len(calls) == 1:
+            return {840: {"訂單編號": "TT1", "結果": "成功", "原因": ""}, 843: {"結果": "失敗", "原因": "無班表"}}
+        return {row_no: {"訂單編號": "TT2", "結果": "成功", "原因": ""} for row_no in calls[-1]}
+
+    rows = [(840, {"日期": "2026/12/14", "開始時間": "14:00", "結束時間": "17:00", "服務人時": ""}),
+            (843, {"日期": "2027/01/04", "開始時間": "14:00", "結束時間": "17:00", "服務人時": ""})]
+    with patch.object(guard.orders, "process_one_group", side_effect=process), \
+         patch.object(guard.orders, "ensure_lemon_cleaner_shifts", return_value={"success": True, "assigned": ["檸檬人1"]}), \
+         patch.object(guard.orders, "get_csrf_token", return_value="t"):
+        result = guard.process_one_group_with_lemon_retry(None, rows, "t", None, "台北", allow_auto_lemon_shift=True, logger=lambda *_: None)
+    assert calls == [[840, 843], [843]]
+    assert result[840]["訂單編號"] == "TT1" and result[843]["訂單編號"] == "TT2"

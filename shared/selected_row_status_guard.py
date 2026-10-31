@@ -278,7 +278,10 @@ def update_sheet_rows_first_header(ws, row_results):
 
 
 def process_one_group_with_lemon_retry(session, rows_with_idx, token, gcal_service, region, backend_user_id=None, selected_actions=None, allow_auto_lemon_shift=False, used_order_nos=None, logger=print, group_no=None):
-    """先以既有班表送單；只有結果為「無班表」的列才補檸檬人，補成功後整組重試一次。"""
+    """先以既有班表送單；只有結果為「無班表」的列才補檸檬人，補成功後只重試這些列。
+
+    第一次已成單的列保留原結果：整組重試時那些時段已被自己佔用，會被誤判成無班表，
+    工作表就漏記已成立的訂單（下次可能重複建單）。"""
     result = orders.process_one_group(
         session, rows_with_idx, token, gcal_service, region, backend_user_id,
         selected_actions, allow_auto_lemon_shift=False,
@@ -311,9 +314,13 @@ def process_one_group_with_lemon_retry(session, rows_with_idx, token, gcal_servi
     if not any_shift_added:
         return result
     retry_token = orders.get_csrf_token(session)
-    logger("🍋 已補檸檬人，重新查班表並再次嘗試本筆／本組。")
-    return orders.process_one_group(
-        session, rows_with_idx, retry_token, gcal_service, region, backend_user_id,
+    logger("🍋 已補檸檬人，重新查班表並再次嘗試無班表的列：" + "、".join(map(str, no_slot_rows)))
+    retry_rows = [(row_no, row) for row_no, row in rows_with_idx if int(row_no) in set(no_slot_rows)]
+    retried = orders.process_one_group(
+        session, retry_rows, retry_token, gcal_service, region, backend_user_id,
         selected_actions, allow_auto_lemon_shift=False,
         used_order_nos=used_order_nos, logger=logger, group_no=group_no,
     )
+    merged = dict(result or {})
+    merged.update(retried or {})
+    return merged
