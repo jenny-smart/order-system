@@ -95,6 +95,7 @@ from function import no_line_link_search as _no_line_link_page
 from function import bonus_note as _bonus_note_page
 from function import order_creation as _order_creation_page
 from function import line_notice_generator as _line_notice_page
+from function import completed_booking_notice as _completed_notice_page
 from function import next_appointment_list as _next_appointment_page
 from function import next_service_time_updater as _next_service_time_page
 from function import member_preferences as _member_preferences_page
@@ -200,6 +201,7 @@ FUNCTION_OPTIONS = [
     ("後台／Google 日曆雙向比對：後台 vs. Google 日曆，以事件時間與顏色做雙向比對。", "orders", "後台／Google 日曆雙向比對"),
     ("查詢無LINE連結訂單：搜尋訂購資訊裡沒有LINE連結的訂單。", "orders", "查詢無LINE連結訂單"),
     # ---------- D. LINE 通知／提醒 ----------
+    ("已成單預約完成通知：讀取成單工作表，只對日曆有行程的訂單產生合併日期／時段 LINE 通知。", "orders", "已成單預約完成通知"),
     ("LINE 通知產生器：用已成立訂單編號補產生通知訊息，支援多筆同時產生。", "orders", "LINE 通知產生器"),
     ("週末服務 LINE 提醒：篩選週末已付款訂單、產生提醒訊息並追蹤回覆。", "orders", "週末服務 LINE 提醒"),
     ("專員隔日上班提醒：依服務日期彙整每位專員班次與 LINE 聊天連結。", "orders", "專員隔日上班提醒"),
@@ -239,7 +241,7 @@ _CATEGORY_HEADERS_BY_FEATURE = {
     "批次建單（Google Sheet）": "A. 建單／成單流程",
     "取消訂單": "B. 訂單附屬功能",
     "雙向訂單檢查": "C. 稽核比對工具",
-    "LINE 通知產生器": "D. LINE 通知／提醒",
+    "已成單預約完成通知": "D. LINE 通知／提醒",
     "會員手機查詢": "E. 會員／客戶管理",
     "台北/台中區對帳": "F. 財務功能",
 }
@@ -396,6 +398,8 @@ elif mode == "儲值獎金備註":
     _bonus_note_page.render(backend_email, backend_password, env)
 elif mode == "LINE 通知產生器":
     _line_notice_page.render(backend_email, backend_password, env)
+elif mode == "已成單預約完成通知":
+    _completed_notice_page.render(backend_email, backend_password, env)
 elif mode == "整理預約下次服務":
     _next_appointment_page.render(backend_email, backend_password, env)
 elif mode == "更新建議下次服務時間":
