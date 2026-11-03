@@ -5,8 +5,10 @@
 # ============================================================
 # -*- coding: utf-8 -*-
 import streamlit as st
+import orders
+from accounts import ACCOUNTS
 from shared import notification_service
-from shared.line_notice_sheet import groups_from_dataframe, results_tsv
+from shared.line_notice_sheet import filter_groups_by_calendar, groups_from_dataframe, results_tsv
 from function.ui_common import step, info_panel, copy_button, NJ_MEMO
 from orders import load_worksheet
 
@@ -17,7 +19,7 @@ def render(backend_email, backend_password, env):
     with col_left:
         info_panel("使用說明", [
             "可直接讀取已完成的成單工作表，不必重跑批次。",
-            "系統以後台訂單為準重新確認日期、時段、地址與金額；Google 日曆不是產生通知的必要條件。",
+            "先以 Google 日曆篩選有對應行程的列，再用後台訂單重新確認日期、時段、地址與金額；日曆沒有的列不通知。",
             "工作表資料依姓名＋地址＋服務類型合併；也可切換成手動輸入訂單編號。",
         ])
         source = st.radio("資料來源", ["Google Sheet 已成單列", "手動輸入訂單編號"], horizontal=True, key="line_notice_source")
@@ -33,6 +35,7 @@ def render(backend_email, backend_password, env):
             if not backend_email.strip() or not backend_password.strip():
                 st.error("請先輸入後台帳號密碼")
             else:
+                st.session_state.line_notice_skipped = []
                 groups = []
                 if source == "Google Sheet 已成單列":
                     if not sheet_name.strip():
@@ -41,6 +44,11 @@ def render(backend_email, backend_password, env):
                         try:
                             _, df = load_worksheet(sheet_name.strip())
                             groups = groups_from_dataframe(df, row_spec)
+                            service = orders.build_gcal_service()
+                            groups, skipped = filter_groups_by_calendar(
+                                groups, orders, service, orders.GOOGLE_CALENDAR_MAP, ACCOUNTS,
+                            )
+                            st.session_state.line_notice_skipped = skipped
                         except Exception as exc:
                             st.error(f"讀取工作表失敗：{exc}")
                 else:
@@ -72,8 +80,11 @@ def render(backend_email, backend_password, env):
         st.text_area("N-J Memo", NJ_MEMO, height=220, key="nj_memo_fixed", label_visibility="collapsed")
         copy_button("複製 N-J Memo", NJ_MEMO, "copy-nj-memo-fixed")
     results_list = st.session_state.get("line_from_order_nos_results", [])
+    skipped = st.session_state.get("line_notice_skipped", [])
+    if skipped:
+        st.info(f"日曆沒有對應行程，已略過 {len(skipped)} 筆，不產生通知。")
     if any(not item.get("error") for item in results_list):
-        st.caption("以下整段可按右上角複製，直接貼到 Google Sheet。日期／時段來自後台；日曆未檢查也不影響通知產生。")
+        st.caption("以下皆已通過日曆存在檢查；日期／時段內容以後台訂單為準。整段可直接貼到 Google Sheet。")
         st.code(results_tsv(results_list), language=None)
     for idx, item in enumerate(results_list):
         if item["error"]:

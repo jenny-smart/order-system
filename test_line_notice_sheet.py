@@ -1,6 +1,8 @@
 import pandas as pd
+from types import SimpleNamespace
+from unittest.mock import Mock
 
-from shared.line_notice_sheet import groups_from_dataframe, parse_row_spec, results_tsv
+from shared.line_notice_sheet import filter_groups_by_calendar, groups_from_dataframe, parse_row_spec, results_tsv
 
 
 def test_groups_existing_orders_by_customer_address_and_service():
@@ -25,3 +27,17 @@ def test_tsv_keeps_multiline_notice_in_one_cell():
 
 def test_row_spec_accepts_commas_and_ranges():
     assert parse_row_spec("2,4-5") == {2, 4, 5}
+
+
+def test_calendar_filter_keeps_only_orders_with_matching_event():
+    groups = [{"order_nos": ["LC1", "LC2"], "entries": [
+        {"order_no": "LC1", "address": "台北市A", "date": "2026-12-01", "start": "09:00", "end": "12:00", "proxy": False},
+        {"order_no": "LC2", "address": "台北市A", "date": "2026-12-08", "start": "09:00", "end": "12:00", "proxy": False},
+    ]}]
+    fake_orders = SimpleNamespace(
+        get_region_by_address=lambda _address, _accounts: "台北",
+        find_matching_calendar_event=lambda _service, _calendar, _address, date, _start, _end: {"id": "event"} if date == "2026-12-01" else None,
+    )
+    kept, skipped = filter_groups_by_calendar(groups, fake_orders, Mock(), {"台北": "calendar"}, {})
+    assert kept[0]["order_nos"] == ["LC1"]
+    assert [item["order_no"] for item in skipped] == ["LC2"]
