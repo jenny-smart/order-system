@@ -292,6 +292,7 @@ from env import (
     GOOGLE_SERVICE_ACCOUNT_FILE,
     COLOR_PURPLE,
     COLOR_YELLOW,
+    COLOR_RESERVE,
     REQUEST_DELAY,
     ORDER_PREFIX_DEV,
     ORDER_PREFIX_PROD,
@@ -797,6 +798,12 @@ def pick_best_address_info(member_payload, target_address):
                 "lng": saved_field("lng", "lng"),
                 "company_id": saved_field("companyId", "company_id"),
                 "purchase": purchase,
+                "notice": str(
+                    item.get("memo")
+                    or purchase.get("notice")
+                    or purchase.get("service_notice")
+                    or ""
+                ),
             }
 
     return {}
@@ -1369,7 +1376,10 @@ def find_matching_calendar_event(service, calendar_id, address, target_date, sta
     return None
 
 
-def sync_calendar_color_for_row(service, calendar_id, address, date_value, start_time_str, end_time_str):
+def sync_calendar_color_for_row(
+    service, calendar_id, address, date_value, start_time_str, end_time_str,
+    target_color=COLOR_YELLOW,
+):
     if not ENABLE_GCAL_COLOR_SYNC or service is None:
         return {
             "日曆改色結果": "未執行",
@@ -1419,7 +1429,7 @@ def sync_calendar_color_for_row(service, calendar_id, address, date_value, start
         service.events().patch(
             calendarId=calendar_id,
             eventId=event_id,
-            body={"colorId": COLOR_YELLOW},
+            body={"colorId": target_color},
         ).execute()
     except HttpError as e:
         return {
@@ -1438,9 +1448,9 @@ def sync_calendar_color_for_row(service, calendar_id, address, date_value, start
 
     return {
         "日曆改色結果": "成功",
-        "日曆改色原因": "葡萄紫 → 香蕉黃",
+        "日曆改色原因": f"葡萄紫 → {color_name_from_id(target_color)}",
         "日曆原色": old_color_name,
-        "日曆新色": color_name_from_id(COLOR_YELLOW),
+        "日曆新色": color_name_from_id(target_color),
     }
 
 
@@ -1587,6 +1597,8 @@ def stage_calendar_color(row, gcal_service, region):
         }
 
     try:
+        from shared import proxy_reserve
+        target_color = COLOR_RESERVE if proxy_reserve.is_proxy(row) else COLOR_YELLOW
         return sync_calendar_color_for_row(
             gcal_service,
             calendar_id,
@@ -1594,6 +1606,7 @@ def stage_calendar_color(row, gcal_service, region):
             row["日期"],
             str(row["開始時間"]).strip(),
             str(row["結束時間"]).strip(),
+            target_color=target_color,
         )
     except Exception as e:
         return {
@@ -1621,6 +1634,39 @@ def stage_update_status(order_no, confirm_info, calendar_info, row_result=None):
 
 def has_action(selected_actions, action_name):
     return True if not selected_actions else action_name in selected_actions
+
+
+def infer_purchase_item_by_name_address(session, name, address, max_pages=8):
+    """購買項目空白時，依後台歷史訂單的客戶姓名＋完整地址判斷服務類型。"""
+    target_name = re.sub(r"\s+", "", str(name or ""))
+    target_address = normalize_addr_for_match(address)
+    if not target_name or not target_address:
+        return ""
+
+    from quick_order import _extract_service_type_label
+
+    for page in range(1, max_pages + 1):
+        params = dict(PURCHASE_FILTER_PARAMS_TEMPLATE)
+        params.update({"name": str(name).strip(), "page": str(page)})
+        resp = session.get(PURCHASE_URL, params=params, headers=HEADERS, allow_redirects=True)
+        if resp.status_code != 200:
+            return ""
+        blocks = extract_order_cards_from_purchase_html(resp.text)
+        if not blocks:
+            break
+        for block in blocks:
+            lines = block.get("lines", [])
+            joined = "\n".join(lines)
+            if target_name not in re.sub(r"\s+", "", joined):
+                continue
+            if target_address not in normalize_addr_for_match(joined):
+                continue
+            label = _extract_service_type_label(lines)
+            if label in CLEAN_TYPE_MAP:
+                return label
+        if len(blocks) < 20:
+            break
+    return ""
 
 
 def process_existing_order_only(row, gcal_service, region, session, selected_actions=None):
@@ -1675,6 +1721,14 @@ def process_one_group(session, rows_with_idx, token, gcal_service, region, backe
     group_label = f"第 {group_no} 組" if group_no is not None else "本組"
 
     purchase_item = str(row0["購買項目"]).strip()
+    if not purchase_item:
+        purchase_item = infer_purchase_item_by_name_address(
+            session, row0.get("姓名", ""), row0.get("地址", "")
+        )
+        if purchase_item:
+            logger(f"{group_label}購買項目空白：依客戶姓名＋地址判斷為「{purchase_item}」")
+            for _row_num, group_row in rows_with_idx:
+                group_row["購買項目"] = purchase_item
     clean_type_id = CLEAN_TYPE_MAP.get(purchase_item)
     if not clean_type_id:
         raise Exception(f"未知購買項目: {purchase_item}")

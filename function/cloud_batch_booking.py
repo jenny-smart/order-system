@@ -25,6 +25,7 @@ from shared.selected_row_status_guard import render_run_options, render_target_s
 
 REPO = "jenny-smart/order-system"
 WORKFLOW = "optimized-cloud-batch-booking.yml"
+_RUN_LINE_MESSAGES = {}
 
 
 def _token():
@@ -110,10 +111,35 @@ def _run_summary(run_id):
     for job in jobs:
         if job.get("name") == "booking":
             log = _github_get(f"actions/jobs/{job['id']}/logs").text
+            parsed_messages = []
+            for raw in re.findall(r"LINE_MESSAGE_JSON (\{[^\r\n]+\})", log):
+                try:
+                    message = json.loads(raw)
+                except ValueError:
+                    continue
+                if isinstance(message, dict):
+                    parsed_messages.append(message)
+            _RUN_LINE_MESSAGES[run_id] = parsed_messages
             matches = re.findall(r"FINISH attempted=(\d+) success=(\d+) fail=(\d+) remaining=(\d+)", log)
             if matches:
                 return tuple(map(int, matches[-1]))
     return None
+
+
+def _render_cloud_line_messages(run):
+    messages = _RUN_LINE_MESSAGES.get(run["id"], [])
+    if not messages:
+        return
+    from shared.hybrid_batch_runner import line_messages_tsv
+    st.markdown("#### LINE 預約完成通知")
+    st.caption("以下整段可按右上角複製，直接貼到 Google Sheet：")
+    st.code(line_messages_tsv(messages), language=None)
+    for index, message in enumerate(messages):
+        st.text_area(
+            f"{message.get('姓名') or '客戶'}｜LINE 通知",
+            message.get("通知內容", ""), height=320,
+            key=f"cloud_line_message_{run['id']}_{index}",
+        )
 
 
 def _render_live_progress(run):
@@ -301,6 +327,7 @@ def _render_cloud_status():
             attempted, success, failed, remaining = summary
             st.info(f"⏸ 已暫停：處理 {attempted} 列，成功 {success} 列，失敗 {failed} 列，尚待處理 {remaining} 列。"
                     "要繼續，按上方「開始雲端批次成單」；已建立的訂單不會重做。")
+            _render_cloud_line_messages(run)
             return
         if summary is not None:
             attempted, success, failed, remaining = summary
@@ -322,6 +349,7 @@ def _render_cloud_status():
             st.warning("雲端批次已取消。")
         else:
             st.error(f"這次雲端執行已失敗或中止（{conclusion}）。未取得最終 FINISH 摘要；上方如有筆數，是最後回報的進度，完整結果請核對工作表。")
+        _render_cloud_line_messages(run)
     except Exception:
         st.warning("暫時無法取得雲端狀態，請稍後更新或至 GitHub Actions 查看。")
 

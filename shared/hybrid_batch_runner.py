@@ -155,6 +155,80 @@ def _login_once(backend_email, backend_password):
     return session
 
 
+def _append_line_entry(entries, row, result):
+    order_no = str((result or {}).get("訂單編號", "") or "").strip()
+    if not order_no or str((result or {}).get("結果", "")) == "失敗":
+        return
+    if any(str(existing.get("訂單編號", "") or "").strip() == order_no for _, existing in entries):
+        return
+    entries.append((row, result))
+
+
+def _batch_line_messages(entries, logger=print):
+    """把本次順利成單日期套入既有儲值金 LINE 預約完成格式。"""
+    if not entries:
+        return []
+    from quick_order import build_line_message
+
+    grouped = defaultdict(list)
+    for row, result in entries:
+        if not all(str(row.get(field, "") or "").strip() for field in ("日期", "開始時間", "結束時間", "地址")):
+            continue
+        key = (
+            str(row.get("姓名", "") or "").strip(),
+            _orders.normalize_addr_for_match(row.get("地址", "")),
+            str(row.get("購買項目", "") or "").strip(),
+        )
+        grouped[key].append((row, result))
+
+    messages = []
+    for (name, _address_key, purchase_item), items in grouped.items():
+        items.sort(key=lambda item: (
+            _orders.get_date_str(item[0].get("日期")),
+            str(item[0].get("開始時間", "")),
+        ))
+        address = str(items[0][0].get("地址", "") or "").strip()
+        clean_type_id = _orders.CLEAN_TYPE_MAP.get(purchase_item, "1")
+        periods, dates, order_nos = [], [], []
+        for row, result in items:
+            date_s = _orders.get_date_str(row.get("日期"))
+            dates.append(date_s)
+            order_nos.append(str(result.get("訂單編號") or "").strip())
+            periods.append((date_s, _orders.normalize_period_text(row.get("開始時間", ""), row.get("結束時間", ""))))
+        multi_date = len(set(dates)) > 1
+        combined_period = "\n".join(
+            f"{date_s.replace('-', '/')} {period}" if multi_date else period
+            for date_s, period in periods
+        )
+        payload = {
+            "order_no": order_nos[0], "all_order_nos": order_nos, "payway": "儲值金",
+            "region": _orders.get_region_by_address(address, ACCOUNTS) or "", "date": dates[0],
+            "period_s": periods[0][1], "combined_period": combined_period, "multi_date": multi_date,
+            "multi_address": False, "address": address, "fare": "0", "clean_type_id": clean_type_id,
+        }
+        notice = build_line_message(payload)
+        message = {"姓名": name, "地址": address, "訂單編號": "、".join(order_nos), "通知內容": notice}
+        messages.append(message)
+        logger(f"📱 {name} 預約完成 LINE 通知（可直接複製）：\n{notice}")
+    return messages
+
+
+def line_messages_tsv(messages):
+    """可直接整段貼到 Google Sheet；多行通知會保留在同一儲存格。"""
+    def cell(value):
+        text = str(value or "")
+        if any(char in text for char in ('\t', '\n', '"')):
+            return '"' + text.replace('"', '""') + '"'
+        return text
+
+    rows = [["姓名", "地址", "訂單編號", "LINE預約完成通知"]]
+    rows.extend([
+        [message.get("姓名"), message.get("地址"), message.get("訂單編號"), message.get("通知內容")]
+        for message in messages or []
+    ])
+    return "\n".join("\t".join(cell(value) for value in row) for row in rows)
+
+
 def run_process_web_direct_single(
     *, env_name, region, backend_email, backend_password, sheet_name,
     start_row, end_row, selected_actions=None, logger=print,
@@ -202,6 +276,7 @@ def run_process_web_direct_single(
     success_count = len(recovered)
     fail_count = len(blocked)
     processed = len(recovered) + len(blocked)
+    line_entries = []
 
     logger(f"單筆批次：共 {len(work)} 列；依列號逐筆處理，不分組。")
 
@@ -215,10 +290,11 @@ def run_process_web_direct_single(
 
         # 中斷復原列已由 _recover_before_create 回填；如要求改日曆，再於回填後處理。
         if row_no in recovered_set:
+            recovered_result = _orders.build_row_result(order_no=order_no, result="中斷復原", reason="")
             if "改 Google 日曆" in selected_actions and order_no:
-                recovered_result = _orders.build_row_result(order_no=order_no, result="中斷復原", reason="")
                 recovered_result = _lazy_calendar_sync(row, recovered_result, region, gcal_state, logger)
                 _orders.update_sheet_rows(ws, {row_no: recovered_result})
+            _append_line_entry(line_entries, row, recovered_result)
             logger(f"♻️ 第 {row_no} 列已復原，繼續下一列。")
             continue
 
@@ -245,11 +321,13 @@ def run_process_web_direct_single(
             _orders.update_sheet_rows(ws, {row_no: result})
 
         ok, bad = _result_stats(row_no, row, result, failed_records)
+        _append_line_entry(line_entries, row, result)
         success_count += ok
         fail_count += bad
         processed += 1
         logger(f"✅ 第 {row_no} 列已完成並回填，繼續下一列。")
 
+    line_messages = _batch_line_messages(line_entries, logger)
     return {
         "success": fail_count == 0,
         "sheet_name": sheet_name,
@@ -261,6 +339,8 @@ def run_process_web_direct_single(
         "recovered_count": len(recovered),
         "blocked_count": len(blocked),
         "failed_records": failed_records,
+        "line_messages": line_messages,
+        "line_messages_tsv": line_messages_tsv(line_messages),
     }
 
 
@@ -312,6 +392,7 @@ def run_process_web_hybrid(
     success_count = len(recovered)
     fail_count = len(blocked)
     processed = len(recovered) + len(blocked)
+    line_entries = []
 
     def report_progress(row_no=''):
         if progress_callback:
@@ -321,6 +402,15 @@ def run_process_web_hybrid(
                 logger('進度回報暫時無法更新；成單繼續。')
 
 
+    for _row_no, _row in recovered_rows:
+        _append_line_entry(
+            line_entries, _row,
+            _orders.build_row_result(
+                order_no=str(_row.get("訂單編號", "") or "").strip(),
+                result="中斷復原", reason="",
+            ),
+        )
+
     if "改 Google 日曆" in selected_actions:
         for row_no, row in recovered_rows:
             order_no = str(row.get("訂單編號", "") or "").strip()
@@ -328,6 +418,7 @@ def run_process_web_hybrid(
                 result = _orders.build_row_result(order_no=order_no, result="中斷復原", reason="")
                 result = _lazy_calendar_sync(row, result, region, gcal_state, logger)
                 _orders.update_sheet_rows(ws, {row_no: result})
+                _append_line_entry(line_entries, row, result)
 
     report_progress()
     for row_no, row in existing_rows:
@@ -340,6 +431,7 @@ def run_process_web_hybrid(
             )
             _orders.update_sheet_rows(ws, {row_no: result})
         ok, bad = _result_stats(row_no, row, result, failed_records)
+        _append_line_entry(line_entries, row, result)
         success_count += ok
         fail_count += bad
         processed += 1
@@ -409,6 +501,7 @@ def run_process_web_hybrid(
 
         for row_no, row in rows_with_idx:
             ok, bad = _result_stats(row_no, row, row_results.get(row_no, {}), failed_records)
+            _append_line_entry(line_entries, row, row_results.get(row_no, {}))
             success_count += ok
             fail_count += bad
             processed += 1
@@ -432,11 +525,13 @@ def run_process_web_hybrid(
             )
             _orders.update_sheet_rows(ws, {row_no: result})
         ok, bad = _result_stats(row_no, row, result, failed_records)
+        _append_line_entry(line_entries, row, result)
         success_count += ok
         fail_count += bad
         processed += 1
         report_progress()
 
+    line_messages = _batch_line_messages(line_entries, logger)
     return {
         "success": fail_count == 0,
         "sheet_name": sheet_name,
@@ -449,4 +544,6 @@ def run_process_web_hybrid(
         "blocked_count": len(blocked),
         "failed_records": failed_records,
         "paused": paused,
+        "line_messages": line_messages,
+        "line_messages_tsv": line_messages_tsv(line_messages),
     }

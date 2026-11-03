@@ -133,12 +133,16 @@ def _calendar_recover(row, region, gcal_service):
         return info
     old_color = str(info.get("日曆原色", "")).strip()
     new_color = str(info.get("日曆新色", "")).strip()
-    if old_color == "香蕉黃" or new_color == "香蕉黃":
+    from shared import proxy_reserve
+    target_color_name = _orders.color_name_from_id(
+        _orders.COLOR_RESERVE if proxy_reserve.is_proxy(row) else _orders.COLOR_YELLOW
+    )
+    if old_color == target_color_name or new_color == target_color_name:
         return {
             "日曆改色結果": "成功",
-            "日曆改色原因": "中斷復原：日曆已是香蕉黃，無需重複修改",
-            "日曆原色": old_color or "香蕉黃",
-            "日曆新色": "香蕉黃",
+            "日曆改色原因": f"中斷復原：日曆已是{target_color_name}，無需重複修改",
+            "日曆原色": old_color or target_color_name,
+            "日曆新色": target_color_name,
         }
     return info
 

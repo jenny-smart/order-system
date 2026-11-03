@@ -55,6 +55,14 @@ def proxy_name(row) -> str:
     return name
 
 
+def is_proxy(row) -> bool:
+    """是否為使用檸檬保留帳號建單的列。"""
+    try:
+        return bool(row.get(FLAG_KEY, False))
+    except AttributeError:
+        return False
+
+
 def needs_native_address(row) -> bool:
     """代客保留列：檸檬保留帳號的地址清單通常沒有客人地址，要用後台「查詢地區」取得服務區域，
     否則區域空白會查不到班表（誤判無班表）。"""

@@ -297,6 +297,17 @@ def render(backend_email: str, backend_password: str, env: str) -> None:
         fail = int(result.get("fail_count", 0) or 0)
         st.success(f"執行完成：成功 {success}，失敗 {fail}，"
                    f"未選對象略過 {len(held)}，其他略過 {len(invalid) + len(region_mismatch)}。")
+        line_messages = result.get("line_messages") or []
+        if line_messages:
+            from shared.hybrid_batch_runner import line_messages_tsv
+            st.caption("以下整段可按右上角複製，直接貼到 Google Sheet：")
+            st.code(line_messages_tsv(line_messages), language=None)
+        for idx, message in enumerate(line_messages):
+            st.text_area(
+                f"{message.get('姓名') or '客戶'}｜預約完成 LINE 通知",
+                message.get("通知內容", ""), height=360,
+                key=f"batch_opt_line_message_{idx}",
+            )
         log_execution(
             function_name="批次建單優化", status="失敗" if fail else "成功",
             area=region, date=sheet_name, target="、".join(map(str, target_rows)),
