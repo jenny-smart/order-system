@@ -3195,7 +3195,8 @@ def build_combined_line_message_from_order_nos(env_name, backend_email, backend_
             raise Exception(f"訂單 {ono} 缺少服務地址，無法合併")
         if not payway:
             raise Exception(f"訂單 {ono} 無法判斷付款方式，請至後台確認")
-        orders_info.append({"order_no": ono, "service_date": service_date, "period_s": service_time, "actual_period": actual_time, "person": person_extracted, "address": address, "fare": fare, "payway": payway, "service_amount": service_amount, "region": region, "service_label": _extract_service_type_label(lines)})
+        email_match = re.search(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}", joined)
+        orders_info.append({"order_no": ono, "service_date": service_date, "period_s": service_time, "actual_period": actual_time, "person": person_extracted, "address": address, "fare": fare, "payway": payway, "service_amount": service_amount, "region": region, "service_label": _extract_service_type_label(lines), "phone": _extract_phone_from_block_lines(lines), "email": email_match.group(0) if email_match else ""})
     payways = {o["payway"] for o in orders_info if o["payway"]}
     if len(payways) > 1:
         raise Exception(f"合併的訂單付款方式不同（{', '.join(payways)}），請分開輸入分別產生通知。")
@@ -3247,6 +3248,11 @@ def build_combined_line_message_from_order_nos(env_name, backend_email, backend_
         except Exception:
             pass
     first = orders_info[0]
+    line_url = ""
+    try:
+        line_url = _fetch_line_url_for_order_no(session, first["order_no"])
+    except Exception:
+        pass
     result = {
         "order_no": first["order_no"], "all_order_nos": order_nos,
         "address": first["address"], "date": first["service_date"],
@@ -3256,6 +3262,9 @@ def build_combined_line_message_from_order_nos(env_name, backend_email, backend_
         "service_amount": amount_display, "price_with_tax": str(total_amount),
         "fare": str(total_fare) if total_fare else "0", "payway": first["payway"],
         "region": first["region"], "service_label": first["service_label"],
+        "phone": next((o["phone"] for o in orders_info if o.get("phone")), ""),
+        "email": next((o["email"] for o in orders_info if o.get("email")), ""),
+        "line_url": line_url,
         "env_name": env_name, "session": session,
         "source_url": f"{base_url}/purchase?orderNo={first['order_no']}",
     }
