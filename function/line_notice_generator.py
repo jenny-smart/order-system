@@ -5,41 +5,74 @@
 # ============================================================
 # -*- coding: utf-8 -*-
 import streamlit as st
+import orders
+from accounts import ACCOUNTS
 from shared import notification_service
+from shared.line_notice_sheet import filter_groups_by_calendar, groups_from_dataframe, results_tsv
 from function.ui_common import step, info_panel, copy_button, NJ_MEMO
+from orders import load_worksheet
 
 
 def render(backend_email, backend_password, env):
     step("3", "LINE 通知產生器")
     col_left, col_right = st.columns([3, 1])
     with col_left:
-        info_panel("使用說明", ["每行一組：要合併的訂單可用半形逗號分隔。", "系統會逐筆核對訂單日期、地址、付款方式與金額；若合併訂單有多個地址，會在每筆服務時間下方顯示對應地址。"])
-        line_order_nos_input = st.text_area("訂單編號（每行一個）", value="", height=120, placeholder="LC00211537\nLC00211538", key="line_order_nos")
+        info_panel("使用說明", [
+            "可直接讀取已完成的成單工作表，不必重跑批次。",
+            "先以 Google 日曆篩選有對應行程的列，再用後台訂單重新確認日期、時段、地址與金額；日曆沒有的列不通知。",
+            "工作表資料依姓名＋地址＋服務類型合併；也可切換成手動輸入訂單編號。",
+        ])
+        source = st.radio("資料來源", ["Google Sheet 已成單列", "手動輸入訂單編號"], horizontal=True, key="line_notice_source")
+        if source == "Google Sheet 已成單列":
+            c1, c2 = st.columns(2)
+            sheet_name = c1.text_input("工作表名稱", placeholder="例：台北202611", key="line_notice_sheet")
+            row_spec = c2.text_input("列號（選填）", placeholder="例：2,3,5-20；空白＝全部已成單列", key="line_notice_rows")
+            line_order_nos_input = ""
+        else:
+            sheet_name = row_spec = ""
+            line_order_nos_input = st.text_area("訂單編號（每行一組；同組用逗號）", value="", height=120, placeholder="LC00211537,LC00211538", key="line_order_nos")
         if st.button("產生 LINE 訊息", width="stretch", key="make-line-from-order-no"):
             if not backend_email.strip() or not backend_password.strip():
                 st.error("請先輸入後台帳號密碼")
             else:
-                raw_lines = [x.strip() for x in line_order_nos_input.splitlines() if x.strip()]
-                order_groups = []
-                for line in raw_lines:
-                    nos = [n.strip() for n in line.split(",") if n.strip()]
-                    if nos: order_groups.append(nos)
+                st.session_state.line_notice_skipped = []
+                groups = []
+                if source == "Google Sheet 已成單列":
+                    if not sheet_name.strip():
+                        st.error("請輸入工作表名稱")
+                    else:
+                        try:
+                            _, df = load_worksheet(sheet_name.strip())
+                            groups = groups_from_dataframe(df, row_spec)
+                            service = orders.build_gcal_service()
+                            groups, skipped = filter_groups_by_calendar(
+                                groups, orders, service, orders.GOOGLE_CALENDAR_MAP, ACCOUNTS,
+                            )
+                            st.session_state.line_notice_skipped = skipped
+                        except Exception as exc:
+                            st.error(f"讀取工作表失敗：{exc}")
+                else:
+                    for line in [x.strip() for x in line_order_nos_input.splitlines() if x.strip()]:
+                        nos = [n.strip() for n in line.split(",") if n.strip()]
+                        if nos:
+                            groups.append({"name": "", "address": "", "service": "", "order_nos": nos, "rows": []})
+                order_groups = [group["order_nos"] for group in groups]
                 if not order_groups:
-                    st.error("請輸入至少一個訂單編號")
+                    st.error("找不到已成單的訂單編號")
                 else:
                     st.session_state.line_from_order_nos_results = []
                     for _k in list(st.session_state.keys()):
                         if _k.startswith("line_text_") or _k.startswith("nj_memo_"): del st.session_state[_k]
                     results_list = []
-                    for nos in order_groups:
+                    for group, nos in zip(groups, order_groups):
                         label = "、".join(nos)
                         try:
                             with st.spinner(f"查詢訂單 {label}…"):
                                 line_result, line_text = notification_service.build_combined_line_message_from_order_nos(env_name=env, backend_email=backend_email.strip(), backend_password=backend_password.strip(), order_nos=nos)
                             safe_result = {k: v for k, v in line_result.items() if k != "session"}
-                            results_list.append({"order_no": label, "result": safe_result, "text": line_text, "error": None})
+                            results_list.append({"order_no": label, "group": group, "result": safe_result, "text": line_text, "error": None})
                         except Exception as e:
-                            results_list.append({"order_no": label, "result": None, "text": "", "error": str(e)})
+                            results_list.append({"order_no": label, "group": group, "result": None, "text": "", "error": str(e)})
                     st.session_state.line_from_order_nos_results = results_list
                     st.rerun()
     with col_right:
@@ -47,6 +80,12 @@ def render(backend_email, backend_password, env):
         st.text_area("N-J Memo", NJ_MEMO, height=220, key="nj_memo_fixed", label_visibility="collapsed")
         copy_button("複製 N-J Memo", NJ_MEMO, "copy-nj-memo-fixed")
     results_list = st.session_state.get("line_from_order_nos_results", [])
+    skipped = st.session_state.get("line_notice_skipped", [])
+    if skipped:
+        st.info(f"日曆沒有對應行程，已略過 {len(skipped)} 筆，不產生通知。")
+    if any(not item.get("error") for item in results_list):
+        st.caption("以下皆已通過日曆存在檢查；日期／時段內容以後台訂單為準。整段可直接貼到 Google Sheet。")
+        st.code(results_tsv(results_list), language=None)
     for idx, item in enumerate(results_list):
         if item["error"]:
             st.error(f"訂單 {item['order_no']} 產生失敗：{item['error']}"); continue
