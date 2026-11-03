@@ -216,6 +216,7 @@ def render_batch(backend_email, backend_password, env):
         total_success = 0
         total_fail = 0
         total_processed = 0
+        batch_line_messages = []
         try:
             if auto_modes:
                 held_rows = _held_for_request(batch_opt, sheet_name.strip(), region, modes=auto_modes,
@@ -249,6 +250,7 @@ def render_batch(backend_email, backend_password, env):
                     total_success += result.get("success_count", 0)
                     total_fail += result.get("fail_count", 0)
                     total_processed += result.get("total_processed", 0)
+                    batch_line_messages.extend(result.get("line_messages") or [])
             except Exception as e:
                 total_fail += len(target_rows)
                 ui_log(f"❌ 批次執行失敗：{e}")
@@ -282,6 +284,20 @@ def render_batch(backend_email, backend_password, env):
                 st.info("執行完成，無資料被處理。")
             if held_rows:
                 st.info(f"未選入本次預約對象略過 {len(held_rows)} 列：" + "、".join(map(str, held_rows)))
+            if batch_line_messages:
+                from shared.hybrid_batch_runner import line_messages_tsv
+                st.caption("以下整段可按右上角複製，直接貼到 Google Sheet：")
+                st.code(line_messages_tsv(batch_line_messages), language=None)
+            for idx, message in enumerate(batch_line_messages):
+                st.text_area(
+                    f"{message.get('姓名') or '客戶'}｜預約完成 LINE 通知",
+                    message.get("通知內容", ""), height=360,
+                    key=f"batch_line_message_{idx}",
+                )
+                copy_button(
+                    "複製 LINE 通知", message.get("通知內容", ""),
+                    f"copy-batch-line-message-{idx}",
+                )
 
 
 def render_old_customer(backend_email, backend_password, env):

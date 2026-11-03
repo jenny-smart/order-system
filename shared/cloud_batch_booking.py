@@ -153,6 +153,8 @@ def run(sheet_name: str, chunk_size=50, max_rows=0, pause_seconds=5, filter_mode
                 fail = int(result.get("fail_count", 0) or 0)
                 success_total += success
                 fail_total += fail
+                for message in result.get("line_messages") or []:
+                    print("LINE_MESSAGE_JSON " + json.dumps(message, ensure_ascii=False), flush=True)
                 print(f"DONE {region}: success={success} fail={fail} recovered={int(result.get('recovered_count', 0) or 0)} blocked={int(result.get('blocked_count', 0) or 0)}", flush=True)
             except Exception as exc:
                 # Only count rows whose results were actually reported; a sheet
