@@ -6,8 +6,35 @@ from datetime import datetime, timedelta, timezone
 
 
 _CHECKED = {"TRUE", "V", "Y", "YES", "1", "是", "✓", "✔", "☑", "勾"}
-OUTPUT_SPREADSHEET_ID = "1de41gNvBZCGdfy0qNouRNEaQD7R019VAvz2cfq88ZrE"
-OUTPUT_HEADERS = ["姓名", "電話", "mail", "LINE連結", "通知內容", "來源工作表", "來源列", "地址", "訂單編號", "日曆比對", "後台確認", "說明", "產生時間"]
+SOURCE_OUTPUT_HEADERS = ["mail", "LINE連結", "通知內容", "異動檢查"]
+
+
+class _CachedRequest:
+    def __init__(self, request, cache, key):
+        self.request, self.cache, self.key = request, cache, key
+
+    def execute(self):
+        if self.key not in self.cache:
+            self.cache[self.key] = self.request.execute()
+        return self.cache[self.key]
+
+
+class _CachedEvents:
+    def __init__(self, events, cache):
+        self.events, self.cache = events, cache
+
+    def list(self, **kwargs):
+        key = tuple(sorted((name, str(value)) for name, value in kwargs.items()))
+        return _CachedRequest(self.events.list(**kwargs), self.cache, key)
+
+
+class _CachedCalendarService:
+    """同一日曆＋日期只向 Google Calendar 查一次。"""
+    def __init__(self, service):
+        self.service, self.cache = service, {}
+
+    def events(self):
+        return _CachedEvents(self.service.events(), self.cache)
 
 
 def parse_row_spec(spec):
@@ -60,6 +87,7 @@ def groups_from_dataframe(df, row_spec=""):
         item["entries"].append({
             "row": row_no, "order_no": order_no, "name": name,
             "address": str(row.get("地址", "") or "").strip(),
+            "service": service,
             "phone": phone, "email": email, "line_url": line_url,
             "date": row.get("日期", ""), "start": row.get("開始時間", ""), "end": row.get("結束時間", ""),
             "proxy": str(row.get("代客保留", "") or "").strip().upper() in _CHECKED,
@@ -83,10 +111,11 @@ def _proxy_name_exists(service, calendar_id, orders_module, entry):
 def filter_groups_by_calendar(groups, orders_module, service, calendar_map, accounts, progress_callback=None):
     """只保留日曆確實存在的訂單；代客保留依同日姓名，其餘依日期時段地址。"""
     kept, skipped = [], []
+    service = _CachedCalendarService(service)
     total = sum(len(group.get("entries") or []) for group in groups or [])
     checked = matched = 0
     for group in groups or []:
-        matched_nos = []
+        matched_nos, matched_entries = [], []
         for entry in group.get("entries") or []:
             try:
                 region = orders_module.get_region_by_address(entry.get("address", ""), accounts)
@@ -105,6 +134,7 @@ def filter_groups_by_calendar(groups, orders_module, service, calendar_map, acco
                 skipped.append({**entry, "reason": f"日曆檢查失敗：{exc}"})
             if found:
                 matched_nos.append(entry["order_no"])
+                matched_entries.append(entry)
                 matched += 1
             elif not any(item.get("order_no") == entry.get("order_no") for item in skipped):
                 skipped.append({**entry, "reason": "日曆無對應行程"})
@@ -114,6 +144,7 @@ def filter_groups_by_calendar(groups, orders_module, service, calendar_map, acco
         if matched_nos:
             copy = dict(group)
             copy["order_nos"] = list(dict.fromkeys(matched_nos))
+            copy["entries"] = matched_entries
             kept.append(copy)
     return kept, skipped
 
@@ -137,52 +168,116 @@ def results_tsv(results):
     return "\n".join("\t".join(cell(value) for value in row) for row in rows)
 
 
-def comparison_rows(source_sheet, source_groups, results, skipped):
-    """輸出每張訂單的日曆／後台／通知結果，供自動寫回指定試算表。"""
-    skipped_by_order = {str(item.get("order_no") or ""): item for item in skipped or []}
-    result_by_order = {}
-    for item in results or []:
-        for order_no in (item.get("group") or {}).get("order_nos") or []:
-            result_by_order[str(order_no)] = item
-    generated_at = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
-    rows = []
+def _group_key(group):
+    return (str(group.get("name") or "").strip(), re.sub(r"\s+", "", str(group.get("address") or "")), str(group.get("service") or "").strip())
+
+
+def _slot(date_value, start_value, end_value=""):
+    date_s = str(date_value or "")[:10].replace("-", "/")
+    period = str(start_value or "") if not end_value else f"{start_value}-{end_value}"
+    period = re.sub(r"\s+", "", period).replace("～", "-").replace("~", "-")
+    return date_s, period
+
+
+def build_source_writeback(source_groups, results, skipped):
+    """建立原排程工作表回寫計畫；通知只寫每組第一列。"""
+    result_by_key = {_group_key(item.get("group") or {}): item for item in results or []}
+    skipped_by_key = {}
+    for entry in skipped or []:
+        key = (str(entry.get("name") or "").strip(), re.sub(r"\s+", "", str(entry.get("address") or "")), str(entry.get("service") or "").strip())
+        skipped_by_key.setdefault(key, []).append(entry)
+    row_updates, insertions, reduction_rows = {}, [], []
     for group in source_groups or []:
-        for entry in group.get("entries") or []:
-            order_no = str(entry.get("order_no") or "")
-            skipped_item = skipped_by_order.get(order_no)
-            result_item = result_by_order.get(order_no)
-            if skipped_item:
-                calendar_status, backend_status, notice = "無對應行程", "未執行", ""
-                reason = skipped_item.get("reason", "日曆無對應行程")
-            elif result_item and not result_item.get("error"):
-                calendar_status, backend_status = "有對應行程", "已確認"
-                notice, reason = result_item.get("text", ""), ""
-            else:
-                calendar_status, backend_status, notice = "有對應行程", "確認失敗", ""
-                reason = (result_item or {}).get("error", "無法取得結果")
-            backend = (result_item or {}).get("result") or {}
-            rows.append([
-                entry.get("name", ""), entry.get("phone") or group.get("phone", "") or backend.get("phone", ""),
-                entry.get("email") or group.get("email", "") or backend.get("email", ""),
-                entry.get("line_url") or group.get("line_url", "") or backend.get("line_url", ""), notice,
-                source_sheet, entry.get("row", ""), entry.get("address", ""), order_no,
-                calendar_status, backend_status, reason, generated_at,
-            ])
-    return rows
+        entries = group.get("entries") or []
+        if not entries:
+            continue
+        first_row = min(int(entry["row"]) for entry in entries)
+        result_item = result_by_key.get(_group_key(group))
+        backend = (result_item or {}).get("result") or {}
+        actual = backend.get("orders_info") or []
+        original_slots = [_slot(entry.get("date"), entry.get("start"), entry.get("end")) for entry in entries]
+        actual_slots = [_slot(item.get("service_date"), item.get("period_s")) for item in actual]
+        notice = result_item.get("text", "") if result_item and not result_item.get("error") else ""
+        if result_item and result_item.get("error"):
+            change = f"確認失敗：{result_item['error']}"
+        elif len(actual_slots) < len(original_slots):
+            change = f"減少：原工作表 {len(original_slots)} 筆，日曆＋後台確認 {len(actual_slots)} 筆"
+            if first_row not in reduction_rows:
+                reduction_rows.append(first_row)
+        elif len(actual_slots) > len(original_slots):
+            change = f"增加：原工作表 {len(original_slots)} 筆，日曆＋後台確認 {len(actual_slots)} 筆"
+            for item in actual[len(original_slots):]:
+                insertions.append({"after_row": max(int(entry["row"]) for entry in entries), "group": group, "order": item})
+        elif sorted(actual_slots) != sorted(original_slots):
+            before = "、".join(f"{date} {period}" for date, period in original_slots)
+            after = "、".join(f"{date} {period}" for date, period in actual_slots)
+            change = f"日期／時段異動：原 {before}；確認 {after}"
+        else:
+            change = "一致"
+        if not actual and skipped_by_key.get(_group_key(group)) and not result_item:
+            change = f"減少：原工作表 {len(original_slots)} 筆，日曆＋後台確認 0 筆"
+            if first_row not in reduction_rows:
+                reduction_rows.append(first_row)
+        row_updates[first_row] = {
+            "mail": group.get("email") or backend.get("email", ""),
+            "LINE連結": group.get("line_url") or backend.get("line_url", ""),
+            "通知內容": notice, "異動檢查": change,
+        }
+        if first_row in reduction_rows:
+            row_updates[first_row]["狀態"] = "安排減少"
+        for entry in entries:
+            if int(entry["row"]) != first_row:
+                row_updates[int(entry["row"])] = {"通知內容": "", "異動檢查": ""}
+    return row_updates, insertions, reduction_rows
 
 
-def write_comparison_results(orders_module, source_sheet, rows):
-    """將本次比對結果覆寫到指定主試算表的來源專用分頁。"""
-    spreadsheet = orders_module.build_gsheet_client().open_by_key(OUTPUT_SPREADSHEET_ID)
-    safe_source = str(source_sheet or "未命名").replace("/", "-").replace("\\", "-")
-    title = ("已成單通知-" + safe_source)[:100]
-    try:
-        worksheet = spreadsheet.worksheet(title)
-    except Exception as exc:
-        if exc.__class__.__name__ != "WorksheetNotFound":
-            raise
-        worksheet = spreadsheet.add_worksheet(title=title, rows=max(len(rows) + 10, 100), cols=len(OUTPUT_HEADERS))
-    worksheet.clear()
-    worksheet.update(range_name="A1", values=[OUTPUT_HEADERS] + list(rows or []))
-    worksheet.freeze(rows=1)
-    return title
+def write_results_to_source(worksheet, source_groups, results, skipped):
+    """一次批次回寫原排程工作表，並將減少安排的狀態標成紅底白字。"""
+    headers = list(worksheet.row_values(1))
+    for header in SOURCE_OUTPUT_HEADERS:
+        if header not in headers:
+            headers.append(header)
+    worksheet.update(range_name="A1", values=[headers])
+    header_index = {name: index + 1 for index, name in enumerate(headers) if name}
+    row_updates, insertions, reduction_rows = build_source_writeback(source_groups, results, skipped)
+    for insertion in sorted(insertions, key=lambda item: item["after_row"], reverse=True):
+        values = [""] * len(headers)
+        group, order = insertion["group"], insertion["order"]
+        data = {"姓名": group.get("name", ""), "電話": group.get("phone", ""), "地址": group.get("address", ""),
+                "購買項目": group.get("service", ""), "訂單編號": order.get("order_no", ""),
+                "日期": order.get("service_date", ""), "開始時間": str(order.get("period_s", "")).split("-")[0].strip(),
+                "結束時間": str(order.get("period_s", "")).split("-")[-1].strip(),
+                "狀態": "待安排", "異動檢查": "新增安排列"}
+        for name, value in data.items():
+            if name in header_index:
+                values[header_index[name] - 1] = value
+        worksheet.insert_rows([values], row=insertion["after_row"] + 1, value_input_option="USER_ENTERED", inherit_from_before=True)
+    shifts = lambda row: sum(1 for item in insertions if item["after_row"] < row)
+    updates = []
+    for row, values in row_updates.items():
+        target_row = row + shifts(row)
+        for name, value in values.items():
+            if name in header_index:
+                updates.append({"range": _a1(target_row, header_index[name]), "values": [[value]]})
+    if updates:
+        worksheet.batch_update(updates, value_input_option="USER_ENTERED")
+    status_col = header_index.get("狀態")
+    if status_col and reduction_rows:
+        requests = []
+        for row in reduction_rows:
+            target_row = row + shifts(row)
+            requests.append({"repeatCell": {"range": {"sheetId": worksheet.id, "startRowIndex": target_row - 1, "endRowIndex": target_row,
+                "startColumnIndex": status_col - 1, "endColumnIndex": status_col}, "cell": {"userEnteredFormat": {
+                    "backgroundColor": {"red": 0.85, "green": 0.0, "blue": 0.0},
+                    "textFormat": {"foregroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}, "bold": True}}},
+                "fields": "userEnteredFormat(backgroundColor,textFormat)"}})
+        worksheet.spreadsheet.batch_update({"requests": requests})
+    return len(row_updates), len(insertions), len(reduction_rows)
+
+
+def _a1(row, column):
+    letters = ""
+    while column:
+        column, remainder = divmod(column - 1, 26)
+        letters = chr(65 + remainder) + letters
+    return f"{letters}{row}"
