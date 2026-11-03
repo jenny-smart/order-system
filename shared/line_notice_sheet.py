@@ -70,9 +70,11 @@ def _proxy_name_exists(service, calendar_id, orders_module, entry):
     return any(name in "\n".join(str(event.get(field) or "") for field in ("summary", "description", "location")) for event in events)
 
 
-def filter_groups_by_calendar(groups, orders_module, service, calendar_map, accounts):
+def filter_groups_by_calendar(groups, orders_module, service, calendar_map, accounts, progress_callback=None):
     """只保留日曆確實存在的訂單；代客保留依同日姓名，其餘依日期時段地址。"""
     kept, skipped = [], []
+    total = sum(len(group.get("entries") or []) for group in groups or [])
+    checked = matched = 0
     for group in groups or []:
         matched_nos = []
         for entry in group.get("entries") or []:
@@ -93,8 +95,12 @@ def filter_groups_by_calendar(groups, orders_module, service, calendar_map, acco
                 skipped.append({**entry, "reason": f"日曆檢查失敗：{exc}"})
             if found:
                 matched_nos.append(entry["order_no"])
+                matched += 1
             elif not any(item.get("order_no") == entry.get("order_no") for item in skipped):
                 skipped.append({**entry, "reason": "日曆無對應行程"})
+            checked += 1
+            if progress_callback:
+                progress_callback(checked, total, matched, len(skipped), entry)
         if matched_nos:
             copy = dict(group)
             copy["order_nos"] = list(dict.fromkeys(matched_nos))
