@@ -4,7 +4,10 @@ import streamlit as st
 import orders
 from accounts import ACCOUNTS
 from shared import notification_service
-from shared.line_notice_sheet import filter_groups_by_calendar, groups_from_dataframe, results_tsv
+from shared.line_notice_sheet import (
+    OUTPUT_SPREADSHEET_ID, comparison_rows, filter_groups_by_calendar,
+    groups_from_dataframe, results_tsv, write_comparison_results,
+)
 
 
 def render(backend_email, backend_password, env):
@@ -22,12 +25,14 @@ def render(backend_email, backend_password, env):
             st.session_state.completed_notice_results = []
             st.session_state.completed_notice_skipped = []
             st.session_state.completed_notice_summary = {}
+            st.session_state.completed_notice_output_sheet = ""
             status = st.status("✅ 已按到按鈕｜正在讀取工作表…", expanded=True)
             progress = st.progress(0, text="準備中")
             live = st.empty()
             try:
                 _, df = orders.load_worksheet(sheet_name.strip())
                 groups = groups_from_dataframe(df, row_spec)
+                source_groups = groups
                 total = sum(len(group.get("entries") or []) for group in groups)
                 status.write(f"工作表讀取完成：找到 {total} 筆已有訂單編號的資料。")
                 live.markdown(f"**共 {total} 筆｜日曆已檢查 0 筆｜日曆確認 0 筆｜略過 0 筆**")
@@ -67,6 +72,10 @@ def render(backend_email, backend_password, env):
                         results.append({"order_no": label, "group": group, "result": None, "text": "", "error": str(exc)})
                 st.session_state.completed_notice_results = results
                 st.session_state.completed_notice_skipped = skipped
+                status.write("正在將完整比對結果寫入指定 Google 試算表…")
+                output_rows = comparison_rows(sheet_name.strip(), source_groups, results, skipped)
+                output_sheet = write_comparison_results(orders, sheet_name.strip(), output_rows)
+                st.session_state.completed_notice_output_sheet = output_sheet
                 valid_count = sum(not item.get("error") for item in results)
                 failed_count = len(results) - valid_count
                 st.session_state.completed_notice_summary = {
@@ -79,7 +88,7 @@ def render(backend_email, backend_password, env):
                     f"**共 {total} 筆｜日曆已檢查 {total} 筆｜日曆確認 {confirmed_orders} 筆｜"
                     f"後台確認 {backend_confirmed} 筆｜略過 {len(skipped)} 筆｜通知 {valid_count} 組**"
                 )
-                status.update(label=f"✅ 執行完成｜產生 {valid_count} 組通知", state="complete", expanded=False)
+                status.update(label=f"✅ 執行完成｜產生 {valid_count} 組通知｜已寫入 {output_sheet}", state="complete", expanded=False)
             except Exception as exc:
                 st.error(f"產生失敗：{exc}")
                 status.update(label=f"❌ 執行失敗：{exc}", state="error", expanded=True)
@@ -87,6 +96,7 @@ def render(backend_email, backend_password, env):
     skipped = st.session_state.get("completed_notice_skipped", [])
     results = st.session_state.get("completed_notice_results", [])
     summary = st.session_state.get("completed_notice_summary") or {}
+    output_sheet = st.session_state.get("completed_notice_output_sheet", "")
     if summary:
         columns = st.columns(6)
         for column, label, key in zip(
@@ -95,6 +105,9 @@ def render(backend_email, backend_password, env):
             ("total", "checked", "calendar_confirmed", "backend_confirmed", "skipped", "notices"),
         ):
             column.metric(label, summary.get(key, 0))
+    if output_sheet:
+        st.success(f"比對結果已自動寫入指定試算表分頁「{output_sheet}」。")
+        st.markdown(f"[開啟比對結果試算表](https://docs.google.com/spreadsheets/d/{OUTPUT_SPREADSHEET_ID})")
     if skipped:
         st.info(f"日曆沒有對應行程，已略過 {len(skipped)} 筆，不產生通知。")
     valid = [item for item in results if not item.get("error")]
