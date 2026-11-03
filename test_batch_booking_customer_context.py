@@ -43,10 +43,30 @@ def test_proxy_booking_uses_reserve_calendar_color():
         proxy_reserve.FLAG_KEY: True, proxy_reserve.NAME_KEY: "陳宜慧",
     }
     service = Mock()
-    with patch.object(orders, "find_matching_calendar_event", return_value={"id": "event-1", "colorId": orders.COLOR_PURPLE}):
-        result = orders.stage_calendar_color(row, service, "台北")
+    service.events.return_value.list.return_value.execute.return_value = {
+        "items": [{"id": "event-1", "summary": "陳宜慧 居家清潔", "colorId": orders.COLOR_PURPLE}],
+    }
+    result = orders.stage_calendar_color(row, service, "台北")
     assert result["日曆新色"] == "孔雀藍"
     assert service.events.return_value.patch.call_args.kwargs["body"] == {"colorId": orders.COLOR_RESERVE}
+
+
+def test_proxy_booking_without_matching_name_skips_and_does_not_create_event():
+    service = Mock()
+    service.events.return_value.list.return_value.execute.return_value = {
+        "items": [{"id": "event-1", "summary": "其他客人"}],
+    }
+    result = orders.sync_proxy_reserve_calendar_by_name(
+        service, "calendar-id", "2026-12-01", "陳宜慧",
+    )
+    assert result["日曆改色結果"] == "未執行"
+    service.events.return_value.patch.assert_not_called()
+    assert not hasattr(service.events.return_value, "insert") or not service.events.return_value.insert.called
+
+
+def test_proxy_notice_without_name_skips_calendar():
+    assert orders.proxy_reserve_name_from_notice("代客保留-") == ""
+    assert orders.proxy_reserve_name_from_notice("代客保留：陳宜慧") == "陳宜慧"
 
 
 def test_successful_batch_builds_combined_line_notice():

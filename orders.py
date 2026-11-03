@@ -1454,6 +1454,63 @@ def sync_calendar_color_for_row(
     }
 
 
+def proxy_reserve_name_from_notice(notice):
+    """從「代客保留-姓名／代客保留：姓名」取得客人姓名；未填姓名回傳空字串。"""
+    match = re.search(r"代客保留\s*[-－:：]\s*([^\n\r]+)", str(notice or ""))
+    return str(match.group(1) if match else "").strip()
+
+
+def sync_proxy_reserve_calendar_by_name(service, calendar_id, target_date, customer_name):
+    """只將既有的同日同名事件改成保留單色；找不到時正常略過，絕不新增事件。"""
+    name = str(customer_name or "").strip()
+    if not name:
+        return {"日曆改色結果": "未執行", "日曆改色原因": "代客保留未填客人姓名", "日曆原色": "", "日曆新色": ""}
+    if service is None or not calendar_id:
+        return {"日曆改色結果": "未執行", "日曆改色原因": "Google Calendar 未啟用", "日曆原色": "", "日曆新色": ""}
+    date_s = get_date_str(target_date)
+    try:
+        start = datetime.strptime(date_s, "%Y-%m-%d").replace(tzinfo=timezone(timedelta(hours=8)))
+        end = start + timedelta(days=1)
+        events = service.events().list(
+            calendarId=calendar_id,
+            timeMin=start.isoformat(), timeMax=end.isoformat(),
+            singleEvents=True, orderBy="startTime",
+        ).execute().get("items", [])
+        matches = []
+        for event in events:
+            text = "\n".join(str(event.get(field) or "") for field in ("summary", "description", "location"))
+            if name in text:
+                matches.append(event)
+        if not matches:
+            return {"日曆改色結果": "未執行", "日曆改色原因": f"{date_s} 日曆找不到客人「{name}」；不新增事件", "日曆原色": "", "日曆新色": ""}
+        changed = 0
+        for event in matches:
+            if str(event.get("colorId") or "") == COLOR_RESERVE:
+                continue
+            service.events().patch(
+                calendarId=calendar_id, eventId=event["id"], body={"colorId": COLOR_RESERVE},
+            ).execute()
+            changed += 1
+        return {
+            "日曆改色結果": "成功", "日曆改色原因": f"代客保留：同日找到「{name}」{len(matches)} 筆，改色 {changed} 筆",
+            "日曆原色": "", "日曆新色": color_name_from_id(COLOR_RESERVE),
+        }
+    except Exception as exc:
+        return {"日曆改色結果": "未執行", "日曆改色原因": f"代客保留日曆查詢失敗，已略過：{exc}", "日曆原色": "", "日曆新色": ""}
+
+
+def sync_proxy_reserve_calendar_from_notice(region, target_date, notice):
+    """非批次成單使用；沒有姓名、沒有日曆事件或查詢失敗都直接略過。"""
+    name = proxy_reserve_name_from_notice(notice)
+    if not name:
+        return {"日曆改色結果": "未執行", "日曆改色原因": "非代客保留或未填客人姓名", "日曆原色": "", "日曆新色": ""}
+    try:
+        service = build_gcal_service()
+    except Exception as exc:
+        return {"日曆改色結果": "未執行", "日曆改色原因": f"Google Calendar 初始化失敗，已略過：{exc}", "日曆原色": "", "日曆新色": ""}
+    return sync_proxy_reserve_calendar_by_name(service, GOOGLE_CALENDAR_MAP.get(region), target_date, name)
+
+
 # =========================
 # 各階段
 # =========================
@@ -1583,6 +1640,12 @@ def stage_calendar_color(row, gcal_service, region):
             "日曆新色": "",
         }
 
+    from shared import proxy_reserve
+    if proxy_reserve.is_proxy(row):
+        return sync_proxy_reserve_calendar_by_name(
+            gcal_service, calendar_id, row.get("日期"), proxy_reserve.proxy_name(row),
+        )
+
     # 每月確認事件：不動 Google 日曆，只把 Sheet 狀態交給回填層改成「待確認」
     # （移植 orders-system batch_booking_safety 的 sheet guard）。
     event = _find_row_calendar_event(row, gcal_service, calendar_id)
@@ -1597,8 +1660,6 @@ def stage_calendar_color(row, gcal_service, region):
         }
 
     try:
-        from shared import proxy_reserve
-        target_color = COLOR_RESERVE if proxy_reserve.is_proxy(row) else COLOR_YELLOW
         return sync_calendar_color_for_row(
             gcal_service,
             calendar_id,
@@ -1606,7 +1667,7 @@ def stage_calendar_color(row, gcal_service, region):
             row["日期"],
             str(row["開始時間"]).strip(),
             str(row["結束時間"]).strip(),
-            target_color=target_color,
+            target_color=COLOR_YELLOW,
         )
     except Exception as e:
         return {

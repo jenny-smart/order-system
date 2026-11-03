@@ -1137,6 +1137,9 @@ def quick_create_order(
                 )
     except Exception:
         pass
+    calendar_info = orders.sync_proxy_reserve_calendar_from_notice(
+        region, date_s, base_data.get("notice", ""),
+    )
     return {
         "order_no": order_no, "address": selected_address, "date": date_s,
         "period": display_period, "period_s": period_s, "person": str(person),
@@ -1149,6 +1152,7 @@ def quick_create_order(
         "duplicate_order_warning": _dup_warning,
         "backend_actual_address": backend_actual_address,
         "address_mismatch_warning": address_mismatch_warning,
+        "proxy_calendar": calendar_info,
         "env_name": env_name, "session": session,
     }
 
