@@ -3164,11 +3164,18 @@ def build_line_message_from_order_no(env_name, backend_email, backend_password, 
     return result, build_line_message(result)
 
 
-def build_combined_line_message_from_order_nos(env_name, backend_email, backend_password, order_nos, fallback_region="台北"):
+def prepare_notification_session(env_name, backend_email, backend_password):
+    """建立一次可重複使用的通知查詢工作階段，避免每位客戶重新登入。"""
     base_url = _configure_environment(env_name)
     session = requests.Session()
     if not login(session, backend_email, backend_password):
         raise Exception("後台登入失敗，請確認帳號密碼")
+    return session
+
+
+def build_combined_line_message_from_order_nos(env_name, backend_email, backend_password, order_nos, fallback_region="台北", session=None):
+    base_url = _configure_environment(env_name)
+    session = session or prepare_notification_session(env_name, backend_email, backend_password)
     orders_info = []
     for ono in order_nos:
         block = _fetch_purchase_block_for_order_no(session, ono)
@@ -3265,6 +3272,7 @@ def build_combined_line_message_from_order_nos(env_name, backend_email, backend_
         "phone": next((o["phone"] for o in orders_info if o.get("phone")), ""),
         "email": next((o["email"] for o in orders_info if o.get("email")), ""),
         "line_url": line_url,
+        "orders_info": orders_info,
         "env_name": env_name, "session": session,
         "source_url": f"{base_url}/purchase?orderNo={first['order_no']}",
     }
