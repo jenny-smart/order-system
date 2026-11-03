@@ -38,6 +38,13 @@ def test_calendar_filter_keeps_only_orders_with_matching_event():
         get_region_by_address=lambda _address, _accounts: "台北",
         find_matching_calendar_event=lambda _service, _calendar, _address, date, _start, _end: {"id": "event"} if date == "2026-12-01" else None,
     )
-    kept, skipped = filter_groups_by_calendar(groups, fake_orders, Mock(), {"台北": "calendar"}, {})
+    updates = []
+    kept, skipped = filter_groups_by_calendar(
+        groups, fake_orders, Mock(), {"台北": "calendar"}, {},
+        progress_callback=lambda checked, total, matched, skipped_count, entry: updates.append(
+            (checked, total, matched, skipped_count, entry["order_no"])
+        ),
+    )
     assert kept[0]["order_nos"] == ["LC1"]
     assert [item["order_no"] for item in skipped] == ["LC2"]
+    assert updates == [(1, 2, 1, 0, "LC1"), (2, 2, 1, 1, "LC2")]
