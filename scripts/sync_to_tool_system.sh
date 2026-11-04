@@ -5,7 +5,8 @@ set -euo pipefail
 SRC="$1"
 DEST="$2/tools/orders_system"
 # tool-system 自己維護、不能被覆蓋或刪除的檔案
-KEEP=" __init__.py ui.py env.py atm_reconcile.py calendar_notify.py change_order_daily_check.py "
+# env.py 已改成只放非敏感設定（帳密／API Key 從 Secrets 讀），一併同步，避免 tool-system 舊版缺常數。
+KEEP=" __init__.py ui.py atm_reconcile.py calendar_notify.py change_order_daily_check.py "
 
 mkdir -p "$DEST"
 # 根目錄：刪掉 order-system 已經沒有的舊檔（含舊的 test_*.py），保留 tool-system 專用檔
@@ -18,10 +19,10 @@ for f in "$DEST"/*.py; do
     echo "已移除：$name"
   fi
 done
-# 根目錄：複製 .py（env.py 由 tool-system 維護、測試不同步）
+# 根目錄：複製 .py（測試不同步）
 for f in "$SRC"/*.py; do
   name="$(basename "$f")"
-  case "$name" in env.py|test_*) continue ;; esac
+  case "$name" in test_*) continue ;; esac
   cp "$f" "$DEST/$name"
 done
 # 套件整個同步；memo_system/env.py 由 tool-system 維護

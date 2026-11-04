@@ -2,8 +2,8 @@
 # order-system → tool-system 自動同步（取代 orders-system 的同步）
 #
 # 根目錄 *.py、function/、shared/、memo_system/、config/ 同步到
-# tool-system 的 tools/orders_system/（env.py 與 tool-system 專用檔不動，
-# 見 scripts/sync_to_tool_system.sh）。
+# tool-system 的 tools/orders_system/（tool-system 專用檔不動，見
+# scripts/sync_to_tool_system.sh）。env.py 已不含金鑰，會一起同步。
 #
 # 切換方式：
 # 1. 在 order-system 設定 secret TOOL_SYSTEM_PUSH_TOKEN（tool-system Contents 讀寫）
