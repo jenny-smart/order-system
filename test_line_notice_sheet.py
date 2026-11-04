@@ -115,3 +115,15 @@ def test_writer_adds_columns_and_batches_source_updates():
     assert (written, inserted, reduced) == (1, 0, 0)
     assert ws.header_update["values"][0][-4:] == ["mail", "LINE連結", "通知內容", "異動檢查"]
     assert any(item["range"] == "I2" and item["values"] == [["完整通知"]] for item in ws.cells[0][0])
+
+
+def test_same_customer_address_only_first_row_keeps_notice():
+    home = {"name": "王小明", "address": "台北市A", "service": "居家清潔", "entries": [{"row": 2, "order_no": "LC1", "date": "2026-12-01", "start": "09:00", "end": "12:00"}]}
+    office = {"name": "王小明", "address": "台北市A", "service": "辦公室清潔", "entries": [{"row": 5, "order_no": "LC2", "date": "2026-12-08", "start": "09:00", "end": "12:00"}]}
+    results = [
+        {"group": home, "text": "第一份通知", "error": None, "result": {"orders_info": [{"service_date": "2026-12-01", "period_s": "09:00-12:00"}]}},
+        {"group": office, "text": "第二份通知", "error": None, "result": {"orders_info": [{"service_date": "2026-12-08", "period_s": "09:00-12:00"}]}},
+    ]
+    updates, _, _ = build_source_writeback([home, office], results, [])
+    assert updates[2]["通知內容"] == "第一份通知"
+    assert updates[5]["通知內容"] == ""

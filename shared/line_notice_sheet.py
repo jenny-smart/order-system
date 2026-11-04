@@ -172,6 +172,10 @@ def _group_key(group):
     return (str(group.get("name") or "").strip(), re.sub(r"\s+", "", str(group.get("address") or "")), str(group.get("service") or "").strip())
 
 
+def _customer_address_key(group):
+    return (str(group.get("name") or "").strip(), re.sub(r"\s+", "", str(group.get("address") or "")))
+
+
 def _slot(date_value, start_value, end_value=""):
     date_s = str(date_value or "")[:10].replace("-", "/")
     period = str(start_value or "") if not end_value else f"{start_value}-{end_value}"
@@ -228,6 +232,26 @@ def build_source_writeback(source_groups, results, skipped):
         for entry in entries:
             if int(entry["row"]) != first_row:
                 row_updates[int(entry["row"])] = {"通知內容": "", "異動檢查": ""}
+    # 顯示層級只看「姓名＋地址」：即使同地址分成不同服務類型，通知也只放最上方第一列。
+    address_groups = {}
+    for group in source_groups or []:
+        entries = group.get("entries") or []
+        if entries:
+            address_groups.setdefault(_customer_address_key(group), []).extend(int(entry["row"]) for entry in entries)
+    for rows in address_groups.values():
+        rows = sorted(set(rows)); first_row = rows[0]
+        candidates = [row_updates.get(row, {}) for row in rows]
+        combined = {
+            "mail": next((item.get("mail") for item in candidates if item.get("mail")), ""),
+            "LINE連結": next((item.get("LINE連結") for item in candidates if item.get("LINE連結")), ""),
+            "通知內容": next((item.get("通知內容") for item in candidates if item.get("通知內容")), ""),
+        }
+        changes = list(dict.fromkeys(item.get("異動檢查") for item in candidates if item.get("異動檢查")))
+        combined["異動檢查"] = "；".join(changes)
+        if any(item.get("狀態") == "安排減少" for item in candidates): combined["狀態"] = "安排減少"
+        row_updates[first_row] = combined
+        for row in rows[1:]:
+            row_updates.setdefault(row, {}).update({"通知內容": "", "異動檢查": "", "mail": "", "LINE連結": ""})
     return row_updates, insertions, reduction_rows
 
 

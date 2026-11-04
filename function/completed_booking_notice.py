@@ -5,7 +5,7 @@ import orders
 from accounts import ACCOUNTS
 from shared import notification_service
 from shared.line_notice_sheet import (
-    filter_groups_by_calendar, groups_from_dataframe, results_tsv,
+    filter_groups_by_calendar, groups_from_dataframe,
     write_results_to_source,
 )
 
@@ -54,26 +54,16 @@ def render(backend_email, backend_password, env):
                 results = []
                 confirmed_orders = sum(len(group["order_nos"]) for group in groups)
                 status.write(f"日曆比對完成：確認 {confirmed_orders} 筆；開始向後台核對並產生通知。")
-                backend_confirmed = 0
-                backend_session = notification_service.prepare_notification_session(
-                    env, backend_email.strip(), backend_password.strip()
-                )
-                for index, group in enumerate(groups, 1):
-                    label = "、".join(group["order_nos"])
+                def backend_progress(done, backend_total, label):
                     progress.progress(
-                        0.7 + 0.3 * ((index - 1) / max(len(groups), 1)),
-                        text=f"後台確認與通知產生 {index}/{len(groups)} 組｜{label}",
+                        0.7 + 0.3 * (done / max(backend_total, 1)),
+                        text=f"後台平行確認與通知產生 {done}/{backend_total} 組｜{label}",
                     )
-                    try:
-                        result, text = notification_service.build_combined_line_message_from_order_nos(
-                            env_name=env, backend_email=backend_email.strip(),
-                            backend_password=backend_password.strip(), order_nos=group["order_nos"],
-                            session=backend_session,
-                        )
-                        results.append({"order_no": label, "group": group, "result": result, "text": text, "error": None})
-                        backend_confirmed += len(group["order_nos"])
-                    except Exception as exc:
-                        results.append({"order_no": label, "group": group, "result": None, "text": "", "error": str(exc)})
+                results = notification_service.build_many_combined_line_messages(
+                    env, backend_email.strip(), backend_password.strip(), groups,
+                    max_workers=4, progress_callback=backend_progress,
+                )
+                backend_confirmed = sum(len(item["group"].get("order_nos") or []) for item in results if not item.get("error"))
                 st.session_state.completed_notice_results = results
                 st.session_state.completed_notice_skipped = skipped
                 status.write("正在把通知與異動檢查直接寫回原排程工作表…")
@@ -120,15 +110,6 @@ def render(backend_email, backend_password, env):
         )
     if skipped:
         st.info(f"日曆沒有對應行程，已略過 {len(skipped)} 筆，不產生通知。")
-    valid = [item for item in results if not item.get("error")]
-    if valid:
-        st.caption("通知已直接寫入工作表；以下僅供預覽或備用複製。")
-        st.code(results_tsv(valid), language=None)
-    for index, item in enumerate(results):
+    for item in results:
         if item.get("error"):
             st.error(f"訂單 {item['order_no']} 產生失敗：{item['error']}")
-            continue
-        st.text_area(
-            f"{item['group'].get('name') or '客戶'}｜{item['order_no']}", item["text"],
-            height=360, key=f"completed_notice_text_{index}",
-        )
