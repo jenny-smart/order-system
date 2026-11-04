@@ -88,6 +88,29 @@ def _lazy_calendar_sync(row, result, region, state, logger):
     return merged
 
 
+_CALENDAR_WRITEBACK_KEYS = ("日曆改色結果", "日曆改色原因", "日曆原色", "日曆新色", "狀態")
+
+
+def _recovered_result(row):
+    """中斷復原列：沿用復原時已回填的服務人員／服務狀態／車馬費，不用預設值（車馬費 0）蓋掉。"""
+    return _orders.build_row_result(
+        order_no=str(row.get("訂單編號", "") or "").strip(),
+        result="中斷復原", reason="",
+        staff=str(row.get("服務人員", "") or "").strip() or "無人力",
+        service_status=str(row.get("服務狀態", "") or "").strip() or "未處理",
+        fare=str(row.get("車馬費", "") or "").strip() or "0",
+    )
+
+
+def _recovered_calendar_sync(ws, row_no, row, region, gcal_state, logger):
+    """中斷復原列改日曆後只回填日曆欄位與 I 欄狀態，保留復原時寫入的完整資料。"""
+    result = _lazy_calendar_sync(row, _recovered_result(row), region, gcal_state, logger)
+    calendar_only = {key: result[key] for key in _CALENDAR_WRITEBACK_KEYS if key in result}
+    if calendar_only:
+        _orders.update_sheet_rows(ws, {row_no: calendar_only})
+    return result
+
+
 def _run_one_direct(
     session, ws, row_no, row, region, selected_actions, allow_auto_lemon_shift,
     used_order_nos, gcal_state, logger,
@@ -164,6 +187,19 @@ def _append_line_entry(entries, row, result):
     entries.append((row, result))
 
 
+def _fare_amount(*values):
+    """每張訂單的車馬費（取第一個非 0 的值）；多張訂單合併通知時加總，與單筆建單 LINE 通知一致。"""
+    for value in values:
+        text = str(value if value is not None else "").replace(",", "").strip()
+        try:
+            amount = int(round(float(text)))
+        except ValueError:
+            continue
+        if amount:
+            return amount
+    return 0
+
+
 def _batch_line_messages(entries, logger=print):
     """把本次順利成單日期套入既有儲值金 LINE 預約完成格式。"""
     if not entries:
@@ -190,10 +226,12 @@ def _batch_line_messages(entries, logger=print):
         address = str(items[0][0].get("地址", "") or "").strip()
         clean_type_id = _orders.CLEAN_TYPE_MAP.get(purchase_item, "1")
         periods, dates, order_nos = [], [], []
+        total_fare = 0
         for row, result in items:
             date_s = _orders.get_date_str(row.get("日期"))
             dates.append(date_s)
             order_nos.append(str(result.get("訂單編號") or "").strip())
+            total_fare += _fare_amount(result.get("車馬費"), row.get("車馬費"))
             periods.append((date_s, _orders.normalize_period_text(row.get("開始時間", ""), row.get("結束時間", ""))))
         multi_date = len(set(dates)) > 1
         combined_period = "\n".join(
@@ -204,7 +242,8 @@ def _batch_line_messages(entries, logger=print):
             "order_no": order_nos[0], "all_order_nos": order_nos, "payway": "儲值金",
             "region": _orders.get_region_by_address(address, ACCOUNTS) or "", "date": dates[0],
             "period_s": periods[0][1], "combined_period": combined_period, "multi_date": multi_date,
-            "multi_address": False, "address": address, "fare": "0", "clean_type_id": clean_type_id,
+            "multi_address": False, "address": address, "fare": str(total_fare) if total_fare else "0",
+            "clean_type_id": clean_type_id,
         }
         notice = build_line_message(payload)
         message = {"姓名": name, "地址": address, "訂單編號": "、".join(order_nos), "通知內容": notice}
@@ -290,10 +329,9 @@ def run_process_web_direct_single(
 
         # 中斷復原列已由 _recover_before_create 回填；如要求改日曆，再於回填後處理。
         if row_no in recovered_set:
-            recovered_result = _orders.build_row_result(order_no=order_no, result="中斷復原", reason="")
+            recovered_result = _recovered_result(row)
             if "改 Google 日曆" in selected_actions and order_no:
-                recovered_result = _lazy_calendar_sync(row, recovered_result, region, gcal_state, logger)
-                _orders.update_sheet_rows(ws, {row_no: recovered_result})
+                recovered_result = _recovered_calendar_sync(ws, row_no, row, region, gcal_state, logger)
             _append_line_entry(line_entries, row, recovered_result)
             logger(f"♻️ 第 {row_no} 列已復原，繼續下一列。")
             continue
@@ -403,22 +441,12 @@ def run_process_web_hybrid(
 
 
     for _row_no, _row in recovered_rows:
-        _append_line_entry(
-            line_entries, _row,
-            _orders.build_row_result(
-                order_no=str(_row.get("訂單編號", "") or "").strip(),
-                result="中斷復原", reason="",
-            ),
-        )
+        _append_line_entry(line_entries, _row, _recovered_result(_row))
 
     if "改 Google 日曆" in selected_actions:
         for row_no, row in recovered_rows:
-            order_no = str(row.get("訂單編號", "") or "").strip()
-            if order_no:
-                result = _orders.build_row_result(order_no=order_no, result="中斷復原", reason="")
-                result = _lazy_calendar_sync(row, result, region, gcal_state, logger)
-                _orders.update_sheet_rows(ws, {row_no: result})
-                _append_line_entry(line_entries, row, result)
+            if str(row.get("訂單編號", "") or "").strip():
+                _recovered_calendar_sync(ws, row_no, row, region, gcal_state, logger)
 
     report_progress()
     for row_no, row in existing_rows:

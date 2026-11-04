@@ -220,17 +220,20 @@ def update_sheet_rows(ws, row_results):
     updates = []
 
     for row_num, info in row_results.items():
-        xyz = orders.finalize_xyz(
-            {
-                "服務人員": info.get("服務人員", ""),
-                "服務狀態": info.get("服務狀態", ""),
-                "車馬費": info.get("車馬費", ""),
-            },
-            fallback_fare=info.get("車馬費", "0"),
-        )
-        info["服務人員"] = xyz["服務人員"]
-        info["服務狀態"] = xyz["服務狀態"]
-        info["車馬費"] = xyz["車馬費"]
+        # 只補齊本次結果有帶的服務人員／服務狀態／車馬費；只回填日曆欄位的結果
+        # （例如中斷復原後改日曆）不能把已回填的車馬費覆蓋成 0、服務人員改成無人力。
+        if any(key in info for key in ("服務人員", "服務狀態", "車馬費")):
+            xyz = orders.finalize_xyz(
+                {
+                    "服務人員": info.get("服務人員", ""),
+                    "服務狀態": info.get("服務狀態", ""),
+                    "車馬費": info.get("車馬費", ""),
+                },
+                fallback_fare=info.get("車馬費", "0"),
+            )
+            info["服務人員"] = xyz["服務人員"]
+            info["服務狀態"] = xyz["服務狀態"]
+            info["車馬費"] = xyz["車馬費"]
 
         for key, value in info.items():
             if key not in header_index:

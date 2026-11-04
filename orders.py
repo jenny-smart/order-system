@@ -1777,6 +1777,24 @@ def process_existing_order_only(row, gcal_service, region, session, selected_act
     return result
 
 
+def _fare_number(value):
+    try:
+        return int(round(float(str(value if value is not None else "").replace(",", "").strip())))
+    except ValueError:
+        return 0
+
+
+def fare_mismatch_warning(created_fare, previous_purchase):
+    """同一下拉地址前次訂單有車馬費、本次成單卻是 0 時回傳提醒文字（不改訂單，交由客服確認）。"""
+    previous = previous_purchase if isinstance(previous_purchase, dict) else {}
+    previous_fare = _fare_number(first_nonzero(
+        previous.get("fare"), previous.get("car_fare"), previous.get("traffic_fee"), default="0",
+    ))
+    if previous_fare and not _fare_number(created_fare):
+        return f"車馬費待確認：此地址前次訂單車馬費 {previous_fare}，本次成單為 0"
+    return ""
+
+
 def process_one_group(session, rows_with_idx, token, gcal_service, region, backend_user_id=None, selected_actions=None, allow_auto_lemon_shift=False, used_order_nos=None, logger=print, group_no=None):
     _, row0 = rows_with_idx[0]
     group_label = f"第 {group_no} 組" if group_no is not None else "本組"
@@ -2301,17 +2319,21 @@ def process_one_group(session, rows_with_idx, token, gcal_service, region, backe
             if not staff_value or staff_value == "無人力":
                 staff_value = detail.get("section_staff") or "無人力"
 
+            created_fare = meta.get("車馬費", "0") or str(detail["payload"].get("fare") or "0")
+            fare_warning = fare_mismatch_warning(created_fare, best_addr.get("purchase"))
+            if fare_warning:
+                logger(f"⚠️ 第 {detail['row_num']} 列 {order_no}：{fare_warning}")
             stage_result = build_row_result(
                 order_no=order_no,
                 result="成功",
-                reason="",
+                reason=fare_warning,
                 sms_time=sms_time,
                 customer_note=customer_note,
                 service_notice=service_notice,
                 status_value="",
                 staff=staff_value,
                 service_status=meta.get("服務狀態", "未處理"),
-                fare=meta.get("車馬費", "0") or str(detail["payload"].get("fare") or "0"),
+                fare=created_fare,
             )
 
             confirm_info = {}
