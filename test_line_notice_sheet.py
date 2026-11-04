@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 from shared.line_notice_sheet import (
-    build_source_writeback, filter_groups_by_calendar, groups_from_dataframe,
+    build_source_writeback, filter_completed_address_groups, filter_groups_by_calendar, groups_from_dataframe,
     parse_row_spec, results_tsv, write_results_to_source,
 )
 
@@ -113,7 +113,7 @@ def test_writer_adds_columns_and_batches_source_updates():
     ws = Worksheet()
     written, inserted, reduced = write_results_to_source(ws, [group], results, [])
     assert (written, inserted, reduced) == (1, 0, 0)
-    assert ws.header_update["values"][0][-4:] == ["mail", "LINE連結", "通知內容", "異動檢查"]
+    assert ws.header_update["values"][0][-5:] == ["mail", "LINE連結", "通知內容", "異動檢查", "通知處理狀態"]
     assert any(item["range"] == "I2" and item["values"] == [["完整通知"]] for item in ws.cells[0][0])
 
 
@@ -127,3 +127,14 @@ def test_same_customer_address_only_first_row_keeps_notice():
     updates, _, _ = build_source_writeback([home, office], results, [])
     assert updates[2]["通知內容"] == "第一份通知"
     assert updates[5]["通知內容"] == ""
+
+
+def test_resume_skips_completed_customer_address():
+    df = pd.DataFrame([
+        {"姓名": "完成客", "地址": "台北市A", "通知處理狀態": "完成"},
+        {"姓名": "待處理客", "地址": "台北市B", "通知處理狀態": "失敗（下次將自動續跑）"},
+    ])
+    groups = [{"name": "完成客", "address": "台北市A"}, {"name": "待處理客", "address": "台北市B"}]
+    pending, completed = filter_completed_address_groups(groups, df)
+    assert completed == 1
+    assert [group["name"] for group in pending] == ["待處理客"]

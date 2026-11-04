@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 
 _CHECKED = {"TRUE", "V", "Y", "YES", "1", "是", "✓", "✔", "☑", "勾"}
-SOURCE_OUTPUT_HEADERS = ["mail", "LINE連結", "通知內容", "異動檢查"]
+SOURCE_OUTPUT_HEADERS = ["mail", "LINE連結", "通知內容", "異動檢查", "通知處理狀態"]
 
 
 class _CachedRequest:
@@ -72,7 +72,8 @@ def groups_from_dataframe(df, row_spec=""):
         phone = str(row.get("電話", "") or row.get("手機", "") or "").strip()
         email = str(row.get("mail", "") or row.get("Email", "") or row.get("email", "") or row.get("電子信箱", "") or "").strip()
         line_url = str(row.get("LINE連結", "") or row.get("LINE 連結", "") or row.get("LINE@連結", "") or row.get("line_url", "") or row.get("LINE", "") or "").strip()
-        key = (name or f"__row_{row_no}", address or f"__row_{row_no}", service)
+        # 通知以「姓名＋地址」為單位；同地址不要因服務類型欄位差異重複查詢／顯示。
+        key = (name or f"__row_{row_no}", address or f"__row_{row_no}")
         item = grouped.setdefault(key, {
             "name": name, "address": str(row.get("地址", "") or "").strip(),
             "service": service, "phone": phone, "email": email, "line_url": line_url,
@@ -93,6 +94,18 @@ def groups_from_dataframe(df, row_spec=""):
             "proxy": str(row.get("代客保留", "") or "").strip().upper() in _CHECKED,
         })
     return list(grouped.values())
+
+
+def filter_completed_address_groups(groups, df):
+    """續跑時略過原工作表已標記完成的姓名＋地址。"""
+    if "通知處理狀態" not in getattr(df, "columns", []):
+        return list(groups or []), 0
+    completed = set()
+    for _, row in df.iterrows():
+        if str(row.get("通知處理狀態", "") or "").strip().startswith("完成"):
+            completed.add((str(row.get("姓名", "") or "").strip(), re.sub(r"\s+", "", str(row.get("地址", "") or ""))))
+    pending = [group for group in groups or [] if _customer_address_key(group) not in completed]
+    return pending, len(list(groups or [])) - len(pending)
 
 
 def _proxy_name_exists(service, calendar_id, orders_module, entry):
@@ -191,6 +204,10 @@ def build_source_writeback(source_groups, results, skipped):
         key = (str(entry.get("name") or "").strip(), re.sub(r"\s+", "", str(entry.get("address") or "")), str(entry.get("service") or "").strip())
         skipped_by_key.setdefault(key, []).append(entry)
     row_updates, insertions, reduction_rows = {}, [], []
+    address_states = {}
+    for item in results or []:
+        key = _customer_address_key(item.get("group") or {})
+        address_states.setdefault(key, []).append("失敗" if item.get("error") else "完成")
     for group in source_groups or []:
         entries = group.get("entries") or []
         if not entries:
@@ -238,8 +255,8 @@ def build_source_writeback(source_groups, results, skipped):
         entries = group.get("entries") or []
         if entries:
             address_groups.setdefault(_customer_address_key(group), []).extend(int(entry["row"]) for entry in entries)
-    for rows in address_groups.values():
-        rows = sorted(set(rows)); first_row = rows[0]
+    for customer_key, raw_rows in address_groups.items():
+        rows = sorted(set(raw_rows)); first_row = rows[0]
         candidates = [row_updates.get(row, {}) for row in rows]
         combined = {
             "mail": next((item.get("mail") for item in candidates if item.get("mail")), ""),
@@ -249,9 +266,16 @@ def build_source_writeback(source_groups, results, skipped):
         changes = list(dict.fromkeys(item.get("異動檢查") for item in candidates if item.get("異動檢查")))
         combined["異動檢查"] = "；".join(changes)
         if any(item.get("狀態") == "安排減少" for item in candidates): combined["狀態"] = "安排減少"
+        states = address_states.get(customer_key, [])
+        if "失敗" in states:
+            combined["通知處理狀態"] = "失敗（下次將自動續跑）"
+        elif "完成" in states:
+            combined["通知處理狀態"] = "完成"
+        else:
+            combined["通知處理狀態"] = "完成（無日曆行程，略過）"
         row_updates[first_row] = combined
         for row in rows[1:]:
-            row_updates.setdefault(row, {}).update({"通知內容": "", "異動檢查": "", "mail": "", "LINE連結": ""})
+            row_updates.setdefault(row, {}).update({"通知內容": "", "異動檢查": "", "mail": "", "LINE連結": "", "通知處理狀態": ""})
     return row_updates, insertions, reduction_rows
 
 
