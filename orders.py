@@ -1582,7 +1582,8 @@ def prepare_base_order_data(row, member_payload, address_info, clean_type_id, pe
         "period_s": system_period,
         "period": note_info["sms_time"] if note_info["need_note"] else "",
         "cycle": "1",
-        "fare": str(address_info.get("fare") or pick("fare", "0") or "0"),
+        # 車馬費一律由後台（查詢地區／計算時數）決定，不沿用舊訂單或會員最後一筆訂單的金額。
+        "fare": str(address_info.get("fare") or "0"),
         "memo": base_memo,
         "notice": str(pick_address_notice("")),
         "discount_code": "",
@@ -1777,24 +1778,6 @@ def process_existing_order_only(row, gcal_service, region, session, selected_act
     return result
 
 
-def _fare_number(value):
-    try:
-        return int(round(float(str(value if value is not None else "").replace(",", "").strip())))
-    except ValueError:
-        return 0
-
-
-def fare_mismatch_warning(created_fare, previous_purchase):
-    """同一下拉地址前次訂單有車馬費、本次成單卻是 0 時回傳提醒文字（不改訂單，交由客服確認）。"""
-    previous = previous_purchase if isinstance(previous_purchase, dict) else {}
-    previous_fare = _fare_number(first_nonzero(
-        previous.get("fare"), previous.get("car_fare"), previous.get("traffic_fee"), default="0",
-    ))
-    if previous_fare and not _fare_number(created_fare):
-        return f"車馬費待確認：此地址前次訂單車馬費 {previous_fare}，本次成單為 0"
-    return ""
-
-
 def process_one_group(session, rows_with_idx, token, gcal_service, region, backend_user_id=None, selected_actions=None, allow_auto_lemon_shift=False, used_order_nos=None, logger=print, group_no=None):
     _, row0 = rows_with_idx[0]
     group_label = f"第 {group_no} 組" if group_no is not None else "本組"
@@ -1922,7 +1905,7 @@ def process_one_group(session, rows_with_idx, token, gcal_service, region, backe
         logger(f"{group_label}代客保留：用檸檬保留帳號 {phone} 建單，備註「{proxy_memo}」")
 
     # 強制套用查詢地址後取得的區域/車馬費資料
-    base_data["fare"] = first_nonzero(best_addr.get("fare"), base_data.get("fare"), default="0")
+    base_data["fare"] = first_nonzero(best_addr.get("fare"), default="0")
     base_data["notice"] = str(best_addr.get("notice") or base_data.get("notice") or "")
     base_data["area_id"] = str(best_addr.get("area_id") or "")
     base_data["company_id"] = str(best_addr.get("company_id") or "")
@@ -1999,7 +1982,8 @@ def process_one_group(session, rows_with_idx, token, gcal_service, region, backe
                 st.write("🟣 calc_fields =", calc_fields)
         except Exception:
             pass
-        payload["fare"] = first_nonzero(calc_fields.get("fare"), best_addr.get("fare"), base_data.get("fare"), default="0")
+        # 只用後台回傳的車馬費（計算時數 → 查詢地區），程式不另外補值。
+        payload["fare"] = first_nonzero(calc_fields.get("fare"), best_addr.get("fare"), default="0")
 
         if str(payload.get("price", "")).strip() in ("", "0", "0.0"):
             raise Exception(f"計算時數後 price 仍為 0，請貼 🟠 calculate_hour raw 與 🟣 calc_fields：{date_s}")
@@ -2319,21 +2303,17 @@ def process_one_group(session, rows_with_idx, token, gcal_service, region, backe
             if not staff_value or staff_value == "無人力":
                 staff_value = detail.get("section_staff") or "無人力"
 
-            created_fare = meta.get("車馬費", "0") or str(detail["payload"].get("fare") or "0")
-            fare_warning = fare_mismatch_warning(created_fare, best_addr.get("purchase"))
-            if fare_warning:
-                logger(f"⚠️ 第 {detail['row_num']} 列 {order_no}：{fare_warning}")
             stage_result = build_row_result(
                 order_no=order_no,
                 result="成功",
-                reason=fare_warning,
+                reason="",
                 sms_time=sms_time,
                 customer_note=customer_note,
                 service_notice=service_notice,
                 status_value="",
                 staff=staff_value,
                 service_status=meta.get("服務狀態", "未處理"),
-                fare=created_fare,
+                fare=meta.get("車馬費", "0") or str(detail["payload"].get("fare") or "0"),
             )
 
             confirm_info = {}

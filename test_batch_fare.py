@@ -1,4 +1,4 @@
-"""批次成單車馬費：中斷復原改日曆不覆蓋車馬費、LINE 通知帶出車馬費、成單後核對前次車馬費。"""
+"""批次成單車馬費：只用後台計算結果；中斷復原改日曆不覆蓋車馬費、LINE 通知帶出後台車馬費。"""
 from unittest.mock import Mock, patch
 
 import orders
@@ -80,12 +80,17 @@ def test_update_sheet_rows_full_result_still_fills_fare():
     assert values["D5"] == "0"
 
 
-def test_fare_warning_when_previous_order_had_fare():
-    warning = orders.fare_mismatch_warning("0", {"fare": "200"})
-    assert "車馬費待確認" in warning and "200" in warning
+def _member_payload(previous_fare, last_fare):
+    return {
+        "member": {"memberAddressList": [{"id": 7, "address": ADDRESS, "purchase": {"fare": previous_fare}}]},
+        "lastPurchase": {"fare": last_fare},
+    }
 
 
-def test_no_fare_warning_when_fare_present_or_never_charged():
-    assert orders.fare_mismatch_warning("200", {"fare": "200"}) == ""
-    assert orders.fare_mismatch_warning("0", {"fare": "0"}) == ""
-    assert orders.fare_mismatch_warning("0", None) == ""
+def test_base_order_does_not_reuse_previous_order_fare():
+    payload = _member_payload("200", "300")
+    address_info = orders.pick_best_address_info(payload, ADDRESS)
+    row = {"電話": "0912345678", "姓名": "王小明", "地址": ADDRESS}
+    note = {"need_note": False, "customer_time_note": "", "sms_time": ""}
+    base = orders.prepare_base_order_data(row, payload, address_info, "1", 2, 3, "09:00-12:00", note)
+    assert base["fare"] == "0"
