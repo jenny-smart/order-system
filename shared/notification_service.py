@@ -29,3 +29,7 @@ def build_combined_line_message_from_order_nos(*args, **kwargs):
 
 def prepare_notification_session(*args, **kwargs):
     return _legacy.prepare_notification_session(*args, **kwargs)
+
+
+def build_many_combined_line_messages(*args, **kwargs):
+    return _legacy.build_many_combined_line_messages(*args, **kwargs)
