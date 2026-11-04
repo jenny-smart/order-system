@@ -368,7 +368,8 @@ def _count_staff_from_lines(lines):
     if not staff_str:
         return ""
     parts = [p.strip() for p in re.split(r"\s*X\s*", staff_str) if p.strip()]
-    count = sum(1 for p in parts if "檸檬人" not in p)
+    # 檸檬人也是實際占用本單人力，通知的人數／人時不可略過。
+    count = len(parts)
     return str(count) if count > 0 else ""
 
 def _fix_address_district_order(address, fallback_district=""):
