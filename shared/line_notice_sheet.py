@@ -19,22 +19,111 @@ class _CachedRequest:
         return self.cache[self.key]
 
 
+_TZ = timezone(timedelta(hours=8))
+
+
+def _parse_bound(value):
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if "T" not in text:
+        return datetime.strptime(text[:10], "%Y-%m-%d").replace(tzinfo=_TZ)
+    parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=_TZ)
+
+
+def _event_bounds(event):
+    try:
+        start = _parse_bound((event.get("start") or {}).get("dateTime") or (event.get("start") or {}).get("date"))
+        end = _parse_bound((event.get("end") or {}).get("dateTime") or (event.get("end") or {}).get("date"))
+    except ValueError:
+        return None, None
+    return start, end
+
+
+class _StaticRequest:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def execute(self):
+        return self.payload
+
+
 class _CachedEvents:
-    def __init__(self, events, cache):
-        self.events, self.cache = events, cache
+    def __init__(self, events, cache, ranges=None):
+        self.events, self.cache, self.ranges = events, cache, ranges if ranges is not None else {}
 
     def list(self, **kwargs):
+        window = self._prefetched_window(kwargs)
+        if window is not None:
+            return _StaticRequest({"items": window})
         key = tuple(sorted((name, str(value)) for name, value in kwargs.items()))
         return _CachedRequest(self.events.list(**kwargs), self.cache, key)
 
+    def _prefetched_window(self, kwargs):
+        stored = self.ranges.get(kwargs.get("calendarId"))
+        if not stored or kwargs.get("pageToken") or kwargs.get("q"):
+            return None
+        try:
+            time_min, time_max = _parse_bound(kwargs.get("timeMin")), _parse_bound(kwargs.get("timeMax"))
+        except ValueError:
+            return None
+        range_start, range_end, items = stored
+        if not time_min or not time_max or time_min < range_start or time_max > range_end:
+            return None
+        window = []
+        for event in items:
+            start, end = _event_bounds(event)
+            if start is None or end is None or (start < time_max and end > time_min):
+                window.append(event)
+        return window
+
 
 class _CachedCalendarService:
-    """同一日曆＋日期只向 Google Calendar 查一次。"""
+    """同一日曆＋日期只向 Google Calendar 查一次；prefetch 後整段日期只查一次。"""
     def __init__(self, service):
-        self.service, self.cache = service, {}
+        self.service, self.cache, self.ranges = service, {}, {}
 
     def events(self):
-        return _CachedEvents(self.service.events(), self.cache)
+        return _CachedEvents(self.service.events(), self.cache, self.ranges)
+
+    def prefetch(self, calendar_id, first_date, last_date):
+        """一次列出 first_date～last_date（含）的行程，之後單日查詢直接從這裡篩選。"""
+        range_start = datetime.strptime(first_date, "%Y-%m-%d").replace(tzinfo=_TZ)
+        range_end = datetime.strptime(last_date, "%Y-%m-%d").replace(tzinfo=_TZ) + timedelta(days=1)
+        items, token = [], None
+        while True:
+            kwargs = dict(calendarId=calendar_id, timeMin=range_start.isoformat(), timeMax=range_end.isoformat(),
+                          singleEvents=True, orderBy="startTime", maxResults=2500)
+            if token:
+                kwargs["pageToken"] = token
+            payload = self.service.events().list(**kwargs).execute()
+            items.extend(payload.get("items", []))
+            token = payload.get("nextPageToken")
+            if not token:
+                break
+        self.ranges[calendar_id] = (range_start, range_end, items)
+        return len(items)
+
+
+def _prefetch_calendar_ranges(service, groups, orders_module, calendar_map, accounts):
+    """依每個地區日曆的最早～最晚服務日期一次查完；任何失敗都退回逐日查詢。"""
+    spans = {}
+    try:
+        for group in groups or []:
+            for entry in group.get("entries") or []:
+                calendar_id = calendar_map.get(orders_module.get_region_by_address(entry.get("address", ""), accounts))
+                date_s = orders_module.get_date_str(entry.get("date"))
+                if calendar_id and date_s:
+                    first, last = spans.get(calendar_id, (date_s, date_s))
+                    spans[calendar_id] = (min(first, date_s), max(last, date_s))
+    except Exception:
+        return
+    for calendar_id, (first, last) in spans.items():
+        try:
+            service.prefetch(calendar_id, first, last)
+        except Exception:
+            service.ranges.pop(calendar_id, None)
 
 
 def parse_row_spec(spec):
@@ -125,6 +214,7 @@ def filter_groups_by_calendar(groups, orders_module, service, calendar_map, acco
     """只保留日曆確實存在的訂單；代客保留依同日姓名，其餘依日期時段地址。"""
     kept, skipped = [], []
     service = _CachedCalendarService(service)
+    _prefetch_calendar_ranges(service, groups, orders_module, calendar_map, accounts)
     total = sum(len(group.get("entries") or []) for group in groups or [])
     checked = matched = 0
     for group in groups or []:
@@ -236,6 +326,13 @@ def build_source_writeback(source_groups, results, skipped):
             change = f"日期／時段異動：原 {before}；確認 {after}"
         else:
             change = "一致"
+        extras = [item for item in backend.get("extra_orders") or [] if item.get("order_no")]
+        if extras and not (result_item or {}).get("error"):
+            listed = "、".join(f"{item['order_no']} " + " ".join(_slot(item.get("service_date"), item.get("period_s"))) for item in extras)
+            extra_text = f"增加：後台另有 {len(extras)} 筆未在工作表（{listed}）"
+            change = extra_text if change == "一致" else f"{change}；{extra_text}"
+            for item in extras:
+                insertions.append({"after_row": max(int(entry["row"]) for entry in entries), "group": group, "order": item})
         if not actual and skipped_by_key.get(_group_key(group)) and not result_item:
             change = f"減少：原工作表 {len(original_slots)} 筆，日曆＋後台確認 0 筆"
             if first_row not in reduction_rows:
@@ -280,13 +377,33 @@ def build_source_writeback(source_groups, results, skipped):
     return row_updates, insertions, reduction_rows
 
 
-def write_results_to_source(worksheet, source_groups, results, skipped):
-    """一次批次回寫原排程工作表，並將減少安排的狀態標成紅底白字。"""
-    headers = list(worksheet.row_values(1))
-    for header in SOURCE_OUTPUT_HEADERS:
-        if header not in headers:
-            headers.append(header)
-    worksheet.update(range_name="A1", values=[headers])
+def ensure_source_headers(worksheet):
+    """補齊通知輸出欄位（只在缺欄時寫入），回傳表頭；整次執行只需呼叫一次。"""
+    current = list(worksheet.row_values(1))
+    headers = current + [header for header in SOURCE_OUTPUT_HEADERS if header not in current]
+    if headers != current:
+        worksheet.update(range_name="A1", values=[headers])
+    return headers
+
+
+def sheet_order_numbers(df):
+    """工作表所有訂單編號（含失敗列），用來判斷後台多出的訂單是否已在表上。"""
+    if "訂單編號" not in getattr(df, "columns", []):
+        return set()
+    numbers = set()
+    for value in df["訂單編號"].tolist():
+        text = "" if value is None or value != value else str(value).strip()  # value != value：NaN
+        if text and text.lower() != "nan":
+            numbers.add(text)
+    return numbers
+
+
+def write_results_to_source(worksheet, source_groups, results, skipped, headers=None):
+    """一次批次回寫原排程工作表，並將減少安排的狀態標成紅底白字。
+
+    headers：ensure_source_headers 的結果；有給就不再每批讀寫表頭。
+    """
+    headers = list(headers) if headers else ensure_source_headers(worksheet)
     header_index = {name: index + 1 for index, name in enumerate(headers) if name}
     row_updates, insertions, reduction_rows = build_source_writeback(source_groups, results, skipped)
     for insertion in sorted(insertions, key=lambda item: item["after_row"], reverse=True):

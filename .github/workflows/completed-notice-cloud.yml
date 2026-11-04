@@ -31,4 +31,4 @@ jobs:
           HSINCHU_PASSWORD: ${{ secrets.HSINCHU_PASSWORD }}
           KAOHSIUNG_EMAIL: ${{ secrets.KAOHSIUNG_EMAIL }}
           KAOHSIUNG_PASSWORD: ${{ secrets.KAOHSIUNG_PASSWORD }}
-        run: python -m shared.cloud_completed_notice --sheet "${{ inputs.sheet_name }}" --rows "${{ inputs.rows }}" --env "${{ inputs.env }}" --batch-size 8
+        run: python -m shared.cloud_completed_notice --sheet "${{ inputs.sheet_name }}" --rows "${{ inputs.rows }}" --env "${{ inputs.env }}" --batch-size 20

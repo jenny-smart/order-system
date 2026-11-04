@@ -7,8 +7,8 @@ import orders
 from accounts import ACCOUNTS
 from shared import notification_service
 from shared.line_notice_sheet import (
-    filter_completed_address_groups, filter_groups_by_calendar, groups_from_dataframe,
-    write_results_to_source,
+    ensure_source_headers, filter_completed_address_groups, filter_groups_by_calendar, groups_from_dataframe,
+    sheet_order_numbers, write_results_to_source,
 )
 
 
@@ -16,8 +16,10 @@ def _key(group):
     return (str(group.get("name") or "").strip(), "".join(str(group.get("address") or "").split()))
 
 
-def run(sheet, rows="", env="prod", batch_size=8):
+def run(sheet, rows="", env="prod", batch_size=20):
     worksheet, df = orders.load_worksheet(sheet)
+    headers = ensure_source_headers(worksheet)
+    known_order_nos = sheet_order_numbers(df)
     groups = groups_from_dataframe(df, rows)
     groups, completed = filter_completed_address_groups(groups, df)
     source = list(groups)
@@ -32,7 +34,7 @@ def run(sheet, rows="", env="prod", batch_size=8):
     kept_keys = {_key(group) for group in kept}
     skipped_only = [group for group in source if _key(group) not in kept_keys]
     if skipped_only:
-        write_results_to_source(worksheet, skipped_only, [], skipped)
+        write_results_to_source(worksheet, skipped_only, [], skipped, headers=headers)
     by_region = {}
     for group in kept:
         region = orders.get_region_by_address(group.get("address", ""), ACCOUNTS)
@@ -44,13 +46,18 @@ def run(sheet, rows="", env="prod", batch_size=8):
         if not email or not password:
             raise RuntimeError(f"{region or '未知地區'}未設定雲端後台帳密")
         region_groups.sort(key=lambda group: min(int(entry["row"]) for entry in group.get("entries") or [{}]), reverse=True)
+        block_cache = notification_service.prefetch_notice_blocks(
+            env, email, password, region_groups, logger=lambda message: print(f"PREFETCH {region} {message}", flush=True),
+        )
         for start in range(0, len(region_groups), max(1, int(batch_size))):
             batch = region_groups[start:start + max(1, int(batch_size))]
-            results = notification_service.build_many_combined_line_messages(env, email, password, batch, max_workers=4)
+            results = notification_service.build_many_combined_line_messages(
+                env, email, password, batch, max_workers=4, block_cache=block_cache, known_order_nos=known_order_nos,
+            )
             batch_keys = {_key(group) for group in batch}
             batch_source = [source_by_key[key] for key in batch_keys]
             batch_skipped = [entry for entry in skipped if (str(entry.get("name") or "").strip(), "".join(str(entry.get("address") or "").split())) in batch_keys]
-            write_results_to_source(worksheet, batch_source, results, batch_skipped)
+            write_results_to_source(worksheet, batch_source, results, batch_skipped, headers=headers)
             done += len(results); failed += sum(bool(item.get("error")) for item in results)
             print(f"BATCH done={done} failed={failed} remaining={len(kept)-done}", flush=True)
     print(f"FINISH done={done} failed={failed} calendar_skipped={len(skipped)}", flush=True)
@@ -61,7 +68,7 @@ def main():
     parser.add_argument("--sheet", required=True)
     parser.add_argument("--rows", default="")
     parser.add_argument("--env", default="prod")
-    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--batch-size", type=int, default=20)
     args = parser.parse_args()
     run(args.sheet, args.rows, args.env, args.batch_size)
 

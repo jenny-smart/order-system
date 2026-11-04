@@ -3182,12 +3182,89 @@ def prepare_notification_session(env_name, backend_email, backend_password):
     return session
 
 
-def build_combined_line_message_from_order_nos(env_name, backend_email, backend_password, order_nos, fallback_region="台北", session=None):
+def _line_urls_from_purchase_html(raw_html):
+    result = {}
+    soup = BeautifulSoup(raw_html, "html.parser")
+    for tr in soup.find_all("tr"):
+        match = re.search(orders.ORDER_NO_REGEX, tr.get_text(" ", strip=True))
+        if not match:
+            continue
+        link = tr.find("a", href=re.compile(r"chat\.line\.biz"))
+        if link:
+            result[match.group(0)] = str(link.get("href") or "").strip()
+    return result
+
+
+def prefetch_purchase_blocks(session, clean_date_s, clean_date_e, max_pages=100, page_size=20):
+    """依服務日期區間一次列出後台訂單卡片（每頁 20 筆），回傳 {訂單編號: 卡片}。
+
+    取代逐張用訂單編號查詢；清單與單張查詢是同一個後台頁面，卡片內容相同。
+    清單以外的訂單（例如日期已改到區間外）由呼叫端逐張補查。
+    """
+    blocks = {}
+    for page in range(1, max_pages + 1):
+        params = dict(PURCHASE_FILTER_PARAMS_TEMPLATE)
+        params.update({"clean_date_s": clean_date_s, "clean_date_e": clean_date_e, "p_board": "on", "page": str(page)})
+        params.pop("purchase_status", None)
+        resp = session.get(orders.PURCHASE_URL, params=params, headers=HEADERS, allow_redirects=True)
+        if resp.status_code != 200:
+            break
+        cards = extract_order_cards_from_purchase_html(resp.text)
+        line_urls = _line_urls_from_purchase_html(resp.text)
+        added = 0
+        for card in cards:
+            order_no = card.get("order_no")
+            if order_no and order_no not in blocks:
+                card["line_url"] = line_urls.get(order_no, "")
+                blocks[order_no] = card
+                added += 1
+        if len(cards) < page_size or not added:
+            break
+    return blocks
+
+
+def _purchase_block(session, order_no, block_cache=None):
+    cached = (block_cache or {}).get(str(order_no or "").strip())
+    return cached if cached else _fetch_purchase_block_for_order_no(session, order_no)
+
+
+def extra_orders_for_group(group, block_cache, known_order_nos=()):
+    """後台區間清單中，同客人（電話或姓名）同地址、但工作表沒有的有效訂單。"""
+    address = re.sub(r"\s+", "", str(group.get("address") or ""))
+    phone = re.sub(r"\D", "", str(group.get("phone") or ""))
+    name = str(group.get("name") or "").strip()
+    service = str(group.get("service") or "").strip()
+    known = {str(no).strip() for no in known_order_nos or ()} | {str(no).strip() for no in group.get("order_nos") or ()}
+    extras = []
+    if not address:
+        return extras
+    for order_no, block in (block_cache or {}).items():
+        if order_no in known:
+            continue
+        lines = block.get("lines", [])
+        if orders.card_payment_status(lines) in orders.VOID_PAYMENT_STATUS:
+            continue
+        if re.sub(r"\s+", "", _extract_address_line(lines) or "") != address:
+            continue
+        card_service = _extract_service_type_label(lines) or ""
+        if service and card_service and service not in card_service and card_service not in service:
+            continue
+        card_phone = re.sub(r"\D", "", _extract_phone_from_block_lines(lines) or "")
+        same_customer = (phone and card_phone == phone) or (not phone and name and name in "\n".join(lines))
+        if not same_customer:
+            continue
+        service_date, service_time = _parse_service_date_time_loose("\n".join(lines))
+        if service_date:
+            extras.append({"order_no": order_no, "service_date": service_date, "period_s": service_time})
+    return sorted(extras, key=lambda item: (item["service_date"], str(item["period_s"])))
+
+
+def build_combined_line_message_from_order_nos(env_name, backend_email, backend_password, order_nos, fallback_region="台北", session=None, block_cache=None):
     base_url = _configure_environment(env_name)
     session = session or prepare_notification_session(env_name, backend_email, backend_password)
     orders_info = []
     for ono in order_nos:
-        block = _fetch_purchase_block_for_order_no(session, ono)
+        block = _purchase_block(session, ono, block_cache)
         lines = block.get("lines", [])
         joined = "\n".join(lines)
         # v8.19：儲值金購買訂單沒有服務日期/地址，性質跟一般清潔服務訂單完全
@@ -3284,8 +3361,13 @@ def build_combined_line_message_from_order_nos(env_name, backend_email, backend_
     return result, build_line_message(result)
 
 
-def build_many_combined_line_messages(env_name, backend_email, backend_password, groups, max_workers=4, progress_callback=None):
-    """平行產生多組通知；每個工作執行緒只登入一次後台。"""
+def build_many_combined_line_messages(env_name, backend_email, backend_password, groups, max_workers=4, progress_callback=None,
+                                     block_cache=None, known_order_nos=None):
+    """平行產生多組通知；每個工作執行緒只登入一次後台。
+
+    block_cache：prefetch_purchase_blocks 的結果，有就不逐張查後台。
+    known_order_nos：工作表已有的訂單編號；有給時會在結果加上 extra_orders（後台多出的訂單）。
+    """
     from concurrent.futures import ThreadPoolExecutor, as_completed
     import threading
     local = threading.local()
@@ -3296,7 +3378,10 @@ def build_many_combined_line_messages(env_name, backend_email, backend_password,
             local.session = prepare_notification_session(env_name, backend_email, backend_password)
         result, text = build_combined_line_message_from_order_nos(
             env_name, backend_email, backend_password, group.get("order_nos") or [], session=local.session,
+            block_cache=block_cache,
         )
+        if known_order_nos is not None and block_cache:
+            result["extra_orders"] = extra_orders_for_group(group, block_cache, known_order_nos)
         return index, group, result, text
 
     output = [None] * len(groups)
