@@ -138,3 +138,14 @@ def test_resume_skips_completed_customer_address():
     pending, completed = filter_completed_address_groups(groups, df)
     assert completed == 1
     assert [group["name"] for group in pending] == ["待處理客"]
+
+
+def test_time_zero_padding_is_not_reported_as_change():
+    group = {"name": "王小明", "address": "台北市A", "service": "居家清潔", "entries": [
+        {"row": 2, "order_no": "LC1", "date": "2026/12/18", "start": "9:00", "end": "12:00"}
+    ]}
+    results = [{"group": group, "text": "通知", "error": None, "result": {
+        "orders_info": [{"service_date": "2026-12-18", "period_s": "09:00-12:00"}]
+    }}]
+    updates, _, _ = build_source_writeback([group], results, [])
+    assert updates[2]["異動檢查"] == "一致"
