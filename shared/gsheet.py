@@ -86,6 +86,11 @@ def load_worksheet(sheet_name):
     headers = values[0]
     rows = values[1:]
     df = pd.DataFrame(rows, columns=headers)
+    # 排程表長期增修後可能出現重複欄名；Pandas 此時 df[欄名] 會回傳
+    # DataFrame 而不是 Series，後續 .str/.map 便會直接失敗。讀取一律沿用
+    # 最左邊（第一個）同名欄，與既有回填規則一致。
+    if df.columns.duplicated().any():
+        df = df.loc[:, ~df.columns.duplicated(keep="first")].copy()
     df["__sheet_row__"] = range(2, len(df) + 2)
     for name, short in HEADER_ALIASES.items():
         if name not in df.columns and short in df.columns:

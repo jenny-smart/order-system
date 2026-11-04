@@ -31,6 +31,19 @@ class HeaderAliasTest(unittest.TestCase):
             _, df = orders.load_worksheet("s")
         self.assertEqual(df.iloc[0]["沒班表日期"], "2027/01/05")
 
+    def test_reader_uses_first_duplicate_header(self):
+        ws = MagicMock()
+        ws.get_all_values.return_value = [
+            ["姓名", "電話", "代客保留", "代客保留"],
+            ["王小明", "0912345678", "", "TRUE"],
+        ]
+        client = MagicMock()
+        client.open_by_key.return_value.worksheet.return_value = ws
+        with patch.object(gsheet, "build_gsheet_client", return_value=client):
+            _, df = orders.load_worksheet("s")
+        self.assertEqual(list(df.columns).count("代客保留"), 1)
+        self.assertEqual(df.iloc[0]["電話"], "0912345678")
+
 
 if __name__ == "__main__":
     unittest.main()
