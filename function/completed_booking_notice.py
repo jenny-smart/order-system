@@ -7,8 +7,8 @@ import orders
 from accounts import ACCOUNTS
 from shared import notification_service
 from shared.line_notice_sheet import (
-    filter_completed_address_groups, filter_groups_by_calendar, groups_from_dataframe,
-    write_results_to_source,
+    ensure_source_headers, filter_completed_address_groups, filter_groups_by_calendar, groups_from_dataframe,
+    sheet_order_numbers, write_results_to_source,
 )
 
 _CLOUD_REPO = "jenny-smart/order-system"
@@ -111,6 +111,8 @@ def render(backend_email, backend_password, env):
             live = st.empty()
             try:
                 worksheet, df = orders.load_worksheet(sheet_name.strip())
+                headers = ensure_source_headers(worksheet)
+                known_order_nos = sheet_order_numbers(df)
                 groups = groups_from_dataframe(df, row_spec)
                 already_completed = 0
                 if resume_completed:
@@ -146,23 +148,28 @@ def render(backend_email, backend_password, env):
                 skipped_only = [group for group in source_groups if address_key(group) not in matched_keys]
                 written_rows = inserted_rows = reduction_count = 0
                 if skipped_only:
-                    counts = write_results_to_source(worksheet, skipped_only, [], skipped)
+                    counts = write_results_to_source(worksheet, skipped_only, [], skipped, headers=headers)
                     written_rows += counts[0]; inserted_rows += counts[1]; reduction_count += counts[2]
                 groups = sorted(groups, key=lambda group: min(int(entry["row"]) for entry in group.get("entries") or [{}]), reverse=True)
+                progress.progress(0.7, text="正在一次讀取後台訂單清單…")
+                block_cache = notification_service.prefetch_notice_blocks(
+                    env, backend_email.strip(), backend_password.strip(), groups, logger=status.write,
+                )
                 processed_groups = 0
-                for batch_start in range(0, len(groups), 8):
-                    batch = groups[batch_start:batch_start + 8]
+                for batch_start in range(0, len(groups), 20):
+                    batch = groups[batch_start:batch_start + 20]
                     def backend_progress(done, _batch_total, label):
                         overall = processed_groups + done
                         progress.progress(0.7 + 0.3 * (overall / max(len(groups), 1)), text=f"後台批次確認 {overall}/{len(groups)} 組｜{label}")
                     batch_results = notification_service.build_many_combined_line_messages(
                         env, backend_email.strip(), backend_password.strip(), batch,
                         max_workers=4, progress_callback=backend_progress,
+                        block_cache=block_cache, known_order_nos=known_order_nos,
                     )
                     batch_keys = {address_key(group) for group in batch}
                     batch_source = [source_by_key[key] for key in batch_keys]
                     batch_skipped = [entry for entry in skipped if (str(entry.get("name") or "").strip(), "".join(str(entry.get("address") or "").split())) in batch_keys]
-                    counts = write_results_to_source(worksheet, batch_source, batch_results, batch_skipped)
+                    counts = write_results_to_source(worksheet, batch_source, batch_results, batch_skipped, headers=headers)
                     written_rows += counts[0]; inserted_rows += counts[1]; reduction_count += counts[2]
                     results.extend(batch_results); processed_groups += len(batch)
                     status.write(f"已完成並寫回第 {processed_groups}/{len(groups)} 組；可中途離開，下次會自動續跑。")
