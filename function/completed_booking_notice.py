@@ -15,7 +15,7 @@ _CLOUD_REPO = "jenny-smart/order-system"
 _CLOUD_WORKFLOW = "completed-notice-cloud.yml"
 
 
-def _dispatch_cloud(sheet, rows, env):
+def _cloud_token():
     token = next((os.getenv(key, "").strip() for key in ("ORDERS_GITHUB_TOKEN", "GITHUB_ACTIONS_TOKEN", "GH_TOKEN") if os.getenv(key, "").strip()), "")
     if not token:
         for key in ("ORDERS_GITHUB_TOKEN", "GITHUB_ACTIONS_TOKEN", "GH_TOKEN"):
@@ -24,6 +24,11 @@ def _dispatch_cloud(sheet, rows, env):
             except Exception:
                 token = ""
             if token: break
+    return token
+
+
+def _dispatch_cloud(sheet, rows, env):
+    token = _cloud_token()
     if not token: raise RuntimeError("尚未設定可啟動 GitHub Actions 的 Token")
     response = requests.post(
         f"https://api.github.com/repos/{_CLOUD_REPO}/actions/workflows/{_CLOUD_WORKFLOW}/dispatches",
@@ -31,6 +36,47 @@ def _dispatch_cloud(sheet, rows, env):
         json={"ref": "main", "inputs": {"sheet_name": sheet, "rows": rows, "env": env}}, timeout=30,
     )
     if response.status_code != 204: raise RuntimeError(f"啟動雲端失敗：{response.status_code} {response.text[:200]}")
+
+
+@st.fragment(run_every="15s")
+def _render_cloud_progress(sheet, row_spec):
+    st.markdown("#### 雲端執行進度")
+    try:
+        _, df = orders.load_worksheet(sheet)
+        groups = groups_from_dataframe(df, row_spec)
+        status_by_address = {}
+        if "通知處理狀態" in df.columns:
+            for _, row in df.iterrows():
+                key = (str(row.get("姓名", "") or "").strip(), "".join(str(row.get("地址", "") or "").split()))
+                value = str(row.get("通知處理狀態", "") or "").strip()
+                if value: status_by_address[key] = value
+        keys = {(str(group.get("name") or "").strip(), "".join(str(group.get("address") or "").split())) for group in groups}
+        completed = sum(status_by_address.get(key, "").startswith("完成") for key in keys)
+        failed = sum(status_by_address.get(key, "").startswith("失敗") for key in keys)
+        total = len(keys); pending = max(total - completed - failed, 0)
+        columns = st.columns(4)
+        for column, label, value in zip(columns, ("總組數", "已完成", "失敗待續跑", "未完成"), (total, completed, failed, pending)):
+            column.metric(label, value)
+        st.progress(completed / total if total else 0, text=f"已完成 {completed}/{total}（每 15 秒自動更新）")
+    except Exception as exc:
+        st.caption(f"暫時無法讀取工作表進度：{exc}")
+    token = _cloud_token()
+    if token:
+        try:
+            response = requests.get(
+                f"https://api.github.com/repos/{_CLOUD_REPO}/actions/workflows/{_CLOUD_WORKFLOW}/runs?event=workflow_dispatch&per_page=10",
+                headers={"Accept": "application/vnd.github+json", "Authorization": f"Bearer {token}", "X-GitHub-Api-Version": "2022-11-28"}, timeout=15,
+            )
+            response.raise_for_status()
+            runs = response.json().get("workflow_runs", [])
+            run = next((item for item in runs if sheet in str(item.get("display_title") or item.get("name") or "")), runs[0] if runs else None)
+            if run:
+                labels = {"queued": "排隊中", "in_progress": "執行中", "completed": "已結束"}
+                state = labels.get(run.get("status"), run.get("status", ""))
+                conclusion = run.get("conclusion") or ""
+                st.info(f"GitHub Actions：{state}{'（' + conclusion + '）' if conclusion else ''}")
+        except Exception:
+            pass
 
 
 def render(backend_email, backend_password, env):
@@ -48,6 +94,8 @@ def render(backend_email, backend_password, env):
                 st.success("已交給雲端執行；可關閉或切換網頁。完成者會直接寫回原列，失敗者下次可續跑。")
                 st.markdown(f"[查看雲端執行進度](https://github.com/{_CLOUD_REPO}/actions/workflows/{_CLOUD_WORKFLOW})")
             except Exception as exc: st.error(str(exc))
+    if sheet_name.strip():
+        _render_cloud_progress(sheet_name.strip(), row_spec.strip())
     if st.button("檢查日曆並產生 LINE 通知", type="primary", use_container_width=True, key="completed_notice_run"):
         if not backend_email.strip() or not backend_password.strip():
             st.error("請先輸入後台帳號密碼")
