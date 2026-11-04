@@ -1,13 +1,36 @@
 """獨立的已成單預約完成 LINE 通知頁面。"""
+import os
+import requests
 import streamlit as st
 
 import orders
 from accounts import ACCOUNTS
 from shared import notification_service
 from shared.line_notice_sheet import (
-    filter_groups_by_calendar, groups_from_dataframe,
+    filter_completed_address_groups, filter_groups_by_calendar, groups_from_dataframe,
     write_results_to_source,
 )
+
+_CLOUD_REPO = "jenny-smart/order-system"
+_CLOUD_WORKFLOW = "completed-notice-cloud.yml"
+
+
+def _dispatch_cloud(sheet, rows, env):
+    token = next((os.getenv(key, "").strip() for key in ("ORDERS_GITHUB_TOKEN", "GITHUB_ACTIONS_TOKEN", "GH_TOKEN") if os.getenv(key, "").strip()), "")
+    if not token:
+        for key in ("ORDERS_GITHUB_TOKEN", "GITHUB_ACTIONS_TOKEN", "GH_TOKEN"):
+            try:
+                token = str(st.secrets.get(key, "")).strip()
+            except Exception:
+                token = ""
+            if token: break
+    if not token: raise RuntimeError("尚未設定可啟動 GitHub Actions 的 Token")
+    response = requests.post(
+        f"https://api.github.com/repos/{_CLOUD_REPO}/actions/workflows/{_CLOUD_WORKFLOW}/dispatches",
+        headers={"Accept": "application/vnd.github+json", "Authorization": f"Bearer {token}", "X-GitHub-Api-Version": "2022-11-28"},
+        json={"ref": "main", "inputs": {"sheet_name": sheet, "rows": rows, "env": env}}, timeout=30,
+    )
+    if response.status_code != 204: raise RuntimeError(f"啟動雲端失敗：{response.status_code} {response.text[:200]}")
 
 
 def render(backend_email, backend_password, env):
@@ -16,6 +39,15 @@ def render(backend_email, backend_password, env):
     c1, c2 = st.columns(2)
     sheet_name = c1.text_input("工作表名稱", placeholder="例：台北202611", key="completed_notice_sheet")
     row_spec = c2.text_input("列號（選填）", placeholder="例：2,3,5-20；空白＝全部已成單列", key="completed_notice_rows")
+    resume_completed = st.checkbox("略過已完成，從失敗／未完成繼續", value=True, key="completed_notice_resume")
+    if st.button("☁️ 交給雲端批次產生並寫回", use_container_width=True, key="completed_notice_cloud"):
+        if not sheet_name.strip(): st.error("請輸入工作表名稱")
+        else:
+            try:
+                _dispatch_cloud(sheet_name.strip(), row_spec.strip(), env)
+                st.success("已交給雲端執行；可關閉或切換網頁。完成者會直接寫回原列，失敗者下次可續跑。")
+                st.markdown(f"[查看雲端執行進度](https://github.com/{_CLOUD_REPO}/actions/workflows/{_CLOUD_WORKFLOW})")
+            except Exception as exc: st.error(str(exc))
     if st.button("檢查日曆並產生 LINE 通知", type="primary", use_container_width=True, key="completed_notice_run"):
         if not backend_email.strip() or not backend_password.strip():
             st.error("請先輸入後台帳號密碼")
@@ -32,9 +64,14 @@ def render(backend_email, backend_password, env):
             try:
                 worksheet, df = orders.load_worksheet(sheet_name.strip())
                 groups = groups_from_dataframe(df, row_spec)
+                already_completed = 0
+                if resume_completed:
+                    groups, already_completed = filter_completed_address_groups(groups, df)
                 source_groups = groups
                 total = sum(len(group.get("entries") or []) for group in groups)
                 status.write(f"工作表讀取完成：找到 {total} 筆已有訂單編號的資料。")
+                if already_completed:
+                    status.write(f"續跑模式：已略過 {already_completed} 組先前完成的姓名＋地址。")
                 live.markdown(f"**共 {total} 筆｜日曆已檢查 0 筆｜日曆確認 0 筆｜略過 0 筆**")
 
                 def calendar_progress(checked, calendar_total, matched, skipped_count, entry):
@@ -54,22 +91,36 @@ def render(backend_email, backend_password, env):
                 results = []
                 confirmed_orders = sum(len(group["order_nos"]) for group in groups)
                 status.write(f"日曆比對完成：確認 {confirmed_orders} 筆；開始向後台核對並產生通知。")
-                def backend_progress(done, backend_total, label):
-                    progress.progress(
-                        0.7 + 0.3 * (done / max(backend_total, 1)),
-                        text=f"後台平行確認與通知產生 {done}/{backend_total} 組｜{label}",
+                def address_key(group):
+                    return (str(group.get("name") or "").strip(), "".join(str(group.get("address") or "").split()))
+                source_by_key = {address_key(group): group for group in source_groups}
+                matched_keys = {address_key(group) for group in groups}
+                skipped_only = [group for group in source_groups if address_key(group) not in matched_keys]
+                written_rows = inserted_rows = reduction_count = 0
+                if skipped_only:
+                    counts = write_results_to_source(worksheet, skipped_only, [], skipped)
+                    written_rows += counts[0]; inserted_rows += counts[1]; reduction_count += counts[2]
+                groups = sorted(groups, key=lambda group: min(int(entry["row"]) for entry in group.get("entries") or [{}]), reverse=True)
+                processed_groups = 0
+                for batch_start in range(0, len(groups), 8):
+                    batch = groups[batch_start:batch_start + 8]
+                    def backend_progress(done, _batch_total, label):
+                        overall = processed_groups + done
+                        progress.progress(0.7 + 0.3 * (overall / max(len(groups), 1)), text=f"後台批次確認 {overall}/{len(groups)} 組｜{label}")
+                    batch_results = notification_service.build_many_combined_line_messages(
+                        env, backend_email.strip(), backend_password.strip(), batch,
+                        max_workers=4, progress_callback=backend_progress,
                     )
-                results = notification_service.build_many_combined_line_messages(
-                    env, backend_email.strip(), backend_password.strip(), groups,
-                    max_workers=4, progress_callback=backend_progress,
-                )
+                    batch_keys = {address_key(group) for group in batch}
+                    batch_source = [source_by_key[key] for key in batch_keys]
+                    batch_skipped = [entry for entry in skipped if (str(entry.get("name") or "").strip(), "".join(str(entry.get("address") or "").split())) in batch_keys]
+                    counts = write_results_to_source(worksheet, batch_source, batch_results, batch_skipped)
+                    written_rows += counts[0]; inserted_rows += counts[1]; reduction_count += counts[2]
+                    results.extend(batch_results); processed_groups += len(batch)
+                    status.write(f"已完成並寫回第 {processed_groups}/{len(groups)} 組；可中途離開，下次會自動續跑。")
                 backend_confirmed = sum(len(item["group"].get("order_nos") or []) for item in results if not item.get("error"))
                 st.session_state.completed_notice_results = results
                 st.session_state.completed_notice_skipped = skipped
-                status.write("正在把通知與異動檢查直接寫回原排程工作表…")
-                written_rows, inserted_rows, reduction_count = write_results_to_source(
-                    worksheet, source_groups, results, skipped
-                )
                 st.session_state.completed_notice_writeback = {
                     "sheet": sheet_name.strip(), "written": written_rows,
                     "inserted": inserted_rows, "reduced": reduction_count,
