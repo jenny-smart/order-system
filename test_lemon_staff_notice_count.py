@@ -8,6 +8,10 @@ def test_lemon_staff_is_included_in_notice_headcount():
         assert _count_staff_from_lines(["專員：王小明 X 檸檬人1"]) == "2"
     with patch("shared.text_parsing.orders._extract_staff_line", return_value="檸檬人2"):
         assert _count_staff_from_lines(["專員：檸檬人2"]) == "1"
+    with patch("shared.text_parsing.orders._extract_staff_line", return_value="檸檬人1 X 檸檬人2"):
+        people = _count_staff_from_lines(["專員：檸檬人1 X 檸檬人2"])
+        assert people == "2"
+        assert _format_period_display("09:00-12:00", people) == "09:00-12:00（2人3小時），共6人時"
 
 
 def test_missing_headcount_is_formatted_as_one_person_hours():
