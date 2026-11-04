@@ -5,14 +5,14 @@ import orders
 from accounts import ACCOUNTS
 from shared import notification_service
 from shared.line_notice_sheet import (
-    OUTPUT_SPREADSHEET_ID, comparison_rows, filter_groups_by_calendar,
-    groups_from_dataframe, results_tsv, write_comparison_results,
+    filter_groups_by_calendar, groups_from_dataframe, results_tsv,
+    write_results_to_source,
 )
 
 
 def render(backend_email, backend_password, env):
     st.markdown("### 已成單預約完成通知")
-    st.info("只處理 Google 日曆有對應行程的已成單資料；日曆沒有即略過、不通知。通知日期與時段以後台訂單為準。")
+    st.info("只處理 Google 日曆有對應行程的已成單資料；通知會直接寫入原排程工作表每個地址群組的第一列。")
     c1, c2 = st.columns(2)
     sheet_name = c1.text_input("工作表名稱", placeholder="例：台北202611", key="completed_notice_sheet")
     row_spec = c2.text_input("列號（選填）", placeholder="例：2,3,5-20；空白＝全部已成單列", key="completed_notice_rows")
@@ -25,12 +25,12 @@ def render(backend_email, backend_password, env):
             st.session_state.completed_notice_results = []
             st.session_state.completed_notice_skipped = []
             st.session_state.completed_notice_summary = {}
-            st.session_state.completed_notice_output_sheet = ""
+            st.session_state.completed_notice_writeback = {}
             status = st.status("✅ 已按到按鈕｜正在讀取工作表…", expanded=True)
             progress = st.progress(0, text="準備中")
             live = st.empty()
             try:
-                _, df = orders.load_worksheet(sheet_name.strip())
+                worksheet, df = orders.load_worksheet(sheet_name.strip())
                 groups = groups_from_dataframe(df, row_spec)
                 source_groups = groups
                 total = sum(len(group.get("entries") or []) for group in groups)
@@ -55,6 +55,9 @@ def render(backend_email, backend_password, env):
                 confirmed_orders = sum(len(group["order_nos"]) for group in groups)
                 status.write(f"日曆比對完成：確認 {confirmed_orders} 筆；開始向後台核對並產生通知。")
                 backend_confirmed = 0
+                backend_session = notification_service.prepare_notification_session(
+                    env, backend_email.strip(), backend_password.strip()
+                )
                 for index, group in enumerate(groups, 1):
                     label = "、".join(group["order_nos"])
                     progress.progress(
@@ -65,6 +68,7 @@ def render(backend_email, backend_password, env):
                         result, text = notification_service.build_combined_line_message_from_order_nos(
                             env_name=env, backend_email=backend_email.strip(),
                             backend_password=backend_password.strip(), order_nos=group["order_nos"],
+                            session=backend_session,
                         )
                         results.append({"order_no": label, "group": group, "result": result, "text": text, "error": None})
                         backend_confirmed += len(group["order_nos"])
@@ -72,10 +76,14 @@ def render(backend_email, backend_password, env):
                         results.append({"order_no": label, "group": group, "result": None, "text": "", "error": str(exc)})
                 st.session_state.completed_notice_results = results
                 st.session_state.completed_notice_skipped = skipped
-                status.write("正在將完整比對結果寫入指定 Google 試算表…")
-                output_rows = comparison_rows(sheet_name.strip(), source_groups, results, skipped)
-                output_sheet = write_comparison_results(orders, sheet_name.strip(), output_rows)
-                st.session_state.completed_notice_output_sheet = output_sheet
+                status.write("正在把通知與異動檢查直接寫回原排程工作表…")
+                written_rows, inserted_rows, reduction_count = write_results_to_source(
+                    worksheet, source_groups, results, skipped
+                )
+                st.session_state.completed_notice_writeback = {
+                    "sheet": sheet_name.strip(), "written": written_rows,
+                    "inserted": inserted_rows, "reduced": reduction_count,
+                }
                 valid_count = sum(not item.get("error") for item in results)
                 failed_count = len(results) - valid_count
                 st.session_state.completed_notice_summary = {
@@ -88,7 +96,7 @@ def render(backend_email, backend_password, env):
                     f"**共 {total} 筆｜日曆已檢查 {total} 筆｜日曆確認 {confirmed_orders} 筆｜"
                     f"後台確認 {backend_confirmed} 筆｜略過 {len(skipped)} 筆｜通知 {valid_count} 組**"
                 )
-                status.update(label=f"✅ 執行完成｜產生 {valid_count} 組通知｜已寫入 {output_sheet}", state="complete", expanded=False)
+                status.update(label=f"✅ 執行完成｜產生 {valid_count} 組通知｜已直接寫回 {sheet_name.strip()}", state="complete", expanded=False)
             except Exception as exc:
                 st.error(f"產生失敗：{exc}")
                 status.update(label=f"❌ 執行失敗：{exc}", state="error", expanded=True)
@@ -96,7 +104,7 @@ def render(backend_email, backend_password, env):
     skipped = st.session_state.get("completed_notice_skipped", [])
     results = st.session_state.get("completed_notice_results", [])
     summary = st.session_state.get("completed_notice_summary") or {}
-    output_sheet = st.session_state.get("completed_notice_output_sheet", "")
+    writeback = st.session_state.get("completed_notice_writeback") or {}
     if summary:
         columns = st.columns(6)
         for column, label, key in zip(
@@ -105,14 +113,16 @@ def render(backend_email, backend_password, env):
             ("total", "checked", "calendar_confirmed", "backend_confirmed", "skipped", "notices"),
         ):
             column.metric(label, summary.get(key, 0))
-    if output_sheet:
-        st.success(f"比對結果已自動寫入指定試算表分頁「{output_sheet}」。")
-        st.markdown(f"[開啟比對結果試算表](https://docs.google.com/spreadsheets/d/{OUTPUT_SPREADSHEET_ID})")
+    if writeback:
+        st.success(
+            f"已直接寫回原工作表「{writeback['sheet']}」：{writeback['written']} 列；"
+            f"新增安排 {writeback['inserted']} 列；減少警示 {writeback['reduced']} 組。"
+        )
     if skipped:
         st.info(f"日曆沒有對應行程，已略過 {len(skipped)} 筆，不產生通知。")
     valid = [item for item in results if not item.get("error")]
     if valid:
-        st.caption("以下整段可按右上角複製，直接貼到 Google Sheet。")
+        st.caption("通知已直接寫入工作表；以下僅供預覽或備用複製。")
         st.code(results_tsv(valid), language=None)
     for index, item in enumerate(results):
         if item.get("error"):

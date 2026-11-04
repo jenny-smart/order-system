@@ -3,8 +3,8 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 from shared.line_notice_sheet import (
-    OUTPUT_HEADERS, comparison_rows, filter_groups_by_calendar, groups_from_dataframe,
-    parse_row_spec, results_tsv, write_comparison_results,
+    build_source_writeback, filter_groups_by_calendar, groups_from_dataframe,
+    parse_row_spec, results_tsv, write_results_to_source,
 )
 
 
@@ -56,27 +56,62 @@ def test_calendar_filter_keeps_only_orders_with_matching_event():
     assert updates == [(1, 2, 1, 0, "LC1"), (2, 2, 1, 1, "LC2")]
 
 
-def test_comparison_results_are_written_to_source_specific_tab():
-    groups = [{"order_nos": ["LC1"], "entries": [{"row": 2, "order_no": "LC1", "name": "王小明", "address": "台北市A"}]}]
-    results = [{"group": groups[0], "text": "通知內容", "error": None, "result": {"phone": "0912345678", "email": "a@example.com", "line_url": "https://line.example/a"}}]
-    rows = comparison_rows("台北202612", groups, results, [])
+def test_calendar_day_query_is_reused():
+    calls = []
+    class Request:
+        def execute(self): calls.append("execute"); return {"items": [{"id": "event"}]}
+    class Events:
+        def list(self, **_kwargs): return Request()
+    service = SimpleNamespace(events=lambda: Events())
+    groups = [{"order_nos": ["LC1", "LC2"], "entries": [
+        {"order_no": "LC1", "address": "台北市A", "date": "2026-12-01", "start": "09:00", "end": "12:00", "proxy": False},
+        {"order_no": "LC2", "address": "台北市B", "date": "2026-12-01", "start": "13:00", "end": "16:00", "proxy": False},
+    ]}]
+    fake_orders = SimpleNamespace(
+        get_region_by_address=lambda *_args: "台北",
+        find_matching_calendar_event=lambda svc, cal, _addr, date, _start, _end: svc.events().list(calendarId=cal, timeMin=date, timeMax=date).execute()["items"][0],
+    )
+    kept, _ = filter_groups_by_calendar(groups, fake_orders, service, {"台北": "calendar"}, {})
+    assert kept[0]["order_nos"] == ["LC1", "LC2"]
+    assert calls == ["execute"]
 
-    class WorksheetNotFound(Exception):
-        pass
+
+def test_notice_is_written_to_first_source_row_and_reduction_is_flagged():
+    group = {"name": "王小明", "address": "台北市A", "service": "居家清潔", "email": "", "line_url": "", "entries": [
+        {"row": 2, "order_no": "LC1", "date": "2026-12-01", "start": "09:00", "end": "12:00"},
+        {"row": 3, "order_no": "LC2", "date": "2026-12-08", "start": "09:00", "end": "12:00"},
+    ]}
+    result_group = {**group, "order_nos": ["LC1"], "entries": [group["entries"][0]]}
+    results = [{"group": result_group, "text": "完整通知", "error": None, "result": {
+        "email": "a@example.com", "line_url": "https://line.example/a",
+        "orders_info": [{"order_no": "LC1", "service_date": "2026-12-01", "period_s": "09:00 - 12:00"}],
+    }}]
+    updates, insertions, reductions = build_source_writeback([group], results, [])
+    assert updates[2]["通知內容"] == "完整通知"
+    assert updates[2]["mail"] == "a@example.com"
+    assert updates[3]["通知內容"] == ""
+    assert updates[2]["異動檢查"].startswith("減少：")
+    assert updates[2]["狀態"] == "安排減少"
+    assert insertions == []
+    assert reductions == [2]
+
+
+def test_writer_adds_columns_and_batches_source_updates():
+    group = {"name": "王小明", "address": "台北市A", "service": "居家清潔", "entries": [
+        {"row": 2, "order_no": "LC1", "date": "2026-12-01", "start": "09:00", "end": "12:00"}
+    ]}
+    results = [{"group": group, "text": "完整通知", "error": None, "result": {
+        "orders_info": [{"order_no": "LC1", "service_date": "2026-12-01", "period_s": "09:00-12:00"}]
+    }}]
     class Worksheet:
-        def clear(self): self.cleared = True
-        def update(self, **kwargs): self.updated = kwargs
-        def freeze(self, **kwargs): self.frozen = kwargs
-    worksheet = Worksheet()
-    class Spreadsheet:
-        def worksheet(self, _title): raise WorksheetNotFound()
-        def add_worksheet(self, **kwargs): self.created = kwargs; return worksheet
-    spreadsheet = Spreadsheet()
-    client = SimpleNamespace(open_by_key=lambda _key: spreadsheet)
-    fake_orders = SimpleNamespace(build_gsheet_client=lambda: client)
-
-    title = write_comparison_results(fake_orders, "台北202612", rows)
-    assert title == "已成單通知-台北202612"
-    assert worksheet.updated["values"][0] == OUTPUT_HEADERS
-    assert worksheet.updated["values"][1][:5] == ["王小明", "0912345678", "a@example.com", "https://line.example/a", "通知內容"]
-    assert worksheet.updated["values"][1][9:11] == ["有對應行程", "已確認"]
+        id = 99
+        spreadsheet = SimpleNamespace(batch_update=Mock())
+        def row_values(self, _row): return ["姓名", "地址", "日期", "開始時間", "結束時間", "狀態"]
+        def update(self, **kwargs): self.header_update = kwargs
+        def batch_update(self, *args, **kwargs): self.cells = (args, kwargs)
+        def insert_rows(self, *args, **kwargs): raise AssertionError("不應新增列")
+    ws = Worksheet()
+    written, inserted, reduced = write_results_to_source(ws, [group], results, [])
+    assert (written, inserted, reduced) == (1, 0, 0)
+    assert ws.header_update["values"][0][-4:] == ["mail", "LINE連結", "通知內容", "異動檢查"]
+    assert any(item["range"] == "I2" and item["values"] == [["完整通知"]] for item in ws.cells[0][0])
