@@ -1,0 +1,42 @@
+# 週末／例假日服務提醒：休假前 2 天台北時間 11:00 自動產生提醒名單
+#
+# 每天 03:00 UTC（台北 11:00）啟動；shared/weekend_reminder_schedule.py 依辦公日曆
+# 判斷今天是不是「休假區段前 2 天」（一般是週四，遇國定假日依假期提前），不是就直接結束。
+# 是執行日時：用台北後台帳號查休假區段內已付款訂單，新增到「週末服務提醒」追蹤表，
+# 不發送 LINE。GitHub 排程可能延遲數分鐘到半小時。
+#
+# 需要的 Secrets（與雲端批次成單相同）：GOOGLE_SERVICE_ACCOUNT_JSON、TAIPEI_EMAIL、TAIPEI_PASSWORD
+name: Weekend Reminder Schedule
+run-name: Weekend Reminder Schedule ${{ inputs.date }}
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      date: {description: "以這天當作執行日（YYYY-MM-DD，空白＝今天）", required: false, default: "", type: string}
+      env: {description: prod / dev, required: false, default: "prod", type: string}
+      dry_run: {description: 只查詢不寫入, required: false, default: false, type: boolean}
+
+concurrency:
+  group: weekend-reminder-schedule
+  cancel-in-progress: false
+
+jobs:
+  reminder:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12", cache: pip}
+      - run: pip install -r requirements.txt
+      - name: Build weekend reminder list
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          TAIPEI_EMAIL: ${{ secrets.TAIPEI_EMAIL }}
+          TAIPEI_PASSWORD: ${{ secrets.TAIPEI_PASSWORD }}
+          RUN_DATE: ${{ inputs.date }}
+          RUN_ENV: ${{ inputs.env || 'prod' }}
+          DRY_RUN: ${{ inputs.dry_run && '--dry-run' || '' }}
+        run: python -m shared.weekend_reminder_schedule --env "$RUN_ENV" --date "$RUN_DATE" $DRY_RUN

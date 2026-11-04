@@ -1582,7 +1582,8 @@ def prepare_base_order_data(row, member_payload, address_info, clean_type_id, pe
         "period_s": system_period,
         "period": note_info["sms_time"] if note_info["need_note"] else "",
         "cycle": "1",
-        "fare": str(address_info.get("fare") or pick("fare", "0") or "0"),
+        # 車馬費一律由後台（查詢地區／計算時數）決定，不沿用舊訂單或會員最後一筆訂單的金額。
+        "fare": str(address_info.get("fare") or "0"),
         "memo": base_memo,
         "notice": str(pick_address_notice("")),
         "discount_code": "",
@@ -1904,7 +1905,7 @@ def process_one_group(session, rows_with_idx, token, gcal_service, region, backe
         logger(f"{group_label}代客保留：用檸檬保留帳號 {phone} 建單，備註「{proxy_memo}」")
 
     # 強制套用查詢地址後取得的區域/車馬費資料
-    base_data["fare"] = first_nonzero(best_addr.get("fare"), base_data.get("fare"), default="0")
+    base_data["fare"] = first_nonzero(best_addr.get("fare"), default="0")
     base_data["notice"] = str(best_addr.get("notice") or base_data.get("notice") or "")
     base_data["area_id"] = str(best_addr.get("area_id") or "")
     base_data["company_id"] = str(best_addr.get("company_id") or "")
@@ -1981,7 +1982,8 @@ def process_one_group(session, rows_with_idx, token, gcal_service, region, backe
                 st.write("🟣 calc_fields =", calc_fields)
         except Exception:
             pass
-        payload["fare"] = first_nonzero(calc_fields.get("fare"), best_addr.get("fare"), base_data.get("fare"), default="0")
+        # 只用後台回傳的車馬費（計算時數 → 查詢地區），程式不另外補值。
+        payload["fare"] = first_nonzero(calc_fields.get("fare"), best_addr.get("fare"), default="0")
 
         if str(payload.get("price", "")).strip() in ("", "0", "0.0"):
             raise Exception(f"計算時數後 price 仍為 0，請貼 🟠 calculate_hour raw 與 🟣 calc_fields：{date_s}")

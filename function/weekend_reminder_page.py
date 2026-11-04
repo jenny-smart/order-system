@@ -34,6 +34,19 @@ def render(backend_email, backend_password, env):
     _suggested_run_day = previous_workday(_default_sat, _holidays)
     st.info(f"建議執行日：{_suggested_run_day.strftime('%Y-%m-%d')}；預設服務區間：{_default_sat}～{_default_sun}")
     st.caption("此頁不會透過程式發送 LINE；只保存勾選名單與人工追蹤狀態。")
+    try:
+        from datetime import datetime as _dt
+        from zoneinfo import ZoneInfo as _Zone
+
+        from shared.weekend_reminder_schedule import load_work_calendar, next_run
+
+        _next = next_run(_dt.now(_Zone("Asia/Taipei")).date(), load_work_calendar())
+        if _next:
+            _run_day, _blocks = _next
+            _ranges = "、".join(f"{s}～{e}" for s, e in _blocks)
+            st.caption(f"⏰ 自動排程：{_run_day} 11:00 會自動把服務 {_ranges} 的已付款名單新增到追蹤表（不發送 LINE）。")
+    except Exception:
+        pass
 
     st.markdown("**服務日期區間**")
     wr_c1, wr_c2 = st.columns(2)
