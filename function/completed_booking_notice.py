@@ -5,7 +5,7 @@ import orders
 from accounts import ACCOUNTS
 from shared import notification_service
 from shared.line_notice_sheet import (
-    filter_groups_by_calendar, groups_from_dataframe, results_tsv,
+    filter_groups_by_calendar, groups_from_dataframe,
     write_results_to_source,
 )
 
@@ -110,15 +110,6 @@ def render(backend_email, backend_password, env):
         )
     if skipped:
         st.info(f"日曆沒有對應行程，已略過 {len(skipped)} 筆，不產生通知。")
-    valid = [item for item in results if not item.get("error")]
-    if valid:
-        st.caption("通知已直接寫入工作表；以下僅供預覽或備用複製。")
-        st.code(results_tsv(valid), language=None)
-    for index, item in enumerate(results):
+    for item in results:
         if item.get("error"):
             st.error(f"訂單 {item['order_no']} 產生失敗：{item['error']}")
-            continue
-        st.text_area(
-            f"{item['group'].get('name') or '客戶'}｜{item['order_no']}", item["text"],
-            height=360, key=f"completed_notice_text_{index}",
-        )
