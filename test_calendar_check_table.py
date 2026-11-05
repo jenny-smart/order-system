@@ -11,7 +11,8 @@ class CalendarCheckTableTest(unittest.TestCase):
             'backend_duplicates': [dict(order_nos=['LC001', 'LC002'], name='徐雅音', phone='0935973225',
                                         address='新北市板橋區中山路一段176-2號28樓', region='新北',
                                         service_date='2026-12-07', service_time='09:00-12:00',
-                                        reason='後台同人同址同時段重複 2 筆', issue='long')],
+                                        reason='後台同人同址同時段重複 2 筆', issue='long',
+                                        line_url='https://chat.line.biz/x/chat/U1')],
             'backend_missing_in_calendar': [dict(order_no='LC003', name='李明達', phone='',
                                                  address='台北市', region='台北',
                                                  service_date='2026-11-27', service_time='14:00-17:00',
@@ -28,12 +29,24 @@ class CalendarCheckTableTest(unittest.TestCase):
         self.assertEqual([r['訂單編號'] for r in rows],
                          [f'{BASE}/purchase?orderNo=LC001', f'{BASE}/purchase?orderNo=LC002'])
         self.assertEqual(rows[0]['組別'], '第 1 組')
-        self.assertEqual(rows[0]['會員'], f'{BASE}/member?keyword=0935973225')
+        self.assertTrue(rows[0]['會員'].startswith(f'{BASE}/purchase?'))
+        self.assertIn('&phone=0935973225&', rows[0]['會員'])
+        self.assertIn('clean_date_s=&', rows[0]['會員'])
         self.assertIn('calendar.google.com', rows[0]['查日曆'])
+        self.assertEqual(rows[0]['LINE'], 'https://chat.line.biz/x/chat/U1')
+        self.assertIsNone(build_issue_rows(self.result, BASE)['backend_missing'][0]['LINE'])
+
+    def test_line_urls_parsed_from_purchase_list_rows(self):
+        import orders
+        html = ('<table><tr><td>LC00216800</td><td><a href="https://chat.line.biz/x/chat/U9">LINE</a></td></tr>'
+                '<tr><td>LC00219813</td><td>無</td></tr></table>')
+        self.assertEqual(orders._line_urls_from_purchase_html(html),
+                         {'LC00216800': 'https://chat.line.biz/x/chat/U9'})
 
     def test_member_link_falls_back_to_name_and_short_reason_used(self):
         row = build_issue_rows(self.result, BASE)['backend_missing'][0]
-        self.assertEqual(row['會員'], f'{BASE}/member?keyword=李明達')
+        self.assertIn('name=李明達', row['會員'])
+        self.assertIn('phone=&', row['會員'])
         self.assertEqual(row['異常說明'], '日曆找不到同人同址同時段的黃色事件')
 
     def test_calendar_only_row_has_event_link_and_no_order_link(self):
