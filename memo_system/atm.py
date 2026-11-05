@@ -1095,6 +1095,24 @@ def auto_match_bank_rows(
 # -----------------------------------------------------------------------------
 # 待付款清單查詢
 # -----------------------------------------------------------------------------
+def unpaid_block_reason(purchase: Optional[Dict]) -> str:
+    """不是待付款的原因；空字串＝仍待付款。
+
+    除了 purchase_status 必須是 0，有付款日期（paid_at）也視為已付款：2026-11-05 黃妙禎 08:38 已執行已付款，
+    15:00 仍被當待付款貼上（ATM 對帳判斷已付款時也同時看 paid_at）。
+    """
+    if not purchase:
+        return "查無訂單"
+    raw_status = purchase.get("purchase_status")
+    status_code = "" if raw_status is None else str(raw_status).strip()
+    if status_code != "0":
+        return {"1": "已付款", "2": "取消訂單", "3": "已退款"}.get(status_code, f"未知狀態 {status_code or '空白'}")
+    paid_at = str(purchase.get("paid_at") or "").strip()
+    if paid_at and not paid_at.startswith("0000"):
+        return f"已付款（付款日期 {paid_at}）"
+    return ""
+
+
 def search_atm_unpaid_orders(session, date_until: Optional[str] = None, ui_logger=None,
                              date_since: Optional[str] = None) -> List[Dict]:
     """
@@ -1138,11 +1156,9 @@ def search_atm_unpaid_orders(session, date_until: Optional[str] = None, ui_logge
 
     rows = []
     for item in items:
-        raw_status = item.get("purchase_status")
-        status_code = "" if raw_status is None else str(raw_status).strip()
-        if status_code != "0":
+        status_name = unpaid_block_reason(item)
+        if status_name:
             order_no = str(item.get("order_no") or "").strip() or "無訂單編號"
-            status_name = {"1": "已付款", "2": "取消訂單", "3": "已退款"}.get(status_code, "未知狀態")
             log(f"⚠️ 略過 {order_no}：實際狀態為「{status_name}」")
             continue
         date_clean = str(item.get("date_clean") or "")
@@ -1362,13 +1378,11 @@ def confirm_unpaid_rows(session, rows: List[Dict], ui_logger=None) -> List[Dict]
         except Exception as exc:
             log(f"⚠️ {order_no} 單張複查失敗，這次不貼：{exc}")
             continue
-        raw_status = purchase.get("purchase_status") if purchase else None
-        status_code = "" if raw_status is None else str(raw_status).strip()
-        if status_code == "0":
+        reason = unpaid_block_reason(purchase)
+        if not reason:
             confirmed.append(row)
             continue
-        status_name = {"1": "已付款", "2": "取消訂單", "3": "已退款"}.get(status_code, "查無訂單" if not purchase else "未知狀態")
-        log(f"⚠️ 略過 {order_no} {row.get('name', '')}：單張複查狀態為「{status_name}」")
+        log(f"⚠️ 略過 {order_no} {row.get('name', '')}：單張複查狀態為「{reason}」")
     log(f"單張複查完成：{len(confirmed)}／{len(rows)} 筆確認仍待付款")
     return confirmed
 
