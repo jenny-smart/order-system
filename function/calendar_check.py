@@ -8,6 +8,7 @@ import streamlit as st
 
 from shared.env_config import compute_env_urls
 from orders import (
+    PURCHASE_FILTER_PARAMS_TEMPLATE,
     get_calendar_compare_allowed_region,
     run_backend_calendar_consistency_check,
 )
@@ -78,9 +79,15 @@ def _order_url(base_url, order_no):
 
 
 def _member_url(base_url, phone, name):
-    """後台會員搜尋：有電話用電話，沒有才用姓名（中文不轉碼，表格才顯示得出姓名）。"""
-    keyword = str(phone or "").strip() or str(name or "").strip()
-    return f"{base_url}/member?keyword={keyword}" if keyword else None
+    """後台訂單管理依電話（無電話改姓名）查詢的結果頁。
+    帶上完整搜尋表單欄位（未填為空字串），避免後台套用預設日期篩選；
+    中文不轉碼，表格才顯示得出姓名。"""
+    phone = str(phone or "").strip()
+    name = "" if phone else str(name or "").strip()
+    if not phone and not name:
+        return None
+    params = dict(PURCHASE_FILTER_PARAMS_TEMPLATE, phone=phone, name=name)
+    return f"{base_url}/purchase?" + "&".join(f"{k}={v}" for k, v in params.items())
 
 
 def _calendar_search_url(name, phone):
@@ -129,7 +136,7 @@ _COLUMN_CONFIG = {
         "訂單編號", display_text=r"orderNo=(.+)$", help="點擊開啟後台該筆訂單"),
     "姓名": st.column_config.TextColumn("姓名", width="small"),
     "會員": st.column_config.LinkColumn(
-        "電話／會員", display_text=r"keyword=(.+)$", help="點擊開啟後台會員搜尋"),
+        "電話", display_text=r"[?&](?:phone|name)=([^&]+)", help="點擊開啟後台訂單管理，查此人的訂單"),
     "服務日期": st.column_config.TextColumn("服務日期", width="small"),
     "時段": st.column_config.TextColumn("時段", width="small"),
     "區域": st.column_config.TextColumn("區域", width="small"),
@@ -167,7 +174,7 @@ def _render_result(cc_result, base_url):
     m1.metric("後台重複（組）", n_dup)
     m2.metric("後台有、日曆沒有", n_bm)
     m3.metric("日曆有、後台沒有", n_cm)
-    st.caption("訂單編號 → 後台訂單；電話 → 後台會員；🔍 → Google 日曆搜尋此人（需在日曆勾選該區日曆才搜得到）。")
+    st.caption("訂單編號 → 後台訂單；電話 → 後台訂單管理查此人訂單；🔍 → Google 日曆搜尋此人（需在日曆勾選該區日曆才搜得到）。")
 
     base_cols = ["訂單編號", "姓名", "會員", "服務日期", "時段", "區域", "地址"]
     tab_specs = [
