@@ -2,11 +2,12 @@
 """後台／Google 日曆雙向比對。"""
 
 from datetime import date, timedelta
+from urllib.parse import quote
 
 import streamlit as st
 
+from shared.env_config import compute_env_urls
 from orders import (
-    format_calendar_consistency_issue,
     get_calendar_compare_allowed_region,
     run_backend_calendar_consistency_check,
 )
@@ -63,24 +64,124 @@ def render(backend_email, backend_password, env, google_calendar_map):
 
     cc_result = st.session_state.get("cc_result")
     if cc_result:
-        st.markdown("#### 檢查結果")
-        _backend_missing = cc_result.get("backend_missing_in_calendar") or []
-        _calendar_missing = cc_result.get("calendar_missing_in_backend") or []
-        _backend_duplicates = cc_result.get("backend_duplicates") or []
-        if not _backend_missing and not _calendar_missing and not _backend_duplicates:
-            st.success("✅ 檢查通過，後台已付款訂單與 Google 日曆黃色事件皆一一對應。")
-        else:
-            if _backend_duplicates:
-                st.error(f"⚠️ 後台同人同址同日期時段重複：{len(_backend_duplicates)} 組")
-                for _p in _backend_duplicates:
-                    st.warning(format_calendar_consistency_issue(_p))
-            if _backend_missing:
-                st.error(f"⚠️ 後台有、日曆沒有：{len(_backend_missing)} 筆")
-                for _p in _backend_missing:
-                    st.warning(format_calendar_consistency_issue(_p))
-            if _calendar_missing:
-                st.error(f"⚠️ 日曆有、後台沒有：{len(_calendar_missing)} 筆")
-                for _p in _calendar_missing:
-                    st.warning(format_calendar_consistency_issue(_p))
-                    if _p.get("event_link"):
-                        st.link_button("開啟日曆事件", _p["event_link"], key=f"cc_event_{_p.get('event_link')}")
+        _render_result(cc_result, compute_env_urls(env)["BASE_URL"])
+
+
+# ---------- 檢查結果：表格呈現＋後台／會員／日曆連結 ----------
+
+CALENDAR_SEARCH_URL = "https://calendar.google.com/calendar/r/search?q="
+
+
+def _order_url(base_url, order_no):
+    order_no = str(order_no or "").strip()
+    return f"{base_url}/purchase?orderNo={order_no}" if order_no else None
+
+
+def _member_url(base_url, phone, name):
+    """後台會員搜尋：有電話用電話，沒有才用姓名（中文不轉碼，表格才顯示得出姓名）。"""
+    keyword = str(phone or "").strip() or str(name or "").strip()
+    return f"{base_url}/member?keyword={keyword}" if keyword else None
+
+
+def _calendar_search_url(name, phone):
+    """Google 日曆搜尋該客人；日曆事件標題是「姓名-地址標籤,電話」，以姓名搜尋最穩。"""
+    keyword = str(name or "").strip() or str(phone or "").strip()
+    return CALENDAR_SEARCH_URL + quote(keyword) if keyword else None
+
+
+def build_issue_rows(cc_result, base_url):
+    """把比對結果整理成三張表的列（純函式，方便測試）。"""
+    def row(item, order_no, extra=None):
+        out = {
+            "訂單編號": _order_url(base_url, order_no),
+            "姓名": item.get("name", "") or "",
+            "會員": _member_url(base_url, item.get("phone"), item.get("name")),
+            "服務日期": item.get("service_date", ""),
+            "時段": item.get("service_time", ""),
+            "區域": item.get("region", ""),
+            "地址": item.get("address", ""),
+            "異常說明": item.get("reason") or item.get("issue", ""),
+            "查日曆": _calendar_search_url(item.get("name"), item.get("phone")),
+        }
+        out.update(extra or {})
+        return out
+
+    duplicates = []
+    for idx, item in enumerate(cc_result.get("backend_duplicates") or [], 1):
+        for order_no in item.get("order_nos") or []:
+            duplicates.append(row(item, order_no, {"組別": f"第 {idx} 組"}))
+    backend_missing = [row(item, item.get("order_no"))
+                       for item in cc_result.get("backend_missing_in_calendar") or []]
+    calendar_missing = [row(item, item.get("order_no"), {
+        "日曆事件": item.get("event_link") or None,
+        "日曆標題": item.get("event_summary", ""),
+    }) for item in cc_result.get("calendar_missing_in_backend") or []]
+    return {
+        "duplicates": duplicates,
+        "backend_missing": backend_missing,
+        "calendar_missing": calendar_missing,
+    }
+
+
+_COLUMN_CONFIG = {
+    "組別": st.column_config.TextColumn("組別", width="small"),
+    "訂單編號": st.column_config.LinkColumn(
+        "訂單編號", display_text=r"orderNo=(.+)$", help="點擊開啟後台該筆訂單"),
+    "姓名": st.column_config.TextColumn("姓名", width="small"),
+    "會員": st.column_config.LinkColumn(
+        "電話／會員", display_text=r"keyword=(.+)$", help="點擊開啟後台會員搜尋"),
+    "服務日期": st.column_config.TextColumn("服務日期", width="small"),
+    "時段": st.column_config.TextColumn("時段", width="small"),
+    "區域": st.column_config.TextColumn("區域", width="small"),
+    "地址": st.column_config.TextColumn("地址", width="large"),
+    "異常說明": st.column_config.TextColumn("異常說明", width="medium"),
+    "查日曆": st.column_config.LinkColumn(
+        "日曆", display_text="🔍 查此人", help="在 Google 日曆搜尋這位客人"),
+    "日曆事件": st.column_config.LinkColumn("日曆事件", display_text="📅 開啟事件"),
+    "日曆標題": st.column_config.TextColumn("日曆標題", width="medium"),
+}
+
+
+def _issue_table(rows, columns, key):
+    st.dataframe(
+        [{c: r.get(c) for c in columns} for r in rows],
+        column_config={c: _COLUMN_CONFIG[c] for c in columns},
+        column_order=columns,
+        hide_index=True,
+        width="stretch",
+        key=key,
+    )
+
+
+def _render_result(cc_result, base_url):
+    st.markdown("#### 檢查結果")
+    tables = build_issue_rows(cc_result, base_url)
+    n_dup = len(cc_result.get("backend_duplicates") or [])
+    n_bm = len(tables["backend_missing"])
+    n_cm = len(tables["calendar_missing"])
+    if not (n_dup or n_bm or n_cm):
+        st.success("✅ 檢查通過，後台已付款訂單與 Google 日曆黃色事件皆一一對應。")
+        return
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("後台重複（組）", n_dup)
+    m2.metric("後台有、日曆沒有", n_bm)
+    m3.metric("日曆有、後台沒有", n_cm)
+    st.caption("訂單編號 → 後台訂單；電話 → 後台會員；🔍 → Google 日曆搜尋此人（需在日曆勾選該區日曆才搜得到）。")
+
+    base_cols = ["訂單編號", "姓名", "會員", "服務日期", "時段", "區域", "地址"]
+    tab_specs = [
+        (f"後台重複（{n_dup}）", tables["duplicates"],
+         ["組別"] + base_cols + ["查日曆"], "cc_tbl_dup"),
+        (f"後台有、日曆沒有（{n_bm}）", tables["backend_missing"],
+         base_cols + ["異常說明", "查日曆"], "cc_tbl_bm"),
+        (f"日曆有、後台沒有（{n_cm}）", tables["calendar_missing"],
+         ["日曆事件", "日曆標題"] + base_cols + ["異常說明", "查日曆"], "cc_tbl_cm"),
+    ]
+    tabs = st.tabs([label for label, *_ in tab_specs])
+    for tab, (label, rows, columns, key) in zip(tabs, tab_specs):
+        with tab:
+            if rows:
+                _issue_table(rows, columns, key)
+            else:
+                st.success("沒有異常")

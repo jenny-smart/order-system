@@ -3602,6 +3602,7 @@ def run_backend_calendar_consistency_check(env_name, backend_email, backend_pass
             "region": first["region"],
             "service_date": first["service_date"],
             "service_time": first["service_time"],
+            "reason": f"後台同人同址同時段重複 {len(group)} 筆",
             "issue": (
                 f"後台同一人／地址／日期／時段有 {len(group)} 筆訂單："
                 f"{', '.join(order_nos)}（{first['name'] or first['phone'] or '人員不明'}，"
@@ -3646,6 +3647,7 @@ def run_backend_calendar_consistency_check(env_name, backend_email, backend_pass
                                    if _event_addr_core_match(order["address"], e)), None)
         if same_person_event:
             calendar_label = _event_address_label(same_person_event) or "未標示地址"
+            short_reason = f"同人同時段，但地址不同（日曆標示「{calendar_label}」）"
             reason = (
                 f"後台訂單 {order['order_no']} 是 {order['service_date']} {order['service_time']}；"
                 f"同一人、同日期時段，但地址不同：日曆標示「{calendar_label}」，"
@@ -3653,12 +3655,14 @@ def run_backend_calendar_consistency_check(env_name, backend_email, backend_pass
             )
             reported_event_ids.add(same_person_event.get("id"))
         elif same_address_event:
+            short_reason = "同址同時段，但日曆是其他客人"
             reason = (
                 f"後台訂單 {order['order_no']} 是 {order['service_date']} {order['service_time']}；"
                 "同地址、同日期時段，但日曆是其他客人。"
             )
             reported_event_ids.add(same_address_event.get("id"))
         else:
+            short_reason = "日曆找不到同人同址同時段的黃色事件"
             reason = (
                 f"後台訂單 {order['order_no']} 是 {order['service_date']} {order['service_time']}，"
                 "日曆找不到同一人、同地址、相同日期與時段的黃色事件。"
@@ -3671,6 +3675,7 @@ def run_backend_calendar_consistency_check(env_name, backend_email, backend_pass
             "region": order["region"],
             "service_date": order["service_date"],
             "service_time": order["service_time"],
+            "reason": short_reason,
             "issue": reason,
         })
 
@@ -3715,6 +3720,7 @@ def run_backend_calendar_consistency_check(env_name, backend_email, backend_pass
                 "service_date": service_date,
                 "service_time": service_time,
                 "event_link": event.get("htmlLink", ""),
+                "reason": reason.rstrip("。"),
                 "issue": (
                     f"{reason} {r}日曆黃色事件「{summary}」"
                     f"（{event_name or '姓名不明'}，{event_phone or '電話不明'}，"
