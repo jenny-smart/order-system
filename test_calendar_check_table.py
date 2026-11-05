@@ -28,12 +28,15 @@ class CalendarCheckTableTest(unittest.TestCase):
         self.assertEqual([r['訂單編號'] for r in rows],
                          [f'{BASE}/purchase?orderNo=LC001', f'{BASE}/purchase?orderNo=LC002'])
         self.assertEqual(rows[0]['組別'], '第 1 組')
-        self.assertEqual(rows[0]['會員'], f'{BASE}/member?keyword=0935973225')
+        self.assertTrue(rows[0]['會員'].startswith(f'{BASE}/purchase?'))
+        self.assertIn('&phone=0935973225&', rows[0]['會員'])
+        self.assertIn('clean_date_s=&', rows[0]['會員'])
         self.assertIn('calendar.google.com', rows[0]['查日曆'])
 
     def test_member_link_falls_back_to_name_and_short_reason_used(self):
         row = build_issue_rows(self.result, BASE)['backend_missing'][0]
-        self.assertEqual(row['會員'], f'{BASE}/member?keyword=李明達')
+        self.assertIn('name=李明達', row['會員'])
+        self.assertIn('phone=&', row['會員'])
         self.assertEqual(row['異常說明'], '日曆找不到同人同址同時段的黃色事件')
 
     def test_calendar_only_row_has_event_link_and_no_order_link(self):
