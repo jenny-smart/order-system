@@ -1095,8 +1095,11 @@ def auto_match_bank_rows(
 # -----------------------------------------------------------------------------
 # 待付款清單查詢
 # -----------------------------------------------------------------------------
-def search_atm_unpaid_orders(session, date_until: Optional[str] = None, ui_logger=None) -> List[Dict]:
+def search_atm_unpaid_orders(session, date_until: Optional[str] = None, ui_logger=None,
+                             date_since: Optional[str] = None) -> List[Dict]:
     """
+    date_since：訂購日期起（排程同步用；手動查詢不帶＝不限起日）。
+
     v2026-07-07 修正：date_until 改成可選參數，沒有傳入時自動用
     default_date_until_tw()（台灣時區的前一天）當預設值，不再依賴呼叫端
     自己算「前一天」——避免呼叫端用 date.today() - timedelta(1)（在
@@ -1108,7 +1111,7 @@ def search_atm_unpaid_orders(session, date_until: Optional[str] = None, ui_logge
     url = f"{memo.BASE_URL}/purchase"
     params = {
         "keyword": "", "name": "", "phone": "", "orderNo": "",
-        "date_s": "", "date_e": date_until,
+        "date_s": date_since or "", "date_e": date_until,
         "clean_date_s": "", "clean_date_e": "",
         "paid_at_s": "", "paid_at_e": "",
         "refundDateS": "", "refundDateE": "",
@@ -1121,7 +1124,7 @@ def search_atm_unpaid_orders(session, date_until: Optional[str] = None, ui_logge
         "p_board": "on",        # 訂單統計表
     }
 
-    log(f"===== 查詢 ATM 待付款名單（訂購日期迄：{date_until}）=====")
+    log(f"===== 查詢 ATM 待付款名單（訂購日期：{date_since or '不限'}～{date_until}）=====")
     r = memo.session_get(session, url, params=params)
     r.raise_for_status()
 
@@ -1170,7 +1173,11 @@ def search_atm_unpaid_orders(session, date_until: Optional[str] = None, ui_logge
 
 
 def paste_atm_unpaid_list(region: str, rows: List[Dict], ui_logger=None) -> Dict:
-    """新增未出現的待付款訂單；J 欄去重範圍為 A 欄最後資料列以下，並回填 P/T。"""
+    """新增未出現的待付款訂單並回填 P/T。
+
+    去重檢查整個 ATM 分頁的 J 欄：同一張訂單只要已列過（不論在銀行明細區上方或下方）就不再新增。
+    （2026-11：原本只檢查 A 欄最後一筆以下，A 欄往下補資料後，11/02 已列過的待付款訂單又被重列。）
+    """
     log = make_logger(ui_logger)
     result = {"pasted": 0, "skipped_duplicates": 0, "start_row": None, "errors": []}
 
@@ -1181,7 +1188,7 @@ def paste_atm_unpaid_list(region: str, rows: List[Dict], ui_logger=None) -> Dict
     ws = get_atm_worksheet(region)
     all_values = memo.with_retry(ws.get_all_values)
 
-    # 新增位置以 A 欄最後一筆＋5 列定位；去重只檢查 A 欄最後一筆以下的 J 欄。
+    # 新增位置以 A 欄最後一筆＋5 列定位；去重檢查整欄 J。
     last_a_row = max(
         (idx for idx, row in enumerate(all_values, start=1)
          if row and str(row[0]).strip()),
@@ -1191,14 +1198,14 @@ def paste_atm_unpaid_list(region: str, rows: List[Dict], ui_logger=None) -> Dict
     existing_order_nos = set()
     last_unpaid_row = 0
     for idx, row in enumerate(all_values, start=1):
+        order_no = row[9] if len(row) > 9 else ""
+        if str(order_no).strip():
+            existing_order_nos.add(str(order_no).strip())
         if idx <= last_a_row:
             continue
         i_to_l = row[8:12] if len(row) > 8 else []
         if any(str(value).strip() for value in i_to_l):
             last_unpaid_row = idx
-        order_no = row[9] if len(row) > 9 else ""
-        if str(order_no).strip():
-            existing_order_nos.add(str(order_no).strip())
 
     pending_rows = []
     seen_order_nos = set(existing_order_nos)
@@ -1340,9 +1347,33 @@ def flag_cancelled_pending_orders(region: str, session, ui_logger=None) -> Dict:
     return {"checked": checked, "flagged": len(updates)}
 
 
+def previous_workday(day) -> "date":
+    """day 前一個上班日（依辦公日曆；週六日、國定假日往前推，補班日算上班）。"""
+    from datetime import date as _date, timedelta as _td
+
+    if isinstance(day, str):
+        day = _date.fromisoformat(day)
+    try:
+        from shared.weekend_reminder_schedule import is_off_day, load_work_calendar
+
+        calendar = load_work_calendar()
+    except Exception:
+        calendar, is_off_day = {}, (lambda value, _cal: value.weekday() >= 5)
+    previous = day - _td(days=1)
+    while is_off_day(previous, calendar):
+        previous -= _td(days=1)
+    return previous
+
+
 def run_scheduled_unpaid_sync(ui_logger=None, date_until: Optional[str] = None) -> Dict:
-    """沿用 ATM 對帳查詢／貼上功能，排程同步台北與台中待付款清單。"""
+    """沿用 ATM 對帳查詢／貼上功能，排程同步台北與台中待付款清單。
+
+    只查訂購日期「前一個上班日～今天」的待付款：涵蓋前一天最後一次同步後、週末／國定假日的新訂單，
+    不再每次撈全部歷史待付款（舊單只靠去重擋，A 欄位置變動時曾被重列）。重疊部分由整欄 J 去重略過。
+    """
     log = make_logger(ui_logger)
+    date_until = date_until or today_tw().isoformat()
+    date_since = previous_workday(date_until).isoformat()
     results = {}
     errors = []
 
@@ -1369,7 +1400,7 @@ def run_scheduled_unpaid_sync(ui_logger=None, date_until: Optional[str] = None) 
                     region=region, session=session, ui_logger=ui_logger,
                 )
                 rows = search_atm_unpaid_orders(
-                    session=session, date_until=date_until or today_tw().isoformat(),
+                    session=session, date_until=date_until, date_since=date_since,
                     ui_logger=ui_logger,
                 )
                 results[region] = paste_atm_unpaid_list(
