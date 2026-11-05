@@ -2547,6 +2547,31 @@ def _line_urls_from_purchase_html(raw_html):
     return result
 
 
+def _calchk_line_url_by_phone(session, phone, cache):
+    """以電話查後台全部訂單（不限日期），取此人任一筆訂單卡片上的 LINE@ 連結；同電話只查一次。"""
+    phone_norm = normalize_phone(phone) if phone else ""
+    if not phone_norm:
+        return ""
+    if phone_norm in cache:
+        return cache[phone_norm]
+    url = ""
+    try:
+        params = dict(PURCHASE_FILTER_PARAMS_TEMPLATE)
+        params["phone"] = phone_norm
+        resp = session.get(PURCHASE_URL, params=params, headers=HEADERS, allow_redirects=True)
+        if resp.status_code == 200:
+            line_urls = _line_urls_from_purchase_html(resp.text)
+            for block in extract_order_cards_from_purchase_html(resp.text):
+                compact = re.sub(r"[\s\-－]", "", "\n".join(block.get("lines", [])))
+                if phone_norm in compact and line_urls.get(block.get("order_no", "")):
+                    url = line_urls[block["order_no"]]
+                    break
+    except Exception:
+        url = ""
+    cache[phone_norm] = url
+    return url
+
+
 def _fetch_all_purchase_blocks_by_date_range(session, date_s, date_e, purchase_status="1", max_pages=80):
     """
     v2026.07.09：依服務日期區間（clean_date_s ~ clean_date_e）查詢後台「全部」
@@ -3698,6 +3723,8 @@ def run_backend_calendar_consistency_check(env_name, backend_email, backend_pass
         })
 
     # ---------- 方向二：日曆有、後台沒有 ----------
+    # 對不到後台訂單時，用日曆上的電話查此人其他訂單補 LINE@ 連結。
+    line_url_cache = {}
     for r, events in calendar_events_by_region.items():
         for event in events:
             if event.get("id") in matched_event_ids or event.get("id") in reported_event_ids:
@@ -3738,7 +3765,10 @@ def run_backend_calendar_consistency_check(env_name, backend_email, backend_pass
                 "service_date": service_date,
                 "service_time": service_time,
                 "event_link": event.get("htmlLink", ""),
-                "line_url": related_order.get("line_url", "") if related_order else "",
+                "line_url": (
+                    (related_order.get("line_url", "") if related_order else "")
+                    or _calchk_line_url_by_phone(session, event_phone, line_url_cache)
+                ),
                 "reason": reason.rstrip("。"),
                 "issue": (
                     f"{reason} {r}日曆黃色事件「{summary}」"

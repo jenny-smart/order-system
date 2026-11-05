@@ -153,7 +153,8 @@ _COLUMN_CONFIG = {
 
 def _issue_table(rows, columns, key):
     st.dataframe(
-        [{c: r.get(c) for c in columns} for r in rows],
+        # 空連結給空字串，表格不會顯示灰色的「None」
+        [{c: (r.get(c) if r.get(c) is not None else "") for c in columns} for r in rows],
         column_config={c: _COLUMN_CONFIG[c] for c in columns},
         column_order=columns,
         hide_index=True,
@@ -185,7 +186,7 @@ def _render_result(cc_result, base_url):
         (f"後台有、日曆沒有（{n_bm}）", tables["backend_missing"],
          base_cols + ["異常說明", "查日曆"], "cc_tbl_bm"),
         (f"日曆有、後台沒有（{n_cm}）", tables["calendar_missing"],
-         ["日曆事件", "日曆標題"] + base_cols + ["異常說明", "查日曆"], "cc_tbl_cm"),
+         ["查日曆", "日曆標題"] + base_cols + ["異常說明"], "cc_tbl_cm"),
     ]
     tabs = st.tabs([label for label, *_ in tab_specs])
     for tab, (label, rows, columns, key) in zip(tabs, tab_specs):

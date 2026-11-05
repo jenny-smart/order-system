@@ -55,5 +55,25 @@ class CalendarCheckTableTest(unittest.TestCase):
         self.assertEqual(row['日曆事件'], 'https://cal/e1')
 
 
+class LineUrlByPhoneTest(unittest.TestCase):
+    def test_looks_up_line_by_phone_once_and_requires_phone_match(self):
+        import orders
+        from unittest.mock import MagicMock, patch
+        html = ('<table><tr><td>LC00100001</td><td>別人</td><td>0987654321</td>'
+                '<td><a href="https://chat.line.biz/x/chat/Uother">LINE</a></td></tr>'
+                '<tr><td>LC00100002</td><td>張惠萍</td><td>0911-244-526</td>'
+                '<td><a href="https://chat.line.biz/x/chat/Uzhang">LINE</a></td></tr></table>')
+        session = MagicMock()
+        session.get.return_value = MagicMock(status_code=200, text=html)
+        cache = {}
+        with patch.object(orders, 'PURCHASE_URL', 'https://b/purchase'):
+            self.assertEqual(orders._calchk_line_url_by_phone(session, '0911244526', cache),
+                             'https://chat.line.biz/x/chat/Uzhang')
+            orders._calchk_line_url_by_phone(session, '0911244526', cache)
+        self.assertEqual(session.get.call_count, 1)
+        self.assertEqual(session.get.call_args.kwargs['params']['phone'], '0911244526')
+        self.assertEqual(orders._calchk_line_url_by_phone(session, '', cache), '')
+
+
 if __name__ == '__main__':
     unittest.main()
