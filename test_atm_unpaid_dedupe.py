@@ -46,3 +46,36 @@ def test_new_order_still_added_below_pending_rows():
     assert result["pasted"] == 1 and result["skipped_duplicates"] == 1
     ranges = [u["range"] for u in ws.batch_update.call_args.args[0]]
     assert ranges[0] == "I10:L10"  # 王蘭香（第 9 列）下方
+
+
+def test_previous_workday_skips_weekends_and_holidays():
+    assert str(atm.previous_workday("2026-11-05")) == "2026-11-04"   # 週四 → 週三
+    assert str(atm.previous_workday("2026-11-09")) == "2026-11-06"   # 週一 → 上週五
+    assert str(atm.previous_workday("2027-02-11")) == "2027-02-03"   # 春節連假後 → 連假前
+
+
+def test_scheduled_sync_limits_order_date_range():
+    calls = {}
+
+    def search(session, date_until=None, ui_logger=None, date_since=None):
+        calls[date_until] = date_since
+        return []
+
+    session = Mock()
+    with patch.object(atm, "search_atm_unpaid_orders", side_effect=search), \
+            patch.object(atm, "flag_cancelled_pending_orders", return_value={}), \
+            patch.object(atm, "paste_atm_unpaid_list", return_value={"pasted": 0}), \
+            patch.object(atm.memo, "set_runtime_credentials"), \
+            patch.object(atm.memo, "login", return_value=session), \
+            patch.dict("accounts.ACCOUNTS", {"台北": {"email": "a", "password": "b"}, "台中": {"email": "c", "password": "d"}}):
+        atm.run_scheduled_unpaid_sync(date_until="2026-11-09")
+    assert calls == {"2026-11-09": "2026-11-06"}
+
+
+def test_search_sends_order_date_start():
+    session = Mock()
+    response = Mock(text="<html></html>")
+    with patch.object(atm.memo, "session_get", return_value=response) as get:
+        atm.search_atm_unpaid_orders(session, date_until="2026-11-05", date_since="2026-11-04")
+    params = get.call_args.kwargs["params"]
+    assert params["date_s"] == "2026-11-04" and params["date_e"] == "2026-11-05"
