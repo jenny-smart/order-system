@@ -1528,6 +1528,8 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         if search_btn:
             try:
                 st.session_state.logs = []; st.session_state.co_phone_orders = []; st.session_state.co_calc_rows = []
+                for _k in [k for k in st.session_state.keys() if str(k).startswith("co_order_pick_")]:
+                    del st.session_state[_k]
                 co_log("===== 開始查詢訂單 =====")
                 with st.spinner("查詢中，請稍候…"):
                     session = get_session(ui_logger=co_log)
@@ -1549,7 +1551,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         for o in orders:
             service_date_text = o["service_date"].strftime("%Y-%m-%d") if o.get("service_date") else "（無日期資訊）"
             label = f"{o['order_no']}　{o.get('customer_name','')}　服務日期：{service_date_text}　時數：{o.get('service_hours',0)}小時　人數：{o.get('cleaner_count',0)}人　總金額：${o.get('total',0)}"
-            if st.checkbox(label, value=True, key=f"co_order_pick_{o['order_no']}"): selected_orders.append(o)
+            if st.checkbox(label, value=False, key=f"co_order_pick_{o['order_no']}"): selected_orders.append(o)
 
         if not selected_orders:
             st.info("請至少勾選一筆訂單再繼續。"); return

@@ -149,3 +149,19 @@ def test_time_zero_padding_is_not_reported_as_change():
     }}]
     updates, _, _ = build_source_writeback([group], results, [])
     assert updates[2]["異動檢查"] == "一致"
+
+
+def test_calendar_status_marks_without_filtering():
+    from shared.line_notice_sheet import calendar_status_for_result, CALENDAR_FOUND, CALENDAR_NOT_APPLICABLE
+    orders_module = SimpleNamespace(
+        get_region_by_address=lambda address, accounts: "台北",
+        get_date_str=lambda value: value,
+        find_matching_calendar_event=Mock(side_effect=lambda svc, cid, addr, d, s, e: {"id": 1} if d == "2026-11-20" else None),
+    )
+    service = Mock()
+    service.events.return_value.list.return_value.execute.return_value = {"items": []}
+    found = {"order_no": "LC1", "date": "2026-11-20", "period_s": "09:00 - 12:00", "address": "台北市A"}
+    assert calendar_status_for_result(found, orders_module, service, {"台北": "cal"}, {}) == CALENDAR_FOUND
+    missing = dict(found, date="2026-11-21")
+    assert calendar_status_for_result(missing, orders_module, service, {"台北": "cal"}, {}).startswith("⚠️")
+    assert calendar_status_for_result({"is_stored_value_purchase": True}, orders_module, service, {}, {}) == CALENDAR_NOT_APPLICABLE
