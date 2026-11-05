@@ -79,3 +79,55 @@ def test_search_sends_order_date_start():
         atm.search_atm_unpaid_orders(session, date_until="2026-11-05", date_since="2026-11-04")
     params = get.call_args.kwargs["params"]
     assert params["date_s"] == "2026-11-04" and params["date_e"] == "2026-11-05"
+
+
+def test_confirm_unpaid_rows_drops_paid_and_failed_lookups():
+    statuses = {"LC1": {"purchase_status": 0}, "LC2": {"purchase_status": "1"}, "LC3": None}
+
+    def lookup(_session, order_no):
+        if order_no == "LC4":
+            raise RuntimeError("timeout")
+        return statuses[order_no]
+
+    rows = [_item(no, "客人") for no in ("LC1", "LC2", "LC3", "LC4")]
+    with patch.object(atm, "find_purchase_by_order_no", side_effect=lookup):
+        kept = atm.confirm_unpaid_rows(Mock(), rows)
+    assert [row["order_no"] for row in kept] == ["LC1"]
+
+
+def test_scheduled_sync_pastes_only_confirmed_rows():
+    pasted = {}
+    session = Mock()
+    with patch.object(atm, "search_atm_unpaid_orders", return_value=[_item("LC1", "甲"), _item("LC2", "黃妙禎")]), \
+            patch.object(atm, "find_purchase_by_order_no",
+                         side_effect=lambda _s, no: {"purchase_status": "0" if no == "LC1" else "1"}), \
+            patch.object(atm, "flag_cancelled_pending_orders", return_value={}), \
+            patch.object(atm, "paste_atm_unpaid_list",
+                         side_effect=lambda region, rows, ui_logger=None: pasted.setdefault(region, rows) and {"pasted": len(rows)}), \
+            patch.object(atm.memo, "set_runtime_credentials"), \
+            patch.object(atm.memo, "login", return_value=session), \
+            patch.dict("accounts.ACCOUNTS", {"台北": {"email": "a", "password": "b"}, "台中": {"email": "c", "password": "d"}}):
+        atm.run_scheduled_unpaid_sync(date_until="2026-11-05")
+    assert [row["order_no"] for row in pasted["台北"]] == ["LC1"]
+
+
+def test_paid_at_counts_as_paid_even_if_status_zero():
+    assert atm.unpaid_block_reason({"purchase_status": 0, "paid_at": "2026-11-05 08:38:37"}).startswith("已付款")
+    assert atm.unpaid_block_reason({"purchase_status": "0", "paid_at": ""}) == ""
+    assert atm.unpaid_block_reason({"purchase_status": "0", "paid_at": None}) == ""
+    assert atm.unpaid_block_reason({"purchase_status": "1"}) == "已付款"
+    assert atm.unpaid_block_reason(None) == "查無訂單"
+
+
+def test_search_skips_status_zero_with_paid_date():
+    import json
+    payload = {"data": [
+        {"order_no": "LC00219397", "name": "黃妙禎", "purchase_status": 0, "paid_at": "2026-11-05 08:38:37",
+         "date_clean": "2026-11-26", "total": 4800, "fare": 0},
+        {"order_no": "LC00219999", "name": "新客人", "purchase_status": 0, "paid_at": None,
+         "date_clean": "2026-11-20", "total": 2400, "fare": 0},
+    ]}
+    with patch.object(atm.memo, "session_get", return_value=Mock(text="x")), \
+            patch.object(atm, "extract_purchase_list_json", return_value=payload):
+        rows = atm.search_atm_unpaid_orders(Mock(), date_until="2026-11-05")
+    assert [row["order_no"] for row in rows] == ["LC00219999"]
