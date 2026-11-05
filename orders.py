@@ -2535,6 +2535,18 @@ def run_process_web(env_name, region, backend_email, backend_password, sheet_nam
     }
 
 
+def _line_urls_from_purchase_html(raw_html):
+    """後台 /purchase 列表每列訂單的客人 LINE@ 聊天連結（chat.line.biz）：{訂單編號: 網址}。"""
+    result = {}
+    soup = BeautifulSoup(raw_html, "html.parser")
+    for tr in soup.find_all("tr"):
+        match = re.search(ORDER_NO_REGEX, tr.get_text(" ", strip=True))
+        link = tr.find("a", href=re.compile(r"chat\.line\.biz")) if match else None
+        if link:
+            result.setdefault(match.group(0), str(link.get("href") or "").strip())
+    return result
+
+
 def _fetch_all_purchase_blocks_by_date_range(session, date_s, date_e, purchase_status="1", max_pages=80):
     """
     v2026.07.09：依服務日期區間（clean_date_s ~ clean_date_e）查詢後台「全部」
@@ -2559,6 +2571,9 @@ def _fetch_all_purchase_blocks_by_date_range(session, date_s, date_e, purchase_s
         blocks = extract_order_cards_from_purchase_html(resp.text)
         if not blocks:
             break
+        line_urls = _line_urls_from_purchase_html(resp.text)
+        for block in blocks:
+            block.setdefault("line_url", line_urls.get(block.get("order_no", ""), ""))
         all_blocks.extend(blocks)
         if len(blocks) < 20:
             break
@@ -3447,6 +3462,7 @@ def run_backend_calendar_consistency_check(env_name, backend_email, backend_pass
             "region": order_region,
             "service_date": service_date,
             "service_time": service_time,
+            "line_url": block.get("line_url", ""),
         })
 
     # ---------- 日曆：抓這段期間內每個區域的黃色事件 ----------
@@ -3596,6 +3612,7 @@ def run_backend_calendar_consistency_check(env_name, backend_email, backend_pass
         duplicate_order_nos.update(order_nos)
         result["backend_duplicates"].append({
             "order_nos": order_nos,
+            "line_url": next((item.get("line_url") for item in group if item.get("line_url")), ""),
             "name": first["name"],
             "phone": first["phone"],
             "address": first["address"],
@@ -3675,6 +3692,7 @@ def run_backend_calendar_consistency_check(env_name, backend_email, backend_pass
             "region": order["region"],
             "service_date": order["service_date"],
             "service_time": order["service_time"],
+            "line_url": order.get("line_url", ""),
             "reason": short_reason,
             "issue": reason,
         })
@@ -3720,6 +3738,7 @@ def run_backend_calendar_consistency_check(env_name, backend_email, backend_pass
                 "service_date": service_date,
                 "service_time": service_time,
                 "event_link": event.get("htmlLink", ""),
+                "line_url": related_order.get("line_url", "") if related_order else "",
                 "reason": reason.rstrip("。"),
                 "issue": (
                     f"{reason} {r}日曆黃色事件「{summary}」"
