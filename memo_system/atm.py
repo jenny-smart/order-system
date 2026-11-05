@@ -1347,6 +1347,32 @@ def flag_cancelled_pending_orders(region: str, session, ui_logger=None) -> Dict:
     return {"checked": checked, "flagged": len(updates)}
 
 
+def confirm_unpaid_rows(session, rows: List[Dict], ui_logger=None) -> List[Dict]:
+    """貼上前逐張用訂單編號再查一次，只保留仍是待付款（purchase_status 0）的訂單。
+
+    2026-11-05：已付款（08:38 已執行已付款）的訂單 15:00 仍出現在待付款清單結果裡被貼上；
+    單張查詢與「取消訂單複查」用同一個 find_purchase_by_order_no。查詢失敗的訂單這次不貼，下次再試。
+    """
+    log = make_logger(ui_logger)
+    confirmed = []
+    for row in rows:
+        order_no = str(row.get("order_no") or "").strip()
+        try:
+            purchase = find_purchase_by_order_no(session, order_no) if order_no else None
+        except Exception as exc:
+            log(f"⚠️ {order_no} 單張複查失敗，這次不貼：{exc}")
+            continue
+        raw_status = purchase.get("purchase_status") if purchase else None
+        status_code = "" if raw_status is None else str(raw_status).strip()
+        if status_code == "0":
+            confirmed.append(row)
+            continue
+        status_name = {"1": "已付款", "2": "取消訂單", "3": "已退款"}.get(status_code, "查無訂單" if not purchase else "未知狀態")
+        log(f"⚠️ 略過 {order_no} {row.get('name', '')}：單張複查狀態為「{status_name}」")
+    log(f"單張複查完成：{len(confirmed)}／{len(rows)} 筆確認仍待付款")
+    return confirmed
+
+
 def previous_workday(day) -> "date":
     """day 前一個上班日（依辦公日曆；週六日、國定假日往前推，補班日算上班）。"""
     from datetime import date as _date, timedelta as _td
@@ -1403,6 +1429,7 @@ def run_scheduled_unpaid_sync(ui_logger=None, date_until: Optional[str] = None) 
                     session=session, date_until=date_until, date_since=date_since,
                     ui_logger=ui_logger,
                 )
+                rows = confirm_unpaid_rows(session, rows, ui_logger=ui_logger)
                 results[region] = paste_atm_unpaid_list(
                     region=region, rows=rows, ui_logger=ui_logger,
                 )
