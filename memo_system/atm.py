@@ -1170,7 +1170,11 @@ def search_atm_unpaid_orders(session, date_until: Optional[str] = None, ui_logge
 
 
 def paste_atm_unpaid_list(region: str, rows: List[Dict], ui_logger=None) -> Dict:
-    """新增未出現的待付款訂單；J 欄去重範圍為 A 欄最後資料列以下，並回填 P/T。"""
+    """新增未出現的待付款訂單並回填 P/T。
+
+    去重檢查整個 ATM 分頁的 J 欄：同一張訂單只要已列過（不論在銀行明細區上方或下方）就不再新增。
+    （2026-11：原本只檢查 A 欄最後一筆以下，A 欄往下補資料後，11/02 已列過的待付款訂單又被重列。）
+    """
     log = make_logger(ui_logger)
     result = {"pasted": 0, "skipped_duplicates": 0, "start_row": None, "errors": []}
 
@@ -1181,7 +1185,7 @@ def paste_atm_unpaid_list(region: str, rows: List[Dict], ui_logger=None) -> Dict
     ws = get_atm_worksheet(region)
     all_values = memo.with_retry(ws.get_all_values)
 
-    # 新增位置以 A 欄最後一筆＋5 列定位；去重只檢查 A 欄最後一筆以下的 J 欄。
+    # 新增位置以 A 欄最後一筆＋5 列定位；去重檢查整欄 J。
     last_a_row = max(
         (idx for idx, row in enumerate(all_values, start=1)
          if row and str(row[0]).strip()),
@@ -1191,14 +1195,14 @@ def paste_atm_unpaid_list(region: str, rows: List[Dict], ui_logger=None) -> Dict
     existing_order_nos = set()
     last_unpaid_row = 0
     for idx, row in enumerate(all_values, start=1):
+        order_no = row[9] if len(row) > 9 else ""
+        if str(order_no).strip():
+            existing_order_nos.add(str(order_no).strip())
         if idx <= last_a_row:
             continue
         i_to_l = row[8:12] if len(row) > 8 else []
         if any(str(value).strip() for value in i_to_l):
             last_unpaid_row = idx
-        order_no = row[9] if len(row) > 9 else ""
-        if str(order_no).strip():
-            existing_order_nos.add(str(order_no).strip())
 
     pending_rows = []
     seen_order_nos = set(existing_order_nos)
