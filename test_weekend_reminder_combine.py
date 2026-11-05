@@ -124,3 +124,14 @@ def test_lemon_detected_from_backend_card(monkeypatch):
     monkeypatch.setattr(wr, "_configure_backend", lambda _env: None)
     rows, _ = find_paid_weekend_orders("dev", "a", "b", "2026-11-07", "2026-11-08")
     assert rows[0]["has_lemon"] is True and rows[0]["service_time"] == "09:00-18:00"
+
+
+def test_same_slot_different_addresses_combined_not_treated_as_overlap():
+    rows = _merged([
+        _item("LC1", "2026-11-07", "09:00-12:00", lemon=True),
+        _item("LC2", "2026-11-07", "09:00-12:00", address=NANGANG),
+    ])
+    message = rows["LC1"]["通知內容"]
+    assert "服務時間及地址：\n11/7（六） 09:00-12:00　" + BEITOU + "\n11/7（六） 09:00-12:00　" + NANGANG in message
+    assert rows["LC1"]["回覆備註"] == "合併 2 筆：LC1、LC2"
+    assert rows["LC2"]["通知內容"] == "" and rows["LC2"]["回覆備註"] == "併入 LC1"
