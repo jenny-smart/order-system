@@ -1,22 +1,22 @@
-# 週末／例假日服務提醒：休假前 2 天台北時間 11:00 自動產生提醒名單
+# 週末／例假日服務提醒：休假前 2 天台北時間 11:00 產生提醒名單
 #
-# 每天 03:00 UTC（台北 11:00）啟動；shared/weekend_reminder_schedule.py 依辦公日曆
-# 判斷今天是不是「休假區段前 2 天」（一般是週四，遇國定假日依假期提前），不是就直接結束。
-# 是執行日時：用台北後台帳號查休假區段內已付款訂單，新增到「週末服務提醒」追蹤表，
-# 不發送 LINE。GitHub 排程可能延遲數分鐘到半小時。
+# 由 tool-system 的 Cloud Schedule Router 依主控表「排程設定」（功能代號 weekend_reminder）
+# 每天 11:00 派送過來（cron-job.org 準時觸發，不用 GitHub cron：新加的 GitHub 排程常延遲或不跑）。
+# shared/weekend_reminder_schedule.py 依辦公日曆判斷今天是不是「休假區段前 2 天」（一般週四，
+# 遇國定假日依假期提前），不是就直接結束。是執行日時：用台北後台帳號查休假區段內已付款訂單，
+# 新增到「週末服務提醒」追蹤表，不發送 LINE。也可以在這裡手動執行（指定日期、只查不寫）。
 #
 # 需要的 Secrets（與雲端批次成單相同）：GOOGLE_SERVICE_ACCOUNT_JSON、TAIPEI_EMAIL、TAIPEI_PASSWORD
 name: Weekend Reminder Schedule
-run-name: Weekend Reminder Schedule ${{ inputs.date }}
+run-name: ${{ inputs.scheduled_slot && format('cloud-{0}', inputs.scheduled_slot) || format('Weekend Reminder Schedule {0}', inputs.date) }}
 
 on:
-  schedule:
-    - cron: "0 3 * * *"
   workflow_dispatch:
     inputs:
       date: {description: "以這天當作執行日（YYYY-MM-DD，空白＝今天）", required: false, default: "", type: string}
       env: {description: prod / dev, required: false, default: "prod", type: string}
       dry_run: {description: 只查詢不寫入, required: false, default: false, type: boolean}
+      scheduled_slot: {description: 排程設定派送時段（手動執行請留空）, required: false, default: "", type: string}
 
 concurrency:
   group: weekend-reminder-schedule
