@@ -273,16 +273,23 @@ def _service_date_time(lines):
     return sms_date or service_date, sms_time or service_time
 
 
-def build_reminder_message(row, typhoon_reminder=False):
-    service_date = datetime.strptime(row["service_date"], "%Y-%m-%d").date()
-    weekdays = "一二三四五六日"
-    when = f"{service_date.month}/{service_date.day}（{weekdays[service_date.weekday()]}）"
-    if row.get("service_time"):
-        when += f" {row['service_time']}"
-    address_line = f"\n服務地址：{row['address']}" if row.get("address") else ""
+WEEKDAYS = "一二三四五六日"
+LEMON_STAFF_RE = re.compile(r"檸檬人\s*\d+")
+MERGED_NOTE_PREFIX = "併入 "
+OVERLAP_SKIP_NOTE_PREFIX = "時段重疊不另發"
+OVERLAP_CHECK_NOTE_PREFIX = "時段重疊待確認"
+
+
+def _when_text(service_date_text, service_time=""):
+    service_date = datetime.strptime(service_date_text, "%Y-%m-%d").date()
+    when = f"{service_date.month}/{service_date.day}（{WEEKDAYS[service_date.weekday()]}）"
+    return f"{when} {service_time}" if service_time else when
+
+
+def _reminder_text(detail, typhoon_reminder=False):
     message = (
         f"您好，這是週末/例假日的清潔服務提醒：\n\n"
-        f"服務時間：{when}{address_line}\n\n"
+        f"{detail}\n\n"
         "專員會在服務前5-10分鐘，以電話／門鈴／透過管理員等方式與您聯繫，"
         "煩請留意聯繫訊息。\n\n"
         "為確認您已收到提醒，請回覆「已收到」，謝謝您。"
@@ -301,6 +308,117 @@ def build_reminder_message(row, typhoon_reminder=False):
         "📅 例假日內勤人員休息通常不會處理訊息，您可以先留訊息待上班日上班時間處理喔，"
         "造成不便，尚請見諒，謝謝～"
     )
+
+
+def build_reminder_message(row, typhoon_reminder=False):
+    address_line = f"\n服務地址：{row['address']}" if row.get("address") else ""
+    detail = f"服務時間：{_when_text(row['service_date'], row.get('service_time', ''))}{address_line}"
+    return _reminder_text(detail, typhoon_reminder)
+
+
+def build_combined_reminder_message(rows, typhoon_reminder=False):
+    """同一人多筆：時間（與地址）併在同一則；地址都相同時只列一次。"""
+    rows = sorted(rows, key=lambda item: (item.get("service_date", ""), item.get("service_time", "")))
+    addresses = {_compact(item.get("address")) for item in rows}
+    if len(addresses) <= 1:
+        lines = [_when_text(item["service_date"], item.get("service_time", "")) for item in rows]
+        address = rows[0].get("address", "")
+        detail = "服務時間：\n" + "\n".join(lines) + (f"\n服務地址：{address}" if address else "")
+    else:
+        lines = [
+            f"{_when_text(item['service_date'], item.get('service_time', ''))}　{item.get('address', '')}".rstrip()
+            for item in rows
+        ]
+        detail = "服務時間及地址：\n" + "\n".join(lines)
+    return _reminder_text(detail, typhoon_reminder)
+
+
+def _compact(value):
+    return re.sub(r"\s+", "", str(value or ""))
+
+
+def _time_range(value):
+    match = re.search(r"(\d{1,2}):(\d{2})\s*[-~～]\s*(\d{1,2}):(\d{2})", str(value or ""))
+    if not match:
+        return None
+    h1, m1, h2, m2 = (int(part) for part in match.groups())
+    return h1 * 60 + m1, h2 * 60 + m2
+
+
+def _overlapping(a, b):
+    """同地址、同服務日、時段有交集。"""
+    if a.get("service_date") != b.get("service_date") or _compact(a.get("address")) != _compact(b.get("address")):
+        return False
+    ra, rb = _time_range(a.get("service_time")), _time_range(b.get("service_time"))
+    if not ra or not rb:
+        return True  # 同地址同日但時間看不懂，當作重疊交給規則／人工判斷
+    return ra[0] < rb[1] and rb[0] < ra[1]
+
+
+def _customer_key(item):
+    phone = re.sub(r"\D", "", str(item.get("phone") or ""))
+    return phone or str(item.get("name") or "").strip()
+
+
+def combine_customer_reminders(items, fixed_keys=(), typhoon_reminder=False):
+    """同一人多筆已付款訂單合併成一則提醒。
+
+    - 同地址且時間重疊：一筆有檸檬人、另一筆沒有 → 以沒有檸檬人的那筆時間為主，檸檬人那筆不另發；
+      兩筆都有或都沒有 → 兩個時段都列出，在主列備註「時段重疊待確認」。
+    - 其他（時間或地址不重疊）→ 時間與地址併在同一則，放在最早那筆；其他筆通知內容留空、備註「併入 主單號」。
+    fixed_keys：追蹤表已存在的列（不改內容，只用來判斷重疊）。
+    回傳 {order_key: {"message": ..., "note": ...}}，只含需要改變的新列。
+    """
+    fixed = set(fixed_keys or ())
+    groups = {}
+    for item in items:
+        if item.get("order_status", "已付款") != "已付款" or not item.get("service_date"):
+            continue
+        groups.setdefault(_customer_key(item), []).append(item)
+
+    result = {}
+    for group in groups.values():
+        if len(group) < 2:
+            continue
+        group = sorted(group, key=lambda item: (item.get("service_date", ""), item.get("service_time", ""), item.get("order_no", "")))
+        excluded, flagged = {}, set()
+        for i, a in enumerate(group):
+            for b in group[i + 1:]:
+                if not _overlapping(a, b):
+                    continue
+                if bool(a.get("has_lemon")) != bool(b.get("has_lemon")):
+                    loser, winner = (a, b) if a.get("has_lemon") else (b, a)
+                    excluded[_order_key(loser)] = winner.get("order_no", "")
+                else:
+                    flagged.update({_order_key(a), _order_key(b)})
+        new_items = [item for item in group if _order_key(item) not in fixed]
+        kept_new = [item for item in new_items if _order_key(item) not in excluded]
+        for item in new_items:
+            key = _order_key(item)
+            if key in excluded:
+                winner = excluded[key]
+                result[key] = {
+                    "message": "",
+                    "note": f"{OVERLAP_SKIP_NOTE_PREFIX}：與 {winner} 時段重疊（此筆為檸檬人），以 {winner} 時間為準",
+                }
+        if not kept_new:
+            continue
+        primary = kept_new[0]
+        flagged_nos = [item.get("order_no", "") for item in kept_new if _order_key(item) in flagged]
+        note = f"{OVERLAP_CHECK_NOTE_PREFIX}：{'、'.join(flagged_nos)}" if len(flagged_nos) > 1 else ""
+        if len(kept_new) > 1:
+            result[_order_key(primary)] = {
+                "message": build_combined_reminder_message(kept_new, typhoon_reminder),
+                "note": note or f"合併 {len(kept_new)} 筆：{'、'.join(item.get('order_no', '') for item in kept_new)}",
+            }
+            for item in kept_new[1:]:
+                result[_order_key(item)] = {"message": "", "note": f"{MERGED_NOTE_PREFIX}{primary.get('order_no', '')}"}
+    return result
+
+
+def is_merged_note(note):
+    text = str(note or "").strip()
+    return text.startswith(MERGED_NOTE_PREFIX) or text.startswith(OVERLAP_SKIP_NOTE_PREFIX)
 
 
 def find_paid_weekend_orders(
@@ -355,6 +473,8 @@ def find_paid_weekend_orders(
                 "address": _address(lines),
                 "line_url": line_urls.get(order_no, ""),
                 "order_status": order_status,
+                "has_lemon": bool(LEMON_STAFF_RE.search(joined)),
+                "typhoon_reminder": bool(typhoon_reminder),
             }
             row["message"] = (
                 build_reminder_message(row, typhoon_reminder=typhoon_reminder)
@@ -455,23 +575,32 @@ def merge_tracking_rows(order_rows, existing_rows, scheduled_at=""):
     if status_updates:
         save_tracking_rows(status_updates)
 
+    paid = [item for item in order_rows if item.get("order_status") == "已付款"]
+    fixed_keys = {_order_key(item) for item in paid if _order_key(item) in existing}
+    typhoon = any(item.get("typhoon_reminder") for item in paid)
+    combined = combine_customer_reminders(paid, fixed_keys, typhoon_reminder=typhoon)
+
     merged = []
-    for item in order_rows:
-        if item.get("order_status") != "已付款":
-            continue
+    for item in paid:
         old = existing.get(_order_key(item), {})
         message = item.get("message", "")
+        note = old.get("回覆備註", "")
+        if not old and _order_key(item) in combined:
+            message = combined[_order_key(item)]["message"]
+            note = combined[_order_key(item)]["note"]
         merged.append({
             "資料狀態": "已存在" if old else "新增",
             "訂單編號": item["order_no"], "服務日期": item["service_date"],
             "服務時間": item.get("service_time", ""), "姓名": item.get("name", ""),
             "電話": item.get("phone", ""), "地址": item.get("address", ""),
-            "LINE": item.get("line_url", ""), "通知內容": old.get("通知內容") or message,
+            "LINE": item.get("line_url", ""), "通知內容": (
+                (old.get("通知內容") or ("" if is_merged_note(old.get("回覆備註")) else message)) if old else message
+            ),
             "訂單狀態": "已付款",
             "預約發送時間": old.get("預約發送時間") or scheduled_at,
             "通知狀態": old.get("通知狀態") or "待通知",
             "通知時間": old.get("通知時間", ""), "回覆狀態": old.get("回覆狀態") or "未回覆",
-            "回覆時間": old.get("回覆時間", ""), "回覆備註": old.get("回覆備註", ""),
+            "回覆時間": old.get("回覆時間", ""), "回覆備註": note,
             "發送錯誤": old.get("發送錯誤", ""),
             "最後更新": old.get("最後更新", ""), "LINE訊息": message,
         })
@@ -504,7 +633,7 @@ def plan_tracking_rows(existing_rows, rows, now):
     for raw in rows:
         row = {header: str(raw.get(header, "") or "") for header in TRACKING_HEADERS}
         old = existing.get(reminder_key(row), {})
-        if not row["通知內容"]:
+        if not row["通知內容"] and not is_merged_note(row["回覆備註"] or old.get("回覆備註")):
             row["通知內容"] = _tracking_message(raw, old)
         if not row["訂單狀態"]:
             row["訂單狀態"] = str(raw.get("訂單狀態") or old.get("訂單狀態") or "已付款")
