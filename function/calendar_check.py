@@ -103,6 +103,7 @@ def build_issue_rows(cc_result, base_url):
             "訂單編號": _order_url(base_url, order_no),
             "姓名": item.get("name", "") or "",
             "會員": _member_url(base_url, item.get("phone"), item.get("name")),
+            "LINE": item.get("line_url") or None,
             "服務日期": item.get("service_date", ""),
             "時段": item.get("service_time", ""),
             "區域": item.get("region", ""),
@@ -137,6 +138,7 @@ _COLUMN_CONFIG = {
     "姓名": st.column_config.TextColumn("姓名", width="small"),
     "會員": st.column_config.LinkColumn(
         "電話", display_text=r"[?&](?:phone|name)=([^&]+)", help="點擊開啟後台訂單管理，查此人的訂單"),
+    "LINE": st.column_config.LinkColumn("LINE@", display_text="💬 開啟聊天", help="開啟客人的 LINE@ 聊天"),
     "服務日期": st.column_config.TextColumn("服務日期", width="small"),
     "時段": st.column_config.TextColumn("時段", width="small"),
     "區域": st.column_config.TextColumn("區域", width="small"),
@@ -174,9 +176,9 @@ def _render_result(cc_result, base_url):
     m1.metric("後台重複（組）", n_dup)
     m2.metric("後台有、日曆沒有", n_bm)
     m3.metric("日曆有、後台沒有", n_cm)
-    st.caption("訂單編號 → 後台訂單；電話 → 後台訂單管理查此人訂單；🔍 → Google 日曆搜尋此人（需在日曆勾選該區日曆才搜得到）。")
+    st.caption("訂單編號 → 後台訂單；電話 → 後台訂單管理查此人訂單；💬 → 客人 LINE@ 聊天；🔍 → Google 日曆搜尋此人（需在日曆勾選該區日曆才搜得到）。")
 
-    base_cols = ["訂單編號", "姓名", "會員", "服務日期", "時段", "區域", "地址"]
+    base_cols = ["訂單編號", "姓名", "會員", "LINE", "服務日期", "時段", "區域", "地址"]
     tab_specs = [
         (f"後台重複（{n_dup}）", tables["duplicates"],
          ["組別"] + base_cols + ["查日曆"], "cc_tbl_dup"),
