@@ -34,6 +34,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
     from . import payment_match
     payment_match = importlib.reload(payment_match)
     from . import change_order
+    from shared import calendar_phone_search
 
     def default_region_from_email(email_value):
         text = str(email_value or "").strip().lower()
@@ -1504,6 +1505,21 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         else:
             render_change_order_stage_b()
 
+    def _co_vip_calendar(phone, session, co_log):
+        """VIP（儲值金餘額 > 0）才用電話查日曆；非 VIP 或查不到電話回傳 None。"""
+        phone = calendar_phone_search.normalize_phone(phone)
+        if not phone:
+            return None
+        try:
+            if not calendar_phone_search.is_vip_balance(change_order.fetch_member_balance(phone, session)):
+                return None
+        except Exception as exc:
+            co_log(f"⚠️ VIP 判斷失敗（略過日曆查詢）：{exc}")
+            return None
+        info = calendar_phone_search.lookup_calendar_by_phone(phone)
+        co_log(f"📅 VIP 日曆查詢：{info['count']} 筆" if not info.get("error") else f"⚠️ 日曆查詢失敗：{info['error']}")
+        return info
+
     def render_change_order_stage_a():
         step("4", "查詢訂單")
         q1, q2 = st.columns([1, 1.5])
@@ -1527,7 +1543,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
 
         if search_btn:
             try:
-                st.session_state.logs = []; st.session_state.co_phone_orders = []; st.session_state.co_calc_rows = []
+                st.session_state.logs = []; st.session_state.co_phone_orders = []; st.session_state.co_calc_rows = []; st.session_state.co_vip_calendar = None
                 for _k in [k for k in st.session_state.keys() if str(k).startswith("co_order_pick_")]:
                     del st.session_state[_k]
                 co_log("===== 開始查詢訂單 =====")
@@ -1539,6 +1555,10 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                         single = change_order.fetch_order_basic(keyword_input.strip(), session=session, ui_logger=co_log, by="orderNo")
                         orders = [single] if single else []
                 st.session_state.co_phone_orders = orders
+                st.session_state.co_vip_calendar = _co_vip_calendar(
+                    keyword_input.strip() if query_by == "電話" else (orders[0].get("phone", "") if orders else ""),
+                    session, co_log,
+                )
                 co_log(f"✅ 查詢完成，共 {len(orders)} 筆"); st.rerun()
             except Exception as e:
                 co_log(f"❌ 查詢失敗：{e}"); st.error(str(e))
@@ -1547,6 +1567,9 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         if not orders: return
 
         st.markdown("---"); step("5", "目前已付款未服務的訂單列表")
+        if st.session_state.get("co_vip_calendar"):
+            st.caption("⭐ VIP")
+            calendar_phone_search.render_calendar_link(st, st.session_state.co_vip_calendar, key="co-vip-cal")
         selected_orders = []
         for o in orders:
             service_date_text = o["service_date"].strftime("%Y-%m-%d") if o.get("service_date") else "（無日期資訊）"

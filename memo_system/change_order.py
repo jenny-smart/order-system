@@ -921,6 +921,12 @@ def refresh_pricing_balance(order, session):
     phone = order.get('phone', '')
     if not phone:
         raise ValueError('此訂單查無會員電話，請改用電話查詢後試算')
+    order['pricing_balance'] = str(fetch_member_balance(phone, session))
+
+
+def fetch_member_balance(phone, session):
+    """後台 get_member 查會員儲值金（含購物金）餘額。"""
+    from service_pricing import account_balance
     response = session.get(f'{BASE_URL}/booking/single', timeout=20)
     response.raise_for_status()
     token_tag = BeautifulSoup(response.text, 'html.parser').select_one('input[name="_token"]')
@@ -933,7 +939,7 @@ def refresh_pricing_balance(order, session):
     payload = response.json()
     if payload.get('return_code') != '0000':
         raise ValueError('會員餘額查詢失敗')
-    order['pricing_balance'] = str(account_balance(payload))
+    return account_balance(payload)
 
 
 def pricing_tier(order):

@@ -23,6 +23,7 @@ from shared.execution_log_service import log_execution
 
 import quick_order as qo
 from service_pricing import unit_price
+from shared import calendar_phone_search as _cps
 
 _REQUIRED_QUICK_ORDER_NAMES = [
     "quick_lookup_member",
@@ -316,10 +317,16 @@ def render_old_customer(backend_email, backend_password, env):
         try:
             with st.spinner("查詢中…"):
                 st.session_state.q_lookup = quick_lookup_member(env_name=env, backend_email=backend_email.strip(), backend_password=backend_password.strip(), phone=q_phone.strip(), clean_type_id=CLEAN_TYPE_ID_MAP[q_clean_type])
+                _payload = st.session_state.q_lookup.get("member_payload")
+                st.session_state.q_vip_calendar = (
+                    _cps.lookup_calendar_by_phone(st.session_state.q_lookup.get("phone"))
+                    if _payload and _cps.is_vip_balance(_cps.member_balance(_payload)) else None
+                )
             st.session_state.q_order_result = {}
         except Exception as e:
             st.error(f"查詢失敗：{e}")
             st.session_state.q_lookup = None
+            st.session_state.q_vip_calendar = None
     lookup = st.session_state.get("q_lookup")
     if lookup is not None:
         member_payload = lookup.get("member_payload")
@@ -444,6 +451,9 @@ def render_old_customer(backend_email, backend_password, env):
             addr_list = member_payload.get("member", {}).get("memberAddressList", [])
             addr_options = [a.get("address", "") for a in addr_list if a.get("address")]
             st.markdown(f"**會員姓名：** {member.get('name', '')}　|　**會員電話：** {lookup.get('phone', '')}")
+            if st.session_state.get("q_vip_calendar"):
+                st.caption("⭐ VIP")
+                _cps.render_calendar_link(st, st.session_state.q_vip_calendar, key="old-vip-cal")
             step("3", "舊客服務資訊")
             info_panel("使用說明", ["先確認服務地址。", "確認服務類別、付款方式與區域。", "依客人狀況選擇『已知日期』或『依需求搜尋』。"])
             if not addr_options:

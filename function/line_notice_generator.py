@@ -15,6 +15,7 @@ from shared.line_notice_sheet import (
     filter_groups_by_calendar, groups_from_dataframe, results_tsv,
 )
 from function.ui_common import step, info_panel, copy_button, NJ_MEMO
+from shared import calendar_phone_search as cps
 from orders import load_worksheet
 
 
@@ -27,6 +28,7 @@ def render(backend_email, backend_password, env):
             "儲值金購買單（例：客人自行儲值）也可直接輸入單號產生通知；儲值金購買單請單獨一行，不可和服務單合併。",
             "勾選「同時查詢 Google 日曆」只會在結果上標記有無行程，不影響通知產生。",
             "切換成「Google Sheet 已成單列」時，會先以日曆篩選，日曆沒有的列不通知。",
+            "VIP 客人（儲值金餘額 > 0）會自動用電話查日曆：有行程顯示日曆連結，沒有顯示「無日曆」。",
         ])
         source = st.radio("資料來源", ["手動輸入訂單編號", "Google Sheet 已成單列"], horizontal=True, key="line_notice_source")
         if source == "Google Sheet 已成單列":
@@ -73,14 +75,16 @@ def render(backend_email, backend_password, env):
                     for _k in list(st.session_state.keys()):
                         if _k.startswith("line_text_") or _k.startswith("nj_memo_"): del st.session_state[_k]
                     results_list = []
+                    vip_cache = {}
                     for group, nos in zip(groups, order_groups):
                         label = "、".join(nos)
                         try:
                             with st.spinner(f"查詢訂單 {label}…"):
                                 line_result, line_text = _build_line_for_group(env, backend_email.strip(), backend_password.strip(), nos)
+                            vip_info = _vip_calendar_for_result(line_result, vip_cache)
                             safe_result = {k: v for k, v in line_result.items() if k != "session"}
                             status = CALENDAR_FOUND if source == "Google Sheet 已成單列" else CALENDAR_NOT_CHECKED
-                            results_list.append({"order_no": label, "group": group, "result": safe_result, "text": line_text, "error": None, "calendar_status": status})
+                            results_list.append({"order_no": label, "group": group, "result": safe_result, "text": line_text, "error": None, "calendar_status": status, "vip_calendar": vip_info})
                         except Exception as e:
                             results_list.append({"order_no": label, "group": group, "result": None, "text": "", "error": str(e)})
                     if check_calendar and any(not item["error"] for item in results_list):
@@ -117,6 +121,9 @@ def render(backend_email, backend_password, env):
         else:
             st.caption(f"訂單：{order_no_display}{combined_note}　付款方式：{line_result.get('payway')}　區域：{line_result.get('region')}　金額：{line_result.get('service_amount') or '—'}　車馬費：{line_result.get('fare') or '0'}")
         _calendar_badge(item.get("calendar_status") or CALENDAR_NOT_CHECKED)
+        if item.get("vip_calendar"):
+            st.caption("⭐ VIP")
+            cps.render_calendar_link(st, item["vip_calendar"], key=f"vip-cal-{idx}")
         st.text_area(f"LINE 訊息（{line_result.get('order_no')}）", line_text, height=380, label_visibility="collapsed")
         copy_button("複製 LINE 訊息", line_text, f"copy-line-msg-{idx}")
         if idx < len(results_list) - 1: st.markdown("<hr>", unsafe_allow_html=True)
@@ -169,3 +176,24 @@ def _calendar_badge(status):
         st.warning(f"📅 {status}")
     else:
         st.caption(f"📅 日曆：{status}")
+
+
+def _vip_calendar_for_result(line_result, cache):
+    """VIP（會員儲值金餘額 > 0）才用電話查日曆；非 VIP 回傳 None。"""
+    phone = cps.normalize_phone(line_result.get("phone"))
+    if not phone:
+        return None
+    if phone in cache:
+        return cache[phone]
+    vip = False
+    session = line_result.get("session")
+    if session is not None:
+        try:
+            token = orders.get_csrf_token(session)
+            vip = cps.is_vip_balance(cps.member_balance(orders.get_member(session, phone, token, "1")))
+        except Exception:
+            vip = False
+    if not vip and (line_result.get("payway") == "儲值金" or line_result.get("is_stored_value_purchase")):
+        vip = True  # 查不到餘額時，以儲值金付款／儲值金購買單視為 VIP
+    cache[phone] = cps.lookup_calendar_by_phone(phone) if vip else None
+    return cache[phone]
