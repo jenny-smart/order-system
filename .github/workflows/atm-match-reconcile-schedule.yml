@@ -1,0 +1,45 @@
+# ATM 對帳 ② 配對銀行明細＋③ 更新系統對帳（台北／台中）：每日 08:10
+#
+# 由 tool-system 的 Cloud Schedule Router 依主控表「排程設定」（功能代號 atm_match_reconcile）
+# 派送過來（不用 GitHub cron：新加的 GitHub 排程常延遲或不跑）。也可以在這裡手動執行。
+# 規則見 shared/atm_match_reconcile_schedule.py。
+#
+# 需要的 Secrets：GOOGLE_SERVICE_ACCOUNT_JSON、TAIPEI_EMAIL／PASSWORD、TAICHUNG_EMAIL／PASSWORD
+# 行事曆用服務帳號寫入，服務帳號要有 jenny@hers.com.tw（或 jenny@lemonclean.com.tw）行事曆的編輯權限。
+name: ATM Match Reconcile Schedule
+run-name: ${{ inputs.scheduled_slot && format('cloud-{0}', inputs.scheduled_slot) || 'ATM Match Reconcile Schedule' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      env: {description: prod / dev, required: false, default: "prod", type: string}
+      scheduled_slot: {description: 排程設定派送時段（手動執行請留空）, required: false, default: "", type: string}
+
+permissions:
+  contents: read
+
+concurrency:
+  # 同一時間只跑一次，避免兩次對帳同時按已付款／開發票
+  group: atm-match-reconcile
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12", cache: pip}
+      - run: pip install -r requirements.txt
+      - name: Match bank rows and update system (② + ③)
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          TAIPEI_EMAIL: ${{ secrets.TAIPEI_EMAIL }}
+          TAIPEI_PASSWORD: ${{ secrets.TAIPEI_PASSWORD }}
+          TAICHUNG_EMAIL: ${{ secrets.TAICHUNG_EMAIL }}
+          TAICHUNG_PASSWORD: ${{ secrets.TAICHUNG_PASSWORD }}
+          ATM_CALENDAR_ID: ${{ vars.ATM_CALENDAR_ID }}
+          RUN_ENV: ${{ inputs.env || 'prod' }}
+        # 逐筆訊息（客戶、訂單）不印進 Actions 紀錄，只印各區筆數
+        run: python -u -m shared.atm_match_reconcile_schedule --env "$RUN_ENV"
