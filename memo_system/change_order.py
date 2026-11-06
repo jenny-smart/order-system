@@ -679,6 +679,9 @@ def fetch_order_basic(keyword: str, session: requests.Session, ui_logger=None, b
     return result
 
 
+PHONE_LOOKUP_MAX_PAGES = 30
+
+
 def _select_change_order_candidates(parsed: list, today: date = None) -> list:
     """已付款未服務 + 近 2 場已付款已服務，供服務時加減時異動使用。"""
     today = today or today_taipei()
@@ -690,9 +693,9 @@ def _select_change_order_candidates(parsed: list, today: date = None) -> list:
         p for p in parsed
         if p.get("is_paid") and p.get("service_date") and p["service_date"] < today
     ]
-    upcoming = sorted(upcoming, key=lambda p: (p["service_date"], p.get("order_no", "")))
     recent_done = sorted(recent_done, key=lambda p: (p["service_date"], p.get("order_no", "")), reverse=True)[:2]
-    return upcoming + recent_done
+    # 2026-11-06：整份清單依服務日期由近到遠（舊→新）排列，近 2 場已服務排最前面。
+    return sorted(upcoming + recent_done, key=lambda p: (p["service_date"], p.get("order_no", "")))
 
 
 def _select_upcoming_paid_orders(parsed: list, today: date = None) -> list:
@@ -710,21 +713,32 @@ def fetch_upcoming_paid_orders_by_phone(phone: str, session: requests.Session, u
 
     log(f"查詢電話：{phone}")
 
-    resp = session.get(f"{BASE_URL}/purchase", params={"phone": phone}, timeout=20)
-    resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "html.parser")
-
-    rows = soup.select("table tbody tr")
-    if not rows:
-        log("⚠️ 查無資料")
-        return []
-
-    parsed = []
-    for row in rows:
-        info = _parse_order_row(row)
-        if info:
+    # 2026-11-06：後台 /purchase 一頁只回一部分訂單，原本只讀第 1 頁，
+    # 訂單多的客人（例：一次建了一整季的儲值金單）會漏掉較近日期的單。
+    # 改成逐頁讀到沒有新訂單為止。
+    parsed, seen = [], set()
+    for page in range(1, PHONE_LOOKUP_MAX_PAGES + 1):
+        resp = session.get(f"{BASE_URL}/purchase", params={"phone": phone, "page": str(page)}, timeout=20)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+        rows = soup.select("table tbody tr")
+        new_count = 0
+        for row in rows:
+            info = _parse_order_row(row)
+            if not info or info.get("order_no") in seen:
+                continue
+            seen.add(info.get("order_no"))
             info["phone"] = phone
             parsed.append(info)
+            new_count += 1
+        if not new_count:
+            break
+    else:
+        log(f"⚠️ 已讀到第 {PHONE_LOOKUP_MAX_PAGES} 頁上限，可能仍有更舊的訂單未列出")
+    if not parsed:
+        log("⚠️ 查無資料")
+        return []
+    log(f"共讀取 {len(parsed)} 筆訂單（{page} 頁）")
 
     result = _select_change_order_candidates(parsed)
     if not result:
@@ -907,6 +921,12 @@ def refresh_pricing_balance(order, session):
     phone = order.get('phone', '')
     if not phone:
         raise ValueError('此訂單查無會員電話，請改用電話查詢後試算')
+    order['pricing_balance'] = str(fetch_member_balance(phone, session))
+
+
+def fetch_member_balance(phone, session):
+    """後台 get_member 查會員儲值金（含購物金）餘額。"""
+    from service_pricing import account_balance
     response = session.get(f'{BASE_URL}/booking/single', timeout=20)
     response.raise_for_status()
     token_tag = BeautifulSoup(response.text, 'html.parser').select_one('input[name="_token"]')
@@ -919,7 +939,7 @@ def refresh_pricing_balance(order, session):
     payload = response.json()
     if payload.get('return_code') != '0000':
         raise ValueError('會員餘額查詢失敗')
-    order['pricing_balance'] = str(account_balance(payload))
+    return account_balance(payload)
 
 
 def pricing_tier(order):

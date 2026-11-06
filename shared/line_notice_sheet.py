@@ -252,6 +252,45 @@ def filter_groups_by_calendar(groups, orders_module, service, calendar_map, acco
     return kept, skipped
 
 
+CALENDAR_FOUND = "✅ 日曆有行程"
+CALENDAR_NOT_CHECKED = "未檢查（日曆不影響通知產生）"
+CALENDAR_NOT_APPLICABLE = "—（儲值金購買單，無服務行程）"
+
+
+def _split_period(period):
+    parts = re.split(r"\s*[-~～–]\s*", str(period or "").strip())
+    return (parts[0], parts[1]) if len(parts) >= 2 and parts[0] and parts[1] else ("", "")
+
+
+def calendar_status_for_result(line_result, orders_module, service, calendar_map, accounts):
+    """手動輸入單號用：只標記日曆是否有對應行程，不篩掉通知。"""
+    if not line_result:
+        return CALENDAR_NOT_CHECKED
+    if line_result.get("is_stored_value_purchase"):
+        return CALENDAR_NOT_APPLICABLE
+    infos = line_result.get("orders_info") or [{
+        "order_no": line_result.get("order_no"), "service_date": line_result.get("date"),
+        "period_s": line_result.get("period_s") or line_result.get("period"),
+        "address": line_result.get("address"),
+    }]
+    entries = []
+    for info in infos:
+        start, end = _split_period(info.get("period_s"))
+        entries.append({
+            "order_no": info.get("order_no"), "address": info.get("address", ""),
+            "date": info.get("service_date", ""), "start": start, "end": end, "proxy": False,
+        })
+    _, skipped = filter_groups_by_calendar(
+        [{"order_nos": [e["order_no"] for e in entries], "entries": entries}],
+        orders_module, service, calendar_map, accounts,
+    )
+    if not skipped:
+        return CALENDAR_FOUND
+    if len(entries) == 1:
+        return f"⚠️ {skipped[0].get('reason') or '日曆無對應行程'}"
+    return "⚠️ " + "；".join(f"{item.get('order_no')} {item.get('reason') or '日曆無對應行程'}" for item in skipped)
+
+
 def results_tsv(results):
     def cell(value):
         text = str(value or "")
@@ -266,7 +305,7 @@ def results_tsv(results):
         group = item.get("group") or {}
         rows.append([
             group.get("name"), group.get("address"), item.get("order_no"),
-            item.get("text"), item.get("calendar_status", "未檢查（日曆不影響通知產生）"),
+            item.get("text"), item.get("calendar_status", CALENDAR_NOT_CHECKED),
         ])
     return "\n".join("\t".join(cell(value) for value in row) for row in rows)
 
