@@ -100,11 +100,10 @@ def render(backend_email, backend_password, env):
     if skipped:
         st.info(f"日曆沒有對應行程，已略過 {len(skipped)} 筆，不產生通知。")
     if any(not item.get("error") for item in results_list):
+        # 貼回 Google Sheet 的表格只在讀工作表時才需要；手動輸入單號直接看下方 LINE 訊息即可。
         if st.session_state.get("line_notice_mode") == "Google Sheet 已成單列":
             st.caption("以下皆已通過日曆存在檢查；日期／時段內容以後台訂單為準。整段可直接貼到 Google Sheet。")
-        else:
-            st.caption("日期／時段內容以後台訂單為準；「日曆檢查」欄為標記用，不影響通知。整段可直接貼到 Google Sheet。")
-        st.code(results_tsv(results_list), language=None)
+            st.code(results_tsv(results_list), language=None)
     for idx, item in enumerate(results_list):
         if item["error"]:
             st.error(f"訂單 {item['order_no']} 產生失敗：{item['error']}"); continue
