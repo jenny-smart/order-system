@@ -459,3 +459,70 @@ def test_auto_match_company_transfer_uses_invoice_title(monkeypatch):
     monkeypatch.setattr(atm, "get_atm_worksheet", lambda region: ws2)
     atm.auto_match_bank_rows("台北", today=date(2026, 11, 7))
     assert "H2:O2" not in ws2.writes
+
+
+# ── 異動費配對後回填清潔異動已收款 ─────────────────────
+class _ChangeWS:
+    def __init__(self, rows):
+        self.rows = rows
+        self.batches = []
+
+    def get_all_values(self):
+        return self.rows
+
+    def batch_update(self, updates, value_input_option=None):
+        self.batches.append({u["range"]: u["values"][0][0] for u in updates})
+
+
+def _change_row(**cols):
+    row = [""] * 30
+    for letter, value in cols.items():
+        row[ord(letter) - 65] = value
+    return row
+
+
+def test_mark_change_order_collected(monkeypatch):
+    from memo_system import change_order
+
+    cws = _ChangeWS([
+        _change_row(A="服務"),
+        _change_row(A="清潔", B="待收款", C="異動服務收款", G="LC00219200", H="林小姐", N="600"),
+        _change_row(A="清潔", B="待收款", C="異動服務收款", G="LC00219200", H="林小姐", N="1200", R="儲值金"),
+        _change_row(A="清潔", B="已收款", C="異動服務收款", G="LC00219300", N="700"),
+    ])
+    monkeypatch.setattr(change_order, "get_worksheet", lambda region, tab_name="清潔異動": cws)
+    msg = atm.mark_change_order_collected("台北", "LC00219200", 1200, "2026/11/06 14:02:46")
+    assert msg == "已回填清潔異動第3列為已收款"
+    assert cws.batches[-1] == {"B3": "已收款", "M3": "2026/11/06 14:02:46"}   # R 已有值不覆蓋
+    atm.mark_change_order_collected("台北", "LC00219200", 600, "2026/11/06 10:00:00")
+    assert cws.batches[-1] == {"B2": "已收款", "M2": "2026/11/06 10:00:00", "R2": "ATM"}
+    # 清潔異動回填後台時只取日期
+    assert change_order._normalize_date_value("2026/11/06 14:02:46") == "2026-11-06"
+    assert atm.mark_change_order_collected("台北", "LC00219300", 700, None) == "清潔異動第4列已是已收款"
+    assert "找不到" in atm.mark_change_order_collected("台北", "LC00219999", 700, None)
+
+
+def test_auto_match_change_fee_backfills_change_order(monkeypatch):
+    rows = [
+        _row(A="日期"),
+        _row(A="2026/11/06", B="2026/11/06 10:00:00", C="ＣＤ轉收", E="1,200", F="林小姐加時"),
+        _row(A="2026/11/06", B="2026/11/06 11:00:00", C="ＣＤ轉收", E="4,800", F="王蘭香"),
+        _row(),
+        _row(I="2026.11", J="LC00219200", K="林小姐", L="1200", N="清潔", O="異動費"),
+        _row(I="2026.11", J="LC00219736", K="王蘭香", L="4800", N="清潔", O="服務費用"),
+    ]
+    calls = []
+    monkeypatch.setattr(atm, "mark_change_order_collected",
+                        lambda region, no, amount, day: calls.append((no, amount, day)) or "已回填清潔異動第3列為已收款")
+    result, ws = _run_match(monkeypatch, rows)
+    assert calls == [("LC00219200", 1200, "2026/11/06 10:00:00")]   # B 欄日期時間；服務費用不回填
+    assert result["change_order_collected"] == ["第2列 LC00219200：已回填清潔異動第3列為已收款"]
+    # ③ 只會處理服務費用那列
+    sheet = [list(r) for r in rows]
+    for a1, vals in ws.writes.items():
+        if isinstance(a1, str) and a1.startswith("H"):
+            r = int(a1.split(":")[0][1:])
+            sheet[r - 1][7:15] = vals
+        elif isinstance(a1, tuple):
+            sheet[a1[0] - 1][a1[1] - 1] = vals
+    assert atm.rows_ready_for_reconcile(sheet) == [3]

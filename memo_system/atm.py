@@ -1043,6 +1043,39 @@ def purchase_invoice_title(purchase: Optional[Dict]) -> str:
     return ""
 
 
+CHANGE_ORDER_FEE_TYPES = ("異動費", "工具組")
+
+
+def mark_change_order_collected(region: str, order_no: str, amount: int, bank_time: str) -> str:
+    """② 配對到清潔異動來的款項後，回填清潔異動該訂單：B＝已收款、M＝收款時間（ATM B 欄入帳日期時間）、R 空白補 ATM。
+    只動 G＝訂單、B 是待收款類、N＝金額的列；同條件多列只回填第一列並回報。回傳結果文字。"""
+    from . import change_order
+
+    ws = change_order.get_worksheet(region)
+    values = memo.with_retry(ws.get_all_values)
+    pending = [
+        idx for idx, row in enumerate(values, start=1)
+        if idx > 1
+        and memo.safe_cell(row, 7) == order_no
+        and memo.safe_cell(row, 2) in change_order.STATUS_PENDING_CHARGE_ALIASES
+        and _to_int_amount(memo.safe_cell(row, 14)) == amount
+    ]
+    if not pending:
+        done = [idx for idx, row in enumerate(values, start=1)
+                if memo.safe_cell(row, 7) == order_no and memo.safe_cell(row, 2) in change_order.STATUS_DONE_CHARGE_ALIASES]
+        return f"清潔異動第{done[0]}列已是已收款" if done else f"清潔異動找不到 {order_no} 待收款 ${amount}"
+    row_num = pending[0]
+    updates = [
+        {"range": f"B{row_num}", "values": [[change_order.STATUS_DONE_CHARGE]]},
+        {"range": f"M{row_num}", "values": [[str(bank_time or "").strip() or _now_text()]]},
+    ]
+    if not memo.safe_cell(values[row_num - 1], 18):
+        updates.append({"range": f"R{row_num}", "values": [["ATM"]]})
+    memo.with_retry(ws.batch_update, updates, value_input_option="RAW")
+    extra = f"（另有 {len(pending) - 1} 列同條件待收款未動）" if len(pending) > 1 else ""
+    return f"已回填清潔異動第{row_num}列為已收款{extra}"
+
+
 def _trainee_name(note: str) -> str:
     return re.sub(r"(新訓|新訓費).*$", "", str(note or "")).strip()
 
@@ -1173,6 +1206,17 @@ def auto_match_bank_rows(
     touched_rows: List[int] = []
     refunds_cache: Optional[List[Dict]] = None
     invoice_titles: Dict[str, str] = {}
+
+    def collect_change_order(row_idx: int, c: Dict, bank_time: str) -> None:
+        """清潔異動來的異動費／工具組配對成功 → 回填清潔異動已收款。"""
+        if c.get("fee_type") not in CHANGE_ORDER_FEE_TYPES or not c.get("order_no"):
+            return
+        try:
+            text = mark_change_order_collected(region, c["order_no"], c["amount"], bank_time)
+        except Exception as exc:
+            text = f"回填清潔異動失敗：{exc}"
+        result.setdefault("change_order_collected", []).append(f"第{row_idx}列 {c['order_no']}：{text}")
+        log(f"{'✅' if text.startswith('已回填') else '⚠️'} 第{row_idx}列 {c['order_no']}：{text}")
 
     def invoice_title_of(order_no: str) -> str:
         if order_no not in invoice_titles:
@@ -1313,6 +1357,7 @@ def auto_match_bank_rows(
                     if c["order_no"]:
                         used_order_nos.add(c["order_no"])
                     log(f"✅ 第{target_row}列：多訂單加總 → {c['order_no']} {c['name']} ${c['amount']}")
+                    collect_change_order(target_row, c, bank_time)
 
                 result["success"] += len(combo)
                 result["updated_orders"] += len(combo)
@@ -1443,6 +1488,7 @@ def auto_match_bank_rows(
                     log(f"⚠️ 第{idx}列：已預填需使用者確認 → {c['order_no'] or '-'} {c['name']} ${c['amount']}（{status_text}／{match_type}）")
                 else:
                     log(f"✅ 第{idx}列：{match_type} → {c['order_no']} {c['name']} ${c['amount']}")
+                    collect_change_order(idx, c, bank_time)
 
                 if c["order_no"]:
                     used_order_nos.add(c["order_no"])
@@ -1917,6 +1963,9 @@ def rows_ready_for_reconcile(rows: List[List[str]], from_date: Optional[_date] =
         if not re.fullmatch(r"[A-Za-z]{2}\d{6,}", memo.safe_cell(row, COL_ORDER_NO)):
             continue
         if memo.safe_cell(row, COL_STATUS_NOTE) == "取消訂單":
+            continue
+        # 異動費／工具組／退款／新訓費不是原訂單付款，不能按已付款（異動費已在 ② 回填清潔異動）
+        if memo.safe_cell(row, 15) not in ("", "服務費用"):
             continue
         ready.append(idx)
     return ready
