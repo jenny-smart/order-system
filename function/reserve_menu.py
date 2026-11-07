@@ -4,6 +4,8 @@
 變更紀錄
 - 2026-11-07：「檸檬保留單取消」新增盤點區：總張數、依日期／依專員統計、
   明細顯示專員姓名與客人備註，並可下載 CSV；勾選取消時也顯示專員。
+- 2026-11-07：查詢只顯示已付款保留單；每日統計加上星期與各時段張數；
+  查詢診斷顯示因付款狀態（取消、待付款等）排除的張數。
 """
 
 from datetime import date
@@ -321,6 +323,9 @@ def render_reserve_cancel(backend_email: str, backend_password: str, env: str) -
                     f"客人備註符合 {debug.get('memo_matches', 0)} 張；"
                     f"明細讀取失敗 {debug.get('detail_errors', 0)} 張。"
                 )
+                excluded = debug.get("excluded_status") or {}
+                if excluded:
+                    st.write("已排除非已付款訂單：" + "、".join(f"{k} {v} 張" for k, v in excluded.items()))
 
     def _show_cancel_job():
         # 取消進度放在選取區塊下方；清單已全部取消變空時，也要顯示進度與結果。
@@ -420,6 +425,24 @@ def _split_staff(value) -> list:
     return names or ["無人力"]
 
 
+def _daily_counts(df: pd.DataFrame) -> pd.DataFrame:
+    """每日張數：日期、星期、各時段張數、合計。"""
+    if df.empty or "service_date" not in df.columns:
+        return pd.DataFrame()
+    work = df.copy()
+    work["period"] = work.get("period", pd.Series([""] * len(work))).fillna("").astype(str)
+    pivot = pd.crosstab(work["service_date"], work["period"])
+    pivot = pivot[sorted(pivot.columns)]
+    pivot["合計"] = pivot.sum(axis=1)
+    pivot = pivot.reset_index().rename(columns={"service_date": "日期"})
+    weekdays = "一二三四五六日"
+    pivot.insert(1, "星期", pd.to_datetime(pivot["日期"], errors="coerce").dt.weekday.map(
+        lambda d: weekdays[int(d)] if pd.notna(d) else ""))
+    total = {c: (int(pivot[c].sum()) if c not in ("日期", "星期") else "") for c in pivot.columns}
+    total["日期"] = "總計"
+    return pd.concat([pivot, pd.DataFrame([total])], ignore_index=True)
+
+
 def _render_reserve_inventory(rows: list) -> None:
     """保留單盤點：總數、依日期／依專員統計，明細含專員姓名與客人備註。"""
     df = pd.DataFrame(rows)
@@ -437,14 +460,9 @@ def _render_reserve_inventory(rows: list) -> None:
     m2.metric("安全可取消", f"{eligible} 張")
     m3.metric("涉及專員", f"{len({n for v in df['staff'] for n in _split_staff(v)})} 位")
 
-    t1, t2 = st.columns(2)
-    with t1:
-        st.caption("依日期統計")
-        by_date = df.groupby("service_date").size().reset_index(name="張數") if "service_date" in df.columns else pd.DataFrame()
-        if not by_date.empty:
-            by_date.rename(columns={"service_date": "日期"}, inplace=True)
-        st.dataframe(by_date, width="stretch", hide_index=True)
-    with t2:
+    st.caption("每日保留單數（含各時段張數）")
+    st.dataframe(_daily_counts(df), width="stretch", hide_index=True)
+    with st.expander("依專員統計", expanded=False):
         st.caption("依專員統計（多人同單各算一張）")
         staff_rows = [{"專員": n, "order_no": r.get("order_no", "")}
                       for r in df.to_dict("records") for n in _split_staff(r.get("staff"))]
