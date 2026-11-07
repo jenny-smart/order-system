@@ -97,7 +97,7 @@ def _run_match(monkeypatch, rows, refunds=()):
     ws = _MatchWS(rows)
     monkeypatch.setattr(atm, "get_atm_worksheet", lambda region: ws)
     monkeypatch.setattr(atm, "load_change_order_refunds", lambda region: list(refunds))
-    for name in ("_clear_data_validation", "_copy_data_validation", "ensure_candidate_row_format"):
+    for name in ("_clear_data_validation", "_copy_data_validation", "ensure_candidate_row_format", "normalize_atm_rows"):
         monkeypatch.setattr(atm, name, lambda *a, **k: None)
     result = atm.auto_match_bank_rows("台北", today=date(2026, 11, 7))
     return result, ws
@@ -316,25 +316,71 @@ class FakeWorksheet:
         self.updates.append((a1, values))
 
 
-def test_ensure_format_copies_g_formula_and_dropdowns_from_above():
+def _copies(ws, paste_type):
+    return [(c["copyPaste"]["source"]["startRowIndex"] + 1, c["copyPaste"]["destination"]["startRowIndex"] + 1,
+             c["copyPaste"]["destination"]["startColumnIndex"] + 1, c["copyPaste"]["destination"]["endColumnIndex"])
+            for c in ws.spreadsheet.requests if c["copyPaste"]["pasteType"] == paste_type]
+
+
+def test_ensure_format_copies_whole_g_to_o_format_and_g_formula():
     formula = '=I2&"-"&N2'
     ws = FakeWorksheet([""] + [formula] * 9 + ["", ""], {9: {2, 3}, 14: {2}, 15: {2}})
     result = atm.ensure_candidate_row_format(ws, [11, 12])
-    assert result == {"g_filled": 2, "dropdown_copied": 6}
-    g_copies = [r["copyPaste"] for r in ws.spreadsheet.requests if r["copyPaste"]["pasteType"] == "PASTE_FORMULA"]
-    assert [(c["source"]["startRowIndex"], c["destination"]["startRowIndex"]) for c in g_copies] == [(9, 10), (9, 11)]
-    i_copies = [r["copyPaste"] for r in ws.spreadsheet.requests
-                if r["copyPaste"]["pasteType"] == "PASTE_DATA_VALIDATION"
-                and r["copyPaste"]["destination"]["startColumnIndex"] == 8]
-    assert {c["source"]["startRowIndex"] for c in i_copies} == {2}  # 第 3 列（最近的上方下拉）
+    assert result == {"g_filled": 2, "dropdown_copied": 2, "format_copied": 2}
+    # G:O 整段格式（含 I 下拉）從上方最近 I 有下拉的第 3 列複製
+    assert _copies(ws, "PASTE_FORMAT") == [(3, 11, 7, 15), (3, 12, 7, 15)]
+    assert _copies(ws, "PASTE_FORMULA") == [(10, 11, 7, 7), (10, 12, 7, 7)]
     assert ws.updates == []
 
 
-def test_ensure_format_keeps_existing_g_and_falls_back_when_no_formula_above():
+def test_ensure_format_uses_row_below_when_nothing_above():
+    # 新年度分頁最上面幾列還沒格式：用下方的列當參考
+    ws = FakeWorksheet(["", "", "", "", '=I5&"-"'], {9: {5}})
+    result = atm.ensure_candidate_row_format(ws, [2, 3])
+    assert _copies(ws, "PASTE_FORMAT") == [(5, 2, 7, 15), (5, 3, 7, 15)]
+    assert _copies(ws, "PASTE_FORMULA") == [(5, 2, 7, 7), (5, 3, 7, 7)]
+    assert result["g_filled"] == 2
+
+
+def test_ensure_format_keeps_existing_g_and_falls_back_when_no_formula():
     ws = FakeWorksheet(["", "", "已有值"], {})
     result = atm.ensure_candidate_row_format(ws, [2, 3])
     assert result["g_filled"] == 1
     assert ws.updates == [("G2", [['=I2&"-"&N2&"-"&O2&","&J2&","&K2']])]
+
+
+# ── 整理現有列（截圖那種 G 空白、I 沒下拉、N/O 空白）────────
+def test_normalize_atm_rows_fills_no_and_formats(monkeypatch):
+    from memo_system import change_order
+
+    rows = [
+        _row(A="日期"),
+        _row(G="=…", I="2026.09", J="LC002148593", K="謝易辰", L="200", N="清潔", O="車馬費"),   # 已完整
+        _row(I="2026.11", J="LC00219852", K="宋家駿", L="4,800"),
+        _row(I="2026.11", J="LC00218376", K="曾璧霞", L="400"),      # 清潔異動收款 → 異動費
+        _row(I="2026.11", J="", K="吳珍嫻", L="2,000"),               # 沒訂單 2000 → 新訓費
+        _row(I="2026.11", J="", K="某人", L="900"),                   # 沒訂單其他 → 只填清潔
+        _row(),
+    ]
+    writes = []
+    ws = type("W", (), {"get_all_values": lambda self: rows,
+                        "batch_update": lambda self, u, value_input_option=None: writes.extend(u)})()
+    cws = type("C", (), {"get_all_values": lambda self: [
+        [""] * 14,
+        ["清潔", "待收款", "異動服務收款", "", "", "", "LC00218376", "曾璧霞", "", "加時 1 小時", "", "", "", "400"],
+    ]})()
+    monkeypatch.setattr(change_order, "get_worksheet", lambda region, tab_name="清潔異動": cws)
+    formatted = []
+    monkeypatch.setattr(atm, "ensure_candidate_row_format",
+                        lambda w, r, log=None: formatted.extend(r) or {"g_filled": 4, "dropdown_copied": 4, "format_copied": 5})
+    result = atm.normalize_atm_rows("台北", ws=ws)
+    assert {w["range"]: w["values"][0] for w in writes} == {
+        "N3:O3": ["清潔", "服務費用"],
+        "N4:O4": ["清潔", "異動費"],
+        "N5:O5": ["清潔", "新訓費"],
+        "N6:O6": ["清潔", ""],
+    }
+    assert formatted == [2, 3, 4, 5, 6] and result["no_filled"] == 4
 
 
 # ── 雲端入口 ─────────────────────────────────────────
@@ -449,7 +495,7 @@ def test_auto_match_company_transfer_uses_invoice_title(monkeypatch):
     monkeypatch.setattr(atm, "find_purchase_by_order_no", lambda session, no: titles.get(no))
     ws = _MatchWS(rows)
     monkeypatch.setattr(atm, "get_atm_worksheet", lambda region: ws)
-    for name in ("_clear_data_validation", "_copy_data_validation", "ensure_candidate_row_format"):
+    for name in ("_clear_data_validation", "_copy_data_validation", "ensure_candidate_row_format", "normalize_atm_rows"):
         monkeypatch.setattr(atm, name, lambda *a, **k: None)
     result = atm.auto_match_bank_rows("台北", today=date(2026, 11, 7), session=object())
     assert ws.writes["H2:O2"][2] == "LC00219102"
@@ -526,3 +572,30 @@ def test_auto_match_change_fee_backfills_change_order(monkeypatch):
         elif isinstance(a1, tuple):
             sheet[a1[0] - 1][a1[1] - 1] = vals
     assert atm.rows_ready_for_reconcile(sheet) == [3]
+
+
+# ── 需人工處理清單 ───────────────────────────────────
+def test_review_list_covers_manual_cases(monkeypatch):
+    rows = [
+        _row(A="日期"),
+        _row(A="2026/11/06", B="2026/11/06 13:00:00", D="3,000", F="不明轉出"),           # 2 支出找不到退款
+        _row(A="2026/11/06", B="2026/11/06 17:30:00", E="2,400", F="家事清潔"),           # 3 未配對
+        _row(A="2026/11/06", B="2026/11/06 10:00:00", E="1,200", F="林小姐"),             # 4 異動費，清潔異動找不到
+        _row(),
+        _row(I="2026.11", J="LC00219200", K="林小姐", L="1200", N="清潔", O="異動費"),
+    ]
+    monkeypatch.setattr(atm, "mark_change_order_collected", lambda *a: "清潔異動找不到 LC00219200 待收款 $1200")
+    result, ws = _run_match(monkeypatch, rows)
+    kinds = {(r["列號"], r["類型"]) for r in result["review"]}
+    assert kinds == {(2, "支出／退款待確認"), (3, "未配對"), (4, "清潔異動未回填")}
+    assert next(r for r in result["review"] if r["列號"] == 4)["訂單"] == "LC00219200"
+
+
+def test_schedule_calendar_includes_review():
+    from shared import atm_match_reconcile_schedule as job
+
+    result = {"台北": {"match": {"review": [{"列號": 3, "類型": "需確認", "訂單": "LC1", "姓名": "甲", "金額": 4800, "說明": "已預填"}]},
+                       "reconcile": {}}}
+    events = job.build_calendar_events(result, datetime(2026, 11, 7, 8, 12, tzinfo=TZ))
+    assert events[-1]["summary"] == "【ATM對帳】需人工處理 1 列"
+    assert "台北 第3列【需確認】LC1 甲 $4800" in events[-1]["description"]

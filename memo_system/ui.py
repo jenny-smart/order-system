@@ -342,6 +342,18 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
             c2.metric("成功", r["success"])
             c3.metric("失敗", r["failed"])
             c4.metric("略過", r["skipped"])
+            review = r.get("review") or []
+            if review:
+                # 需確認／疑似拆單／非訂單收入／未配對／清潔異動未回填……直接列在畫面
+                st.markdown(f'<div class="warn-strip"><b>🔎 需人工處理 {len(review)} 列</b></div>', unsafe_allow_html=True)
+                kinds = {}
+                for item in review:
+                    kinds[item["類型"]] = kinds.get(item["類型"], 0) + 1
+                st.caption("　".join(f"{k} {v}" for k, v in kinds.items()))
+                st.dataframe(review, use_container_width=True, hide_index=True)
+            done = [x for x in (r.get("change_order_collected") or []) if "已回填" in x and "另有" not in x]
+            if done:
+                st.success("✅ 已回填清潔異動已收款：" + "；".join(done))
             if r["errors"]:
                 with st.expander(f"⚠️ 錯誤明細（{len(r['errors'])} 筆）", expanded=True):
                     for i, err in enumerate(r["errors"], 1):
@@ -1204,6 +1216,15 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                     except Exception as e:
                         atm_list_ui_log(f"❌ 貼上失敗：{e}"); st.error(str(e))
 
+        st.markdown("---")
+        if st.button(f"🧹 整理「{region}」ATM 分頁 G:O（G 補公式、I 下拉選單、格式統一、N/O 空白補值）", use_container_width=True, key="atm_normalize_btn"):
+            try:
+                with st.spinner("整理中，請稍候…"):
+                    nr = atm.normalize_atm_rows(region, ui_logger=atm_list_ui_log)
+                st.success(f"✅ 已整理 {nr['rows']} 列：N/O 補值 {nr['no_filled']} 列、G 補公式 {nr.get('g_filled', 0)} 格、I 欄補下拉 {nr.get('dropdown_copied', 0)} 列")
+            except Exception as e:
+                st.error(f"整理失敗：{e}")
+
         if st.session_state.get("atm_list_paste_result") is not None:
             st.markdown("---"); step("5", "貼上結果")
             pr = st.session_state.get("atm_list_paste_result")
@@ -1220,6 +1241,14 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
             merged["success"] = rec.get("success", 0)
             merged["failed"] = match.get("failed", 0) + rec.get("failed", 0)
             merged["errors"] += [f"③ 第{d['row']}列 {d['order_no']} 未開立發票，未發確認信" for d in rec.get("no_invoice") or []]
+            merged["review"] = list(match.get("review") or []) + [
+                {"列號": d["row"], "類型": "③ 未開立發票", "訂單": d["order_no"], "姓名": d.get("name", ""),
+                 "金額": d.get("amount", ""), "說明": f"已付款但未開發票（{d.get('reason', '')}），未發確認信"}
+                for d in rec.get("no_invoice") or []
+            ] + [
+                {"列號": "", "類型": "③ 失敗", "訂單": "", "姓名": "", "金額": "", "說明": e}
+                for e in rec.get("errors") or []
+            ]
         return merged
 
     def render_atm_auto_match_mode():

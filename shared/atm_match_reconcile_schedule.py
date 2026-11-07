@@ -13,7 +13,8 @@
      需確認／疑似拆單／非訂單收入一律留給人工。
 行事曆（預設 jenny@hers.com.tw，寫不進去改寫 jenny@lemonclean.com.tw；可用 ATM_CALENDAR_ID 指定）：
   當日完成對帳的訂單記一則「【ATM對帳】今日完成」（只留紀錄，不跳提醒）；
-  已付款但未開立發票的另記「【ATM對帳】未開立發票」（30 分鐘後、提前 20／10 分鐘跳提醒）。
+  已付款但未開立發票的另記「【ATM對帳】未開立發票」（30 分鐘後、提前 20／10 分鐘跳提醒）；
+  ② 需確認／疑似拆單／未配對／清潔異動未回填等記「【ATM對帳】需人工處理」（同上提醒）。
 
 Actions 紀錄只印各區筆數，不印客戶姓名、訂單編號；逐筆明細寫進行事曆與統一執行 Log。
 """
@@ -32,6 +33,7 @@ TZ = ZoneInfo("Asia/Taipei")
 CALENDAR_IDS = ("jenny@hers.com.tw", "jenny@lemonclean.com.tw")
 DONE_PREFIX = "【ATM對帳】今日完成"
 NO_INVOICE_PREFIX = "【ATM對帳】未開立發票"
+REVIEW_PREFIX = "【ATM對帳】需人工處理"
 
 
 def summary_lines(result: dict) -> list[str]:
@@ -73,9 +75,18 @@ def _line(d: dict) -> str:
     return text
 
 
+def collect_review(result: dict) -> list[str]:
+    lines = []
+    for region, item in (result or {}).items():
+        for r in ((item or {}).get("match") or {}).get("review") or []:
+            lines.append(f"{region} 第{r['列號']}列【{r['類型']}】{r['訂單']} {r['姓名']} ${r['金額']}　{r['說明']}")
+    return lines
+
+
 def build_calendar_events(result: dict, now: datetime) -> list[dict]:
     done = collect(result, "completed")
     no_invoice = collect(result, "no_invoice")
+    review = collect_review(result)
     events = []
     if done:
         events.append(dict(
@@ -88,6 +99,13 @@ def build_calendar_events(result: dict, now: datetime) -> list[dict]:
             summary=f"{NO_INVOICE_PREFIX} {len(no_invoice)} 筆，請到後台開立",
             description="\n".join(_line(d) for d in no_invoice),
             start=now + timedelta(minutes=30), reminder_minutes=[20, 10], replace_prefix=NO_INVOICE_PREFIX,
+        ))
+    if review:
+        # 需確認／疑似拆單／未配對／清潔異動未回填：排程沒有畫面，改記在行事曆
+        events.append(dict(
+            summary=f"{REVIEW_PREFIX} {len(review)} 列",
+            description="\n".join(review),
+            start=now + timedelta(minutes=30), reminder_minutes=[20, 10], replace_prefix=REVIEW_PREFIX,
         ))
     return events
 
