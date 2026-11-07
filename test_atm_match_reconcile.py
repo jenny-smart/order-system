@@ -37,20 +37,95 @@ def test_default_service_fee_fallback(amount, order_no, expected):
     assert atm.default_service_fee(amount, order_no) == expected
 
 
-# ── ② 未指定列號：近 3 日 A:F 有資料、H:O 空白 ───────────
+# ── ② 未指定列號：近 3 個上班日 A:F 有資料、H:O 空白 ───────
+@pytest.mark.parametrize("today,start", [
+    ("2026-11-07", "2026-11-04"),  # 週六 → 週三、四、五
+    ("2026-11-09", "2026-11-05"),  # 週一 → 上週四、五＋今天
+    ("2026-11-05", "2026-11-03"),
+    ("2027-02-11", "2027-02-02"),  # 春節連假後第一天：連假不算
+])
+def test_recent_workdays_start(today, start):
+    assert str(atm.recent_workdays_start(date.fromisoformat(today))) == start
+
+
 def test_recent_unmatched_bank_rows():
     rows = [
         _row(A="日期"),
-        _row(A="2026/11/03", B="2026/11/03 10:00:00", E="4800"),          # 超過 3 日
-        _row(A="2026/11/05", B="2026/11/05 10:00:00", E="4800"),
+        _row(A="2026/11/03", B="2026/11/03 10:00:00", E="4800"),          # 超過 3 個上班日
+        _row(A="2026/11/04", B="2026/11/04 10:00:00", E="4800"),
         _row(A="2026/11/06", B="2026/11/06 14:02:46", E="4800", J="LC1", K="蘇慧芬"),  # 已配對
         _row(A="2026/11/06", B="2026/11/06 16:39:40", E="4800", F="檸檬家事"),
         _row(A="2026/11/07", B="2026/11/07 08:14:10", E="400", F="90344實"),
         _row(G="--,,"),                                                   # 只有 G 公式
         _row(I="2026.11", J="LC2", K="王蘭香", L="4800"),                 # 下方待配對區
-        _row(B="2026/11/07 09:00:00", E="2400"),                          # A 空白看 B
+        _row(B="2026/11/07 09:00:00", D="2400"),                          # A 空白看 B；支出列也算
     ]
     assert atm.recent_unmatched_bank_rows(rows, today=date(2026, 11, 7)) == [3, 5, 6, 9]
+
+
+# ── 退款：清潔異動同日退款 ───────────────────────────
+def test_match_refund():
+    refunds = [
+        {"date": date(2026, 11, 6), "order_no": "LC00219001", "name": "甲", "amounts": {2400}, "line_url": "", "year_month": "2026.11"},
+        {"date": date(2026, 11, 6), "order_no": "LC00219002", "name": "乙", "amounts": {1200, 1300}, "line_url": "", "year_month": "2026.11"},
+        {"date": date(2026, 11, 5), "order_no": "LC00219003", "name": "丙", "amounts": {800}, "line_url": "", "year_month": "2026.10"},
+    ]
+    assert atm.match_refund(refunds, date(2026, 11, 6), 2400) == (refunds[0], "退款")
+    assert atm.match_refund(refunds, date(2026, 11, 6), 1300)[0]["order_no"] == "LC00219002"   # T 匯款金額或 S 退款金額
+    assert atm.match_refund(refunds, date(2026, 11, 5), 900)[0] is None        # 金額不符 → 人工
+    assert atm.match_refund(refunds, date(2026, 11, 6), 999)[0] is None
+    assert atm.match_refund(refunds, date(2026, 11, 6), 2400, {"LC00219001"})[0] is None  # 已用過
+    assert atm.match_refund(refunds, date(2026, 11, 7), 2400) == (None, "清潔異動找不到同日退款")
+
+
+class _MatchWS:
+    def __init__(self, rows):
+        self.rows = rows
+        self.writes = {}
+
+    def get_all_values(self):
+        return self.rows
+
+    def update(self, a1, values, value_input_option=None):
+        self.writes[a1] = values[0]
+
+    def update_cell(self, r, c, v):
+        self.writes[(r, c)] = v
+
+
+def _run_match(monkeypatch, rows, refunds=()):
+    ws = _MatchWS(rows)
+    monkeypatch.setattr(atm, "get_atm_worksheet", lambda region: ws)
+    monkeypatch.setattr(atm, "load_change_order_refunds", lambda region: list(refunds))
+    for name in ("_clear_data_validation", "_copy_data_validation", "ensure_candidate_row_format"):
+        monkeypatch.setattr(atm, name, lambda *a, **k: None)
+    result = atm.auto_match_bank_rows("台北", today=date(2026, 11, 7))
+    return result, ws
+
+
+def test_auto_match_refund_trainee_and_manual(monkeypatch):
+    rows = [
+        _row(A="日期"),
+        _row(A="2026/11/06", B="2026/11/06 11:11:58", C="網路自轉", D="2,000", F="吳珍嫻新訓"),   # 2 支出 2000 → 新訓費
+        _row(A="2026/11/06", B="2026/11/06 12:00:00", C="網路自轉", D="2,400", F="退款"),         # 3 支出 → 清潔異動退款
+        _row(A="2026/11/06", B="2026/11/06 13:00:00", C="網路自轉", D="3,000", F="?"),            # 4 支出其他 → 人工
+        _row(A="2026/11/06", B="2026/11/06 17:28:02", C="ＣＤ轉收", E="2,000", F="新訓費"),      # 5 收入 2000 沒訂單 → 新訓費
+        _row(A="2026/11/06", B="2026/11/06 17:30:00", C="ＣＤ轉收", E="2,400", F="家事清潔"),    # 6 收入其他沒依據 → 人工
+    ]
+    refunds = [{"date": date(2026, 11, 6), "order_no": "LC00219084", "name": "許文菁", "amounts": {2400},
+                "line_url": "https://line", "year_month": "2026.11"}]
+    result, ws = _run_match(monkeypatch, rows, refunds)
+    assert ws.writes["I2:O2"] == ["2026.11", "", "吳珍嫻", 2000, "", "清潔", "新訓費"]
+    assert ws.writes[(2, atm.COL_RECON_STATUS)] == "新訓費"
+    assert ws.writes["H3:O3"] == ["https://line", "2026.11", "LC00219084", "許文菁", 2400, "", "清潔", "退款"]
+    assert ws.writes[(3, atm.COL_RECON_STATUS)] == "退款"
+    assert not any(k for k in ws.writes if (isinstance(k, str) and k.endswith("4")) or k == (4, atm.COL_RECON_STATUS))
+    assert ws.writes["I5:O5"][-2:] == ["清潔", "新訓費"]
+    assert not any(k for k in ws.writes if (isinstance(k, str) and k.endswith("6")) or k == (6, atm.COL_RECON_STATUS))
+    assert sorted(result["matched_rows"]) == [2, 3, 5]
+    assert result["unmatched"] == 2
+    # ③ 不會處理退款／新訓費列
+    assert atm.rows_ready_for_reconcile(rows) == []
 
 
 # ── ③ 只挑確定配對的列 ───────────────────────────────

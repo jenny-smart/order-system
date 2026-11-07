@@ -1229,8 +1229,8 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
 
         c1, c2 = st.columns([1, 3])
         with c1: region = region_selectbox("地區", "atm_match_region", email)
-        with c2: row_spec = st.text_input("指定銀行列號（選填）", placeholder="留空＝自動處理近 3 日 A:F 有資料、H:O 空白的列；例如：762-764,767-771")
-        st.caption("N/O 欄沿用下方待配對列：待付款訂單＝清潔／服務費用；清潔異動＝清潔／異動費或清潔／工具組。")
+        with c2: row_spec = st.text_input("指定銀行列號（選填）", placeholder="留空＝自動處理近 3 個上班日（連假不算）A:F 有資料、H:O 空白的列；例如：762-764,767-771")
+        st.caption("N/O 沿用下方待配對列（待付款＝清潔／服務費用；清潔異動＝清潔／異動費或工具組）。沒有訂單：2000＝清潔／新訓費；支出（D 欄）先找清潔異動同日同金額退款＝清潔／退款；其他留給人工確認。")
         c3, c4 = st.columns(2)
         with c3: allow_review_prefill = st.checkbox("允許需確認候選預填", value=True, key="atm_match_allow_review_prefill")
         with c4: overwrite_existing = st.checkbox("覆蓋已配對列", value=False, key="atm_match_overwrite")
@@ -1261,7 +1261,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                 st.markdown(f"**將處理 {len(preview['rows'])} 列：** " + "、".join(str(r["列號"]) for r in preview["rows"]))
                 st.dataframe(preview["rows"], use_container_width=True, hide_index=True)
             else:
-                st.info("沒有要處理的列（近 3 日 A:F 有資料、H:O 空白的列為 0）。")
+                st.info("沒有要處理的列（近 3 個上班日 A:F 有資料、H:O 空白的列為 0）。")
 
         execute_btn = st.button("🚀 ② 配對＋③ 更新系統對帳" if with_reconcile else "🚀 配對銀行明細", use_container_width=True, disabled=not st.session_state.credentials_ready)
         if preview is not None and not row_spec.strip():
