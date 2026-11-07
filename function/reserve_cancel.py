@@ -5,6 +5,8 @@
 - 2026-11-07：訂單列表卡片同步解析「專員」（staff），供保留單盤點顯示專員姓名。
 - 2026-11-07：保留單查詢只保留「已付款」訂單；取消、待付款等其他狀態一律不顯示，
   並在查詢診斷列出被排除的張數。
+- 2026-11-07：「全部」篩選改為可直接勾選取消（原為僅供查看）。取消時備註空白或
+  系統保留單改成「取消系統保留單」，其他內容（代客保留、人工保留）改成「取消」＋原備註。
 """
 
 from __future__ import annotations
@@ -21,6 +23,9 @@ CANCELLED_RESERVE_MEMO = "取消系統保留單"
 # 代客保留：用檸檬保留帳號替客人先 booking，客人備註寫「代客保留：客人姓名」。
 PROXY_RESERVE_MEMO = "代客保留"
 PROXY_FILTER = "代客保留（客人備註含關鍵字）"
+# 全部：期間內所有已付款保留單，皆可勾選取消。舊名稱保留相容。
+ALL_FILTER = "全部"
+ALL_FILTER_ALIASES = {ALL_FILTER, "全部（僅供查看）"}
 CANCELLED_PREFIX = "取消"
 # 保留單查詢只顯示此付款狀態的訂單（取消、待付款不顯示）。
 PAID_STATUS = "已付款"
@@ -80,7 +85,7 @@ def _memo_matches_filter(memo: str, memo_filter: str, keyword: str = "") -> bool
         return memo == ""
     if memo_filter == "系統保留單或空白":
         return memo == "" or _is_active_reserve_memo(memo)
-    if memo_filter == "全部（僅供查看）":
+    if memo_filter in ALL_FILTER_ALIASES:
         return True
     raise ValueError(f"未知客人備註篩選：{memo_filter}")
 
@@ -214,7 +219,7 @@ def find_reserve_orders(
             detail = co.fetch_order_cancel_details(session, base_url, row["purchase_id"])
         except Exception as exc:
             detail_errors += 1
-            if memo_filter == "全部（僅供查看）":
+            if memo_filter in ALL_FILTER_ALIASES:
                 item = dict(row)
                 item["customer_memo"] = ""
                 item["memo_read_error"] = str(exc)
@@ -230,6 +235,10 @@ def find_reserve_orders(
         if keyword:
             item["memo_keyword"] = keyword
             item["cancel_eligible"] = True
+        elif memo_filter in ALL_FILTER_ALIASES:
+            # 全部模式：已取消過（備註以「取消」開頭）的不給選，其餘都可取消。
+            item["cancel_any_memo"] = True
+            item["cancel_eligible"] = not memo.startswith(CANCELLED_PREFIX)
         else:
             item["cancel_eligible"] = (memo == "" or _is_active_reserve_memo(memo))
         for key in (
@@ -278,6 +287,17 @@ def cancel_reserve_orders(
             current_memo = str(detail.get("memo") or "").strip()
         except Exception as exc:
             skipped.append({**row, "ok": False, "message": f"取消前讀取客人備註失敗，已跳過：{exc}"})
+            continue
+        if row.get("cancel_any_memo"):
+            # 全部模式：使用者已逐張勾選確認，依最新備註決定取消後的備註。
+            if current_memo.startswith(CANCELLED_PREFIX):
+                skipped.append({**row, "ok": False, "customer_memo": current_memo,
+                                "message": "此保留單已取消過，已跳過。"})
+                continue
+            if current_memo == "" or current_memo == SYSTEM_RESERVE_MEMO:
+                safe_rows.append({**row, "cancel_memo": CANCELLED_RESERVE_MEMO})
+            else:
+                safe_rows.append({**row, "cancel_memo": CANCELLED_PREFIX + current_memo})
             continue
         keyword = str(row.get("memo_keyword") or "")
         if keyword:
