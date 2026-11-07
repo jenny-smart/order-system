@@ -615,3 +615,46 @@ def test_schedule_calendar_includes_review():
     events = job.build_calendar_events(result, datetime(2026, 11, 7, 8, 12, tzinfo=TZ))
     assert events[-1]["summary"] == "【ATM對帳】需人工處理 1 列"
     assert "台北 第3列【需確認】LC1 甲 $4800" in events[-1]["description"]
+
+
+# ── 下拉選單直接套用範本規則；失敗要顯示 ──────────────────
+def _dv_targets(ws):
+    return sorted((r["setDataValidation"]["range"]["startRowIndex"] + 1, r["setDataValidation"]["range"]["startColumnIndex"] + 1)
+                  for r in ws.spreadsheet.requests if "setDataValidation" in r)
+
+
+def test_ensure_format_sets_missing_no_dropdowns_from_template():
+    # 截圖：第 6 列 I/N/O 都有下拉（範本）；第 8～9 列只有 I 有下拉、N/O 沒有
+    ws = FakeWorksheet(['=a'] * 9, {9: {6, 8, 9}, 14: {6}, 15: {6}})
+    result = atm.ensure_candidate_row_format(ws, [6, 8, 9])
+    assert result["template"] == 6 and result["errors"] == []
+    assert _dv_targets(ws) == [(8, 14), (8, 15), (9, 14), (9, 15)]   # I 已有同規則不重設
+    assert result["dropdown_copied"] == 2
+
+
+def test_ensure_format_reports_metadata_failure():
+    ws = FakeWorksheet(['=a'] * 3, {})
+    def boom(params=None):
+        raise RuntimeError("403 權限不足")
+    ws.spreadsheet.fetch_sheet_metadata = boom
+    result = atm.ensure_candidate_row_format(ws, [2, 3])
+    assert any("403" in e for e in result["errors"])
+    assert any("找不到 I 欄有下拉選單" in e for e in result["errors"])
+
+
+def test_ensure_format_retries_per_row_when_batch_fails():
+    ws = FakeWorksheet(['=a'] * 9, {9: {6}, 14: {6}, 15: {6}})
+    calls = []
+
+    def flaky(body):
+        calls.append(len(body["requests"]))
+        rows = {(r.get("setDataValidation") or r.get("repeatCell") or {}).get("range", {}).get("startRowIndex")
+                for r in body["requests"]}
+        if 7 in rows:          # 第 8 列有問題
+            raise RuntimeError("table range")
+        ws.spreadsheet.requests.extend(body["requests"])
+
+    ws.spreadsheet.batch_update = flaky
+    result = atm.ensure_candidate_row_format(ws, [8, 9])
+    assert any("第8列下拉選單失敗" in e for e in result["errors"])
+    assert (9, 14) in _dv_targets(ws) and (8, 14) not in _dv_targets(ws)

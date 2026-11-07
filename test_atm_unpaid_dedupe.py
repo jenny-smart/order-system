@@ -25,9 +25,14 @@ def _paste(values, rows):
     ws = Mock()
     ws.get_all_values.return_value = values
     ws.row_count = 100
+    normalize = Mock(return_value={"rows": 3})
     with patch.object(atm, "get_atm_worksheet", return_value=ws), \
+            patch.object(atm, "normalize_atm_rows", normalize), \
             patch.object(atm.memo, "with_retry", side_effect=lambda fn, *a, **k: fn(*a, **k)):
         result = atm.paste_atm_unpaid_list("台北", rows)
+    # 按貼上就同步整理 ATM 分頁 G:O（不論有沒有新訂單）
+    normalize.assert_called_once()
+    assert result["normalized"] == {"rows": 3}
     return result, ws
 
 

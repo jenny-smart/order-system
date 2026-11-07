@@ -1187,6 +1187,11 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                     rows = atm.search_atm_unpaid_orders(session=session, date_until=date_until.strftime("%Y-%m-%d"), ui_logger=atm_list_ui_log)
                 st.session_state.atm_list_rows = rows
                 st.session_state.atm_list_status_check = status_check
+                if not rows:
+                    # 沒有可貼的訂單也照樣整理 ATM 分頁 G:O（不用另外按）
+                    nr = atm.normalize_atm_rows(region, ui_logger=atm_list_ui_log)
+                    st.session_state.atm_list_paste_result = {"pasted": 0, "skipped_duplicates": 0, "normalized": nr,
+                                                              "errors": [f"整理 G:O：{e}" for e in nr.get("errors") or []]}
                 atm_list_ui_log("===== 查詢完成 =====")
                 st.rerun()
             except Exception as e:
@@ -1216,20 +1221,17 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                     except Exception as e:
                         atm_list_ui_log(f"❌ 貼上失敗：{e}"); st.error(str(e))
 
-        st.markdown("---")
-        if st.button(f"🧹 整理「{region}」ATM 分頁 G:O（G 補公式、I 下拉選單、格式統一、N/O 空白補值）", use_container_width=True, key="atm_normalize_btn"):
-            try:
-                with st.spinner("整理中，請稍候…"):
-                    nr = atm.normalize_atm_rows(region, ui_logger=atm_list_ui_log)
-                st.success(f"✅ 已整理 {nr['rows']} 列：N/O 補值 {nr['no_filled']} 列、G 補公式 {nr.get('g_filled', 0)} 格、下拉／格式套用 {nr.get('format_copied', 0)} 列、I 欄改回文字月份 {nr.get('month_fixed', 0)} 格")
-            except Exception as e:
-                st.error(f"整理失敗：{e}")
-
         if st.session_state.get("atm_list_paste_result") is not None:
             st.markdown("---"); step("5", "貼上結果")
             pr = st.session_state.get("atm_list_paste_result")
             if pr.get("errors"): st.error("；".join(pr["errors"]))
-            else: st.success(f"✅ 已從第 {pr.get('start_row')} 列開始，貼上 {pr.get('pasted', 0)} 筆資料到 H~O 欄。")
+            if pr.get("pasted"):
+                st.success(f"✅ 已從第 {pr.get('start_row')} 列開始，貼上 {pr.get('pasted', 0)} 筆資料到 H~O 欄。")
+            else:
+                st.info(f"沒有新訂單可新增（略過 {pr.get('skipped_duplicates', 0)} 筆重複訂單）。")
+            nr = pr.get("normalized")
+            if nr:
+                st.success(f"✅ 已同步整理 ATM 分頁 {nr.get('rows', 0)} 列（範本第 {nr.get('template', 0)} 列）：N/O 補值 {nr.get('no_filled', 0)} 列、補下拉 {nr.get('dropdown_copied', 0)} 列、格式套用 {nr.get('format_copied', 0)} 列、G 補公式 {nr.get('g_filled', 0)} 格、I 欄改回文字月份 {nr.get('month_fixed', 0)} 格")
 
     def _merge_match_reconcile_result(both):
         """②＋③ 結果合併成一張結果卡：錯誤兩邊都列，成功／失敗以 ③ 為主並保留 ② 的配對統計。"""

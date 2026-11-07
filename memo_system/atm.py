@@ -903,66 +903,132 @@ def _month_text(value) -> str:
     return f"{value:.2f}"
 
 
+def _validation_rules(ws, columns: List[int], upto_row: int, log=None) -> Dict[int, Dict[int, Dict]]:
+    """{欄: {列: 下拉選單規則}}。讀取失敗會寫進 LOG 並往上拋，不再默默當成「沒有下拉」。"""
+    title = ws.title.replace("'", "''")
+    lo, hi = min(columns), max(columns)
+    a1 = f"'{title}'!{chr(64 + lo)}1:{chr(64 + hi)}{upto_row}"
+    meta = memo.with_retry(ws.spreadsheet.fetch_sheet_metadata, params={
+        "ranges": a1,
+        "fields": "sheets(properties.sheetId,data(startRow,startColumn,rowData.values.dataValidation))",
+    })
+    found: Dict[int, Dict[int, Dict]] = {c: {} for c in columns}
+    for sheet in meta.get("sheets", []):
+        for block in sheet.get("data", []):
+            start_row = int(block.get("startRow", 0))
+            start_col = int(block.get("startColumn", 0))
+            for r_off, row_data in enumerate(block.get("rowData", []) or []):
+                for c_off, cell in enumerate(row_data.get("values", []) or []):
+                    col = start_col + c_off + 1
+                    if col in found and cell.get("dataValidation"):
+                        found[col][start_row + r_off + 1] = cell["dataValidation"]
+    return found
+
+
+def _row_range(ws, row: int, col_start: int, col_end: int) -> Dict:
+    return {"sheetId": ws.id, "startRowIndex": row - 1, "endRowIndex": row,
+            "startColumnIndex": col_start - 1, "endColumnIndex": col_end}
+
+
 def ensure_candidate_row_format(ws, target_rows: List[int], log=None) -> Dict:
     """每次寫入／移動 G:O 後呼叫（2026-11-07 Jenny：G 欄不得空白；I/N/O 固定下拉選單、格式一致）。
 
-    1. 範本列＝最後一列 I、N、O 三欄都有下拉選單的列（沒有就用最後一列 I 有下拉的列）；
-       所有目標列的 G:O 格式（含下拉選單）一律從同一範本列複製，不再一列抄上一列（會把舊格式一路傳下去）。
-    2. I 欄數字格式固定為文字；I 欄若存成數字（2026.11）或日期，改寫成文字「2026.11」，避免顯示成 1905/07。
+    1. 範本列＝最後一列 I、N、O 三欄都有下拉選單的列（沒有就用最後一列 I 有下拉的列）。
+    2. 目標列：G:O 格式從範本列複製；I/N/O 下拉選單直接套用範本列的規則（不靠複製，確保一定有下拉）；
+       I 欄數字格式固定文字，存成數字／日期的月份改寫成文字「YYYY.MM」。
     3. G 空白就複製範本列（或最近一列）的 G 公式。
+    任何一步失敗都寫進 result["errors"]（畫面會顯示），並改用較保守的方式重試。
     """
     log = log or (lambda msg: None)
-    result = {"g_filled": 0, "dropdown_copied": 0, "format_copied": 0, "month_fixed": 0}
+    result = {"g_filled": 0, "dropdown_copied": 0, "format_copied": 0, "month_fixed": 0,
+              "template": 0, "errors": []}
     target_rows = sorted({int(r) for r in target_rows if r})
     if not target_rows:
         return result
     upto = max(max(target_rows), int(getattr(ws, "row_count", 0) or 0))
 
-    validation = _rows_with_validation(ws, DROPDOWN_COLUMNS, upto)
-    i_rows = validation.get(COL_I_MONTH, set())
-    full_rows = i_rows & validation.get(COL_N_SERVICE, set()) & validation.get(COL_O_FEE, set())
+    try:
+        rules = _validation_rules(ws, DROPDOWN_COLUMNS, upto, log)
+    except Exception as exc:
+        rules = {c: {} for c in DROPDOWN_COLUMNS}
+        result["errors"].append(f"讀取 I/N/O 下拉選單失敗：{exc}")
+        log(f"❌ 讀取 I/N/O 下拉選單失敗：{exc}")
+    i_rows = set(rules[COL_I_MONTH])
+    full_rows = i_rows & set(rules[COL_N_SERVICE]) & set(rules[COL_O_FEE])
     template = max(full_rows or i_rows or {0})
-    requests = []
-    if template:
-        for row in target_rows:
-            if row == template:
-                continue
-            requests.append(_copy_request(ws, template, row, COL_G_SUMMARY, COL_O_FEE, "PASTE_FORMAT"))
-            result["format_copied"] += 1
-            if not ({row} <= full_rows):
-                result["dropdown_copied"] += 1
+    result["template"] = template
+    if not template:
+        result["errors"].append("ATM 分頁找不到 I 欄有下拉選單的列可當範本")
+        log("❌ ATM 分頁找不到 I 欄有下拉選單的列可當範本，請先手動設定一列（I、N、O 下拉選單）")
     else:
-        log("⚠️ 整張 ATM 分頁沒有 I 欄下拉選單可當範本，請先手動設定一列（I、N、O 下拉選單）")
+        log(f"G:O 範本列：第{template}列")
+
+    fmt_requests, dv_requests, text_requests, g_requests = [], [], [], []
     for row in target_rows:
-        requests.append({"repeatCell": {
-            "range": {"sheetId": ws.id, "startRowIndex": row - 1, "endRowIndex": row,
-                      "startColumnIndex": COL_I_MONTH - 1, "endColumnIndex": COL_I_MONTH},
+        if template and row != template:
+            fmt_requests.append(_copy_request(ws, template, row, COL_G_SUMMARY, COL_O_FEE, "PASTE_FORMAT"))
+            missing = False
+            for col in DROPDOWN_COLUMNS:
+                rule = rules[col].get(template)
+                if rule and rules[col].get(row) != rule:
+                    dv_requests.append({"setDataValidation": {"range": _row_range(ws, row, col, col), "rule": rule}})
+                    missing = True
+            if missing:
+                result["dropdown_copied"] += 1
+        text_requests.append({"repeatCell": {
+            "range": _row_range(ws, row, COL_I_MONTH, COL_I_MONTH),
             "cell": {"userEnteredFormat": {"numberFormat": {"type": "TEXT"}}},
             "fields": "userEnteredFormat.numberFormat",
         }})
 
     formulas = _g_formulas(ws, upto)
     formula_rows = {i for i, f in enumerate(formulas, start=1) if f.startswith("=")}
+    fallback_g = []
     for row in target_rows:
         current = formulas[row - 1] if row - 1 < len(formulas) else ""
         if str(current).strip():
             continue
         source = template if template in formula_rows else _nearest(formula_rows, row)
         if source:
-            requests.append(_copy_request(ws, source, row, COL_G_SUMMARY, COL_G_SUMMARY, "PASTE_FORMULA"))
+            g_requests.append(_copy_request(ws, source, row, COL_G_SUMMARY, COL_G_SUMMARY, "PASTE_FORMULA"))
         else:
-            memo.with_retry(ws.update, f"G{row}", [[_fallback_g_formula(row)]], value_input_option="USER_ENTERED")
-            log(f"⚠️ 第{row}列：找不到 G 欄公式可參照，改用預設組合公式")
+            fallback_g.append(row)
         result["g_filled"] += 1
 
-    if requests:
-        memo.with_retry(ws.spreadsheet.batch_update, {"requests": requests})
+    def send(requests, label) -> bool:
+        if not requests:
+            return True
+        try:
+            memo.with_retry(ws.spreadsheet.batch_update, {"requests": requests})
+            return True
+        except Exception as exc:
+            result["errors"].append(f"{label}失敗：{exc}")
+            log(f"❌ {label}失敗：{exc}")
+            return False
+
+    # 格式先套，再套下拉選單與文字格式（格式失敗不影響下拉選單）
+    if send(fmt_requests, "G:O 格式套用"):
+        result["format_copied"] = len(fmt_requests)
+    if not send(dv_requests + text_requests, "I/N/O 下拉選單與 I 欄文字格式"):
+        # 整批失敗時逐列重試，找出哪幾列不行
+        ok = 0
+        for row in target_rows:
+            per_row = [r for r in dv_requests + text_requests
+                       if (r.get("setDataValidation") or r.get("repeatCell"))["range"]["startRowIndex"] == row - 1]
+            if send(per_row, f"第{row}列下拉選單"):
+                ok += 1
+        log(f"逐列重試下拉選單：成功 {ok}／{len(target_rows)} 列")
+    send(g_requests, "G 欄公式")
+    for row in fallback_g:
+        memo.with_retry(ws.update, f"G{row}", [[_fallback_g_formula(row)]], value_input_option="USER_ENTERED")
+        log(f"⚠️ 第{row}列：找不到 G 欄公式可參照，改用預設組合公式")
 
     # I 欄數字／日期 → 文字「YYYY.MM」
     try:
         raw = memo.with_retry(ws.get, f"I1:I{upto}", value_render_option="UNFORMATTED_VALUE") or []
-    except Exception:
+    except Exception as exc:
         raw = []
+        result["errors"].append(f"讀取 I 欄失敗：{exc}")
     month_updates = []
     for row in target_rows:
         value = raw[row - 1][0] if row - 1 < len(raw) and raw[row - 1] else ""
@@ -972,9 +1038,9 @@ def ensure_candidate_row_format(ws, target_rows: List[int], log=None) -> Dict:
         memo.with_retry(ws.batch_update, month_updates, value_input_option="RAW")
         result["month_fixed"] = len(month_updates)
 
-    if result["g_filled"] or result["dropdown_copied"] or result["month_fixed"]:
-        log(f"已補 G 欄公式 {result['g_filled']} 格、G:O 格式從第{template}列套用 {result['format_copied']} 列、"
-            f"I 欄改回文字月份 {result['month_fixed']} 格")
+    log(f"G:O 整理：範本第{template}列、格式套用 {result['format_copied']} 列、補下拉 {result['dropdown_copied']} 列、"
+        f"G 補公式 {result['g_filled']} 格、I 欄改回文字月份 {result['month_fixed']} 格"
+        + (f"；錯誤 {len(result['errors'])} 項" if result["errors"] else ""))
     return result
 
 
@@ -1017,7 +1083,9 @@ def normalize_atm_rows(region: str, ui_logger=None, ws=None) -> Dict:
     if updates:
         memo.with_retry(ws.batch_update, updates, value_input_option="RAW")
         result["no_filled"] = len(updates)
-    result.update(ensure_candidate_row_format(ws, data_rows, log=log))
+    fmt = ensure_candidate_row_format(ws, data_rows, log=log)
+    result.update({k: v for k, v in fmt.items() if k != "errors"})
+    result["errors"] = list(fmt.get("errors") or [])
     log(f"✅ 已整理 ATM 分頁 {len(data_rows)} 列：N/O 補值 {result['no_filled']} 列、G 補公式 {result.get('g_filled', 0)} 格、"
         f"下拉／格式套用 {result.get('format_copied', 0)} 列、I 欄改回文字月份 {result.get('month_fixed', 0)} 格")
     return result
@@ -1232,9 +1300,12 @@ def auto_match_bank_rows(
     log(f"===== 開始自動配對 ATM 銀行明細（{region}）=====")
     # 先整理現有列：G 補公式、G:O 格式統一、N/O 空白補值（候選列 N/O 正確，配對時才會帶對）
     try:
-        normalize_atm_rows(region, ui_logger=ui_logger, ws=ws)
+        nr = normalize_atm_rows(region, ui_logger=ui_logger, ws=ws) or {}
+        for err in nr.get("errors") or []:
+            add_review("", "G:O 整理", err)
     except Exception as exc:
         log(f"⚠️ 整理 ATM 分頁 G:O 失敗：{exc}")
+        add_review("", "G:O 整理", f"整理失敗：{exc}")
     rows = memo.with_retry(ws.get_all_values)
     if str(row_spec or "").strip():
         target_row_nums = memo.parse_row_spec(row_spec)
@@ -1764,6 +1835,16 @@ def search_atm_unpaid_orders(session, date_until: Optional[str] = None, ui_logge
     return rows
 
 
+def _auto_normalize(region: str, ws, log, result: Dict) -> None:
+    """按執行時自動整理 ATM 分頁 G:O，不用另外按整理。失敗只記錯誤，不影響貼上結果。"""
+    try:
+        result["normalized"] = normalize_atm_rows(region, ui_logger=log, ws=ws)
+        result["errors"].extend(f"整理 G:O：{e}" for e in result["normalized"].get("errors") or [])
+    except Exception as exc:
+        log(f"⚠️ 整理 ATM 分頁 G:O 失敗：{exc}")
+        result["errors"].append(f"整理 ATM 分頁 G:O 失敗：{exc}")
+
+
 def paste_atm_unpaid_list(region: str, rows: List[Dict], ui_logger=None) -> Dict:
     """新增未出現的待付款訂單並回填 P/T。
 
@@ -1814,6 +1895,7 @@ def paste_atm_unpaid_list(region: str, rows: List[Dict], ui_logger=None) -> Dict
 
     if not pending_rows:
         log(f"沒有新訂單可新增；已略過 {result['skipped_duplicates']} 筆重複訂單")
+        _auto_normalize(region, ws, log, result)
         return result
 
     # 維持原規則：A 欄最後一筆下方空 4 列；既有 I:L 絕不覆蓋。
@@ -1854,11 +1936,8 @@ def paste_atm_unpaid_list(region: str, rows: List[Dict], ui_logger=None) -> Dict
             })
 
     memo.with_retry(ws.batch_update, updates, value_input_option="RAW")
-    try:
-        ensure_candidate_row_format(ws, list(range(start_row, end_row + 1)), log=log)
-    except Exception as exc:
-        log(f"⚠️ 補 G 欄公式／下拉選單失敗：{exc}")
-        result["errors"].append(f"補 G 欄公式／下拉選單失敗：{exc}")
+    # 貼上後順便整理整張 ATM 分頁（含剛貼的列）：G 公式、G:O 格式／下拉、I 文字月份、N/O 空白補值
+    _auto_normalize(region, ws, log, result)
 
     result["pasted"] = len(pending_rows)
     result["start_row"] = start_row
