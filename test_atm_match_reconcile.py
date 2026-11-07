@@ -309,43 +309,58 @@ class FakeWorksheet:
         self.spreadsheet = FakeSpreadsheet(validation_rows)
         self.updates = []
 
+    month_values = {}
+
     def get(self, a1, value_render_option=None):
+        if a1.startswith("I"):
+            n = max(len(self.g), max(self.month_values, default=0))
+            return [[self.month_values[r]] if r in self.month_values else [] for r in range(1, n + 1)]
         return [[v] if v else [] for v in self.g]
 
     def update(self, a1, values, value_input_option=None):
         self.updates.append((a1, values))
 
+    def batch_update(self, updates, value_input_option=None):
+        self.value_updates = getattr(self, "value_updates", []) + list(updates)
+
 
 def _copies(ws, paste_type):
     return [(c["copyPaste"]["source"]["startRowIndex"] + 1, c["copyPaste"]["destination"]["startRowIndex"] + 1,
              c["copyPaste"]["destination"]["startColumnIndex"] + 1, c["copyPaste"]["destination"]["endColumnIndex"])
-            for c in ws.spreadsheet.requests if c["copyPaste"]["pasteType"] == paste_type]
+            for c in ws.spreadsheet.requests if "copyPaste" in c and c["copyPaste"]["pasteType"] == paste_type]
 
 
-def test_ensure_format_copies_whole_g_to_o_format_and_g_formula():
+def test_month_text():
+    assert atm._month_text(2026.11) == "2026.11"
+    assert atm._month_text(2026.1) == "2026.10"
+    assert atm._month_text(46327) == "2026.11"      # 日期序號 2026-11-01
+    assert atm._month_text("2026.09") == "2026.09"
+
+
+def _repeat_rows(ws):
+    return [r["repeatCell"]["range"]["startRowIndex"] + 1 for r in ws.spreadsheet.requests if "repeatCell" in r]
+
+
+def test_ensure_format_uses_single_template_row_not_chain():
+    # 第 3 列 I 有下拉但 N/O 沒有；第 5 列 I/N/O 都有 → 範本＝第 5 列（不是「上方最近一列」）
     formula = '=I2&"-"&N2'
-    ws = FakeWorksheet([""] + [formula] * 9 + ["", ""], {9: {2, 3}, 14: {2}, 15: {2}})
-    result = atm.ensure_candidate_row_format(ws, [11, 12])
-    assert result == {"g_filled": 2, "dropdown_copied": 2, "format_copied": 2}
-    # G:O 整段格式（含 I 下拉）從上方最近 I 有下拉的第 3 列複製
-    assert _copies(ws, "PASTE_FORMAT") == [(3, 11, 7, 15), (3, 12, 7, 15)]
-    assert _copies(ws, "PASTE_FORMULA") == [(10, 11, 7, 7), (10, 12, 7, 7)]
-    assert ws.updates == []
+    ws = FakeWorksheet([""] + [formula] * 9 + ["", ""], {9: {2, 3, 5}, 14: {2, 5}, 15: {2, 5}})
+    ws.month_values = {11: 2026.11, 12: "2026.11"}
+    result = atm.ensure_candidate_row_format(ws, [3, 11, 12])
+    assert _copies(ws, "PASTE_FORMAT") == [(5, 3, 7, 15), (5, 11, 7, 15), (5, 12, 7, 15)]
+    assert _copies(ws, "PASTE_FORMULA") == [(5, 11, 7, 7), (5, 12, 7, 7)]
+    assert _repeat_rows(ws) == [3, 11, 12]                          # I 欄固定文字格式
+    assert ws.value_updates == [{"range": "I11", "values": [["2026.11"]]}]   # 數字改回文字
+    assert result["month_fixed"] == 1 and result["g_filled"] == 2
 
 
-def test_ensure_format_uses_row_below_when_nothing_above():
-    # 新年度分頁最上面幾列還沒格式：用下方的列當參考
-    ws = FakeWorksheet(["", "", "", "", '=I5&"-"'], {9: {5}})
-    result = atm.ensure_candidate_row_format(ws, [2, 3])
+def test_ensure_format_template_below_and_fallback_formula():
+    ws = FakeWorksheet(["", "", "", "", '=I5&"-"'], {9: {5}, 14: {5}, 15: {5}})
+    atm.ensure_candidate_row_format(ws, [2, 3])
     assert _copies(ws, "PASTE_FORMAT") == [(5, 2, 7, 15), (5, 3, 7, 15)]
-    assert _copies(ws, "PASTE_FORMULA") == [(5, 2, 7, 7), (5, 3, 7, 7)]
-    assert result["g_filled"] == 2
-
-
-def test_ensure_format_keeps_existing_g_and_falls_back_when_no_formula():
     ws = FakeWorksheet(["", "", "已有值"], {})
     result = atm.ensure_candidate_row_format(ws, [2, 3])
-    assert result["g_filled"] == 1
+    assert result["g_filled"] == 1 and result["format_copied"] == 0
     assert ws.updates == [("G2", [['=I2&"-"&N2&"-"&O2&","&J2&","&K2']])]
 
 
