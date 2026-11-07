@@ -353,7 +353,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                 st.dataframe(review, use_container_width=True, hide_index=True)
             done = [x for x in (r.get("change_order_collected") or []) if "已回填" in x and "另有" not in x]
             if done:
-                st.success("✅ 已回填清潔異動已收款：" + "；".join(done))
+                st.success("✅ 已回填清潔異動收款時間：" + "；".join(done))
             if r["errors"]:
                 with st.expander(f"⚠️ 錯誤明細（{len(r['errors'])} 筆）", expanded=True):
                     for i, err in enumerate(r["errors"], 1):
