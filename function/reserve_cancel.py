@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Helpers for system reserve-order tagging and safe cancellation."""
+"""Helpers for system reserve-order tagging and safe cancellation.
+
+變更紀錄
+- 2026-11-07：訂單列表卡片同步解析「專員」（staff），供保留單盤點顯示專員姓名。
+"""
 
 from __future__ import annotations
 
@@ -132,6 +136,12 @@ def _fetch_phone_orders_fast(
             if not pid or pid in seen:
                 continue
             seen.add(pid)
+            # 2026-11-07：從同一張卡片解析專員姓名（例如「陳靜怡 X 檸檬人1」），不另打 API。
+            if not item.get("staff"):
+                try:
+                    item["staff"] = orders._extract_staff_line(block.get("lines", []))
+                except Exception:
+                    item["staff"] = ""
             service_date = str(item.get("service_date") or "")
             if service_date:
                 page_dates.append(service_date)

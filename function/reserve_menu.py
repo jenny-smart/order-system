@@ -1,5 +1,10 @@
 # -*- coding: utf-8 -*-
-"""服務訂單系統內的檸檬保留單建單／取消 UI。"""
+"""服務訂單系統內的檸檬保留單建單／取消 UI。
+
+變更紀錄
+- 2026-11-07：「檸檬保留單取消」新增盤點區：總張數、依日期／依專員統計、
+  明細顯示專員姓名與客人備註，並可下載 CSV；勾選取消時也顯示專員。
+"""
 
 from datetime import date
 
@@ -325,11 +330,7 @@ def render_reserve_cancel(backend_email: str, backend_password: str, env: str) -
     if not rows:
         _show_cancel_job()
         return
-    df = pd.DataFrame(rows)
-    cols = [c for c in ["service_date", "period", "order_no", "customer_memo", "cancel_eligible"] if c in df.columns]
-    preview = df[cols].copy()
-    preview.rename(columns={"service_date": "日期", "period": "時段", "order_no": "訂單編號", "customer_memo": "客人備註", "cancel_eligible": "安全可取消"}, inplace=True)
-    st.dataframe(preview, width="stretch", hide_index=True)
+    _render_reserve_inventory(rows)
 
     safe_rows = [r for r in rows if r.get("cancel_eligible")]
     st.write(f"查到 **{len(rows)} 張**；目前符合安全取消條件 **{len(safe_rows)} 張**。")
@@ -367,7 +368,8 @@ def render_reserve_cancel(backend_email: str, backend_password: str, env: str) -
     def _format_cancel_option(order_no: str) -> str:
         row = order_map.get(order_no, {})
         memo = str(row.get("customer_memo") or "").strip() or "空白"
-        return f"{row.get('service_date', '')}｜{row.get('period', '')}｜{order_no}｜客人備註：{memo}"
+        staff = str(row.get("staff") or "").strip() or "無人力"
+        return f"{row.get('service_date', '')}｜{row.get('period', '')}｜{order_no}｜專員：{staff}｜客人備註：{memo}"
 
     selected_order_nos = st.multiselect(
         "勾選實際要取消的訂單（可複選）",
@@ -381,9 +383,9 @@ def render_reserve_cancel(backend_email: str, backend_password: str, env: str) -
 
     if selected_rows:
         selected_df = pd.DataFrame(selected_rows)
-        cols2 = [c for c in ["service_date", "period", "order_no", "customer_memo"] if c in selected_df.columns]
+        cols2 = [c for c in ["service_date", "period", "order_no", "staff", "customer_memo"] if c in selected_df.columns]
         selected_preview = selected_df[cols2].copy()
-        selected_preview.rename(columns={"service_date": "日期", "period": "時段", "order_no": "訂單編號", "customer_memo": "客人備註"}, inplace=True)
+        selected_preview.rename(columns={"service_date": "日期", "period": "時段", "order_no": "訂單編號", "staff": "專員", "customer_memo": "客人備註"}, inplace=True)
         st.caption("本次將取消以下訂單：")
         st.dataframe(selected_preview, width="stretch", hide_index=True)
 
@@ -409,6 +411,60 @@ def render_reserve_cancel(backend_email: str, backend_password: str, env: str) -
         st.session_state.reserve_cancel_clear_selection = True
         st.rerun()
     _show_cancel_job()
+
+
+def _split_staff(value) -> list:
+    """「陳靜怡 X 檸檬人1」拆成各別專員；空白視為「無人力」。"""
+    import re
+    names = [n.strip() for n in re.split(r"\s*[Xx×]\s*|[,，、/]+", str(value or "")) if n.strip()]
+    return names or ["無人力"]
+
+
+def _render_reserve_inventory(rows: list) -> None:
+    """保留單盤點：總數、依日期／依專員統計，明細含專員姓名與客人備註。"""
+    df = pd.DataFrame(rows)
+    if "staff" not in df.columns:
+        df["staff"] = ""
+    if "customer_memo" not in df.columns:
+        df["customer_memo"] = ""
+    df["staff"] = df["staff"].fillna("").astype(str).str.strip().replace("", "無人力")
+    df["customer_memo"] = df["customer_memo"].fillna("").astype(str)
+
+    st.markdown("#### 📋 保留單盤點")
+    eligible = int(df["cancel_eligible"].fillna(False).astype(bool).sum()) if "cancel_eligible" in df.columns else 0
+    m1, m2, m3 = st.columns(3)
+    m1.metric("保留單總數", f"{len(df)} 張")
+    m2.metric("安全可取消", f"{eligible} 張")
+    m3.metric("涉及專員", f"{len({n for v in df['staff'] for n in _split_staff(v)})} 位")
+
+    t1, t2 = st.columns(2)
+    with t1:
+        st.caption("依日期統計")
+        by_date = df.groupby("service_date").size().reset_index(name="張數") if "service_date" in df.columns else pd.DataFrame()
+        if not by_date.empty:
+            by_date.rename(columns={"service_date": "日期"}, inplace=True)
+        st.dataframe(by_date, width="stretch", hide_index=True)
+    with t2:
+        st.caption("依專員統計（多人同單各算一張）")
+        staff_rows = [{"專員": n, "order_no": r.get("order_no", "")}
+                      for r in df.to_dict("records") for n in _split_staff(r.get("staff"))]
+        by_staff = (pd.DataFrame(staff_rows).groupby("專員").size().reset_index(name="張數")
+                    .sort_values("張數", ascending=False)) if staff_rows else pd.DataFrame()
+        st.dataframe(by_staff, width="stretch", hide_index=True)
+
+    cols = [c for c in ["service_date", "period", "order_no", "staff", "customer_memo", "cancel_eligible"] if c in df.columns]
+    preview = df[cols].copy()
+    preview.rename(columns={"service_date": "日期", "period": "時段", "order_no": "訂單編號", "staff": "專員",
+                            "customer_memo": "客人備註", "cancel_eligible": "安全可取消"}, inplace=True)
+    st.caption("保留單明細")
+    st.dataframe(preview, width="stretch", hide_index=True)
+    st.download_button(
+        "⬇️ 下載盤點明細 CSV",
+        data=preview.to_csv(index=False).encode("utf-8-sig"),
+        file_name="保留單盤點.csv",
+        mime="text/csv",
+        key="reserve_inventory_download",
+    )
 
 
 CANCEL_CHUNK_SIZE = 3
