@@ -6,6 +6,8 @@
   明細顯示專員姓名與客人備註，並可下載 CSV；勾選取消時也顯示專員。
 - 2026-11-07：查詢只顯示已付款保留單；每日統計加上星期與各時段張數；
   查詢診斷顯示因付款狀態（取消、待付款等）排除的張數。
+- 2026-11-07：客人備註篩選「全部（僅供查看）」改為「全部」，可直接勾選取消。
+- 2026-11-07：取消進度結果表改中文欄位並顯示專員姓名。
 """
 
 from datetime import date
@@ -17,7 +19,7 @@ from accounts import ACCOUNTS
 from orders import get_region_by_address
 from shared.execution_log_service import log_execution
 from function import reserve_address
-from function.reserve_cancel import PROXY_FILTER, SYSTEM_RESERVE_MEMO, cancel_reserve_orders, find_reserve_orders
+from function.reserve_cancel import ALL_FILTER, PROXY_FILTER, SYSTEM_RESERVE_MEMO, cancel_reserve_orders, find_reserve_orders
 from function.reserve_optimizer import (
     PERIOD_HOURS,
     RESERVE_PHONE_DEFAULT,
@@ -271,7 +273,7 @@ def render_reserve_cancel(backend_email: str, backend_password: str, env: str) -
     with c2:
         cancel_end = st.date_input("取消查詢結束日期", value=date(2026, 9, 30), key="reserve_cancel_end")
     cancel_periods = st.multiselect("取消查詢時段（可複選；不選代表全部時段）", list(PERIOD_HOURS.keys()), default=[], key="reserve_cancel_periods")
-    memo_filter = st.selectbox("客人備註篩選", ["僅系統保留單", "系統保留單或空白", "僅空白", PROXY_FILTER, "全部（僅供查看）"], index=0, key="reserve_cancel_memo_filter")
+    memo_filter = st.selectbox("客人備註篩選", ["僅系統保留單", "系統保留單或空白", "僅空白", PROXY_FILTER, ALL_FILTER], index=0, key="reserve_cancel_memo_filter")
     memo_keyword = ""
     if memo_filter == PROXY_FILTER:
         memo_keyword = st.text_input("客人備註關鍵字（需含「代客保留」）", value="代客保留：", key="reserve_cancel_memo_keyword",
@@ -339,10 +341,9 @@ def render_reserve_cancel(backend_email: str, backend_password: str, env: str) -
 
     safe_rows = [r for r in rows if r.get("cancel_eligible")]
     st.write(f"查到 **{len(rows)} 張**；目前符合安全取消條件 **{len(safe_rows)} 張**。")
-    if st.session_state.get("reserve_menu_cancel_filter") == "全部（僅供查看）":
-        st.warning("『全部（僅供查看）』不開放取消，請改用其他客人備註篩選後重新查詢。")
-        _show_cancel_job()
-        return
+    if st.session_state.get("reserve_menu_cancel_filter") == ALL_FILTER:
+        st.warning("目前為「全部」：清單包含代客保留、人工保留等各種客人備註的單，請逐張確認後再勾選取消。"
+                   "取消後備註：空白／系統保留單 →「取消系統保留單」；其他內容 → 前面加「取消」。")
     if not safe_rows:
         _show_cancel_job()
         return
@@ -488,6 +489,22 @@ def _render_reserve_inventory(rows: list) -> None:
 CANCEL_CHUNK_SIZE = 3
 
 
+def _cancel_result_table(results: list) -> pd.DataFrame:
+    """取消結果：日期、時段、訂單編號、專員、客人備註、結果、說明。"""
+    out = []
+    for r in results or []:
+        out.append({
+            "日期": r.get("service_date", ""),
+            "時段": r.get("period", ""),
+            "訂單編號": r.get("order_no", ""),
+            "專員": str(r.get("staff") or "").strip() or "無人力",
+            "客人備註": r.get("customer_memo", ""),
+            "結果": "成功" if r.get("ok") else "失敗／跳過",
+            "說明": r.get("message", ""),
+        })
+    return pd.DataFrame(out)
+
+
 def _render_reserve_cancel_job(env, backend_email, backend_password, machine) -> None:
     """分批取消（每批 3 張）；每批結束才重繪，此時可按暫停／繼續／結束。"""
     job = st.session_state.get("reserve_cancel_job")
@@ -523,7 +540,7 @@ def _render_reserve_cancel_job(env, backend_email, backend_password, machine) ->
                 message=f"成功 {ok} / {job['total']} 張",
             )
     if job["results"]:
-        st.dataframe(pd.DataFrame(job["results"]), width="stretch", hide_index=True)
+        st.dataframe(_cancel_result_table(job["results"]), width="stretch", hide_index=True)
     if status == "done":
         _render_proxy_address_cleanup(job, env, backend_email, backend_password)
     if status == "running" and job["pending"]:
