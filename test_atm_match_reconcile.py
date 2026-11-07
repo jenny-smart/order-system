@@ -9,19 +9,6 @@ from memo_system import atm
 TZ = ZoneInfo("Asia/Taipei")
 
 
-# ── N/O 預設 ─────────────────────────────────────────
-@pytest.mark.parametrize("amount,text,expected", [
-    (2000, "", ("清潔", "新訓費")),
-    ("2,000", "", ("清潔", "新訓費")),
-    (4800, "", ("清潔", "服務費用")),
-    (1200, "異動服務收款 11/05加時1小時", ("清潔", "加時")),
-    (2000, "異動服務收款 工具組", ("清潔", "工具組")),
-])
-def test_default_service_fee(amount, text, expected):
-    assert atm.default_service_fee(amount, text) == expected
-
-
-# ── ③ 只挑確定配對的列 ───────────────────────────────
 def _row(**cols):
     row = [""] * 21
     for letter, value in cols.items():
@@ -29,6 +16,44 @@ def _row(**cols):
     return row
 
 
+# ── N/O 規則 ─────────────────────────────────────────
+@pytest.mark.parametrize("text,expected", [
+    ("異動服務收款 11/05加時1小時", ("清潔", "異動費")),
+    ("異動服務收款 更換日期", ("清潔", "異動費")),
+    ("異動服務收款 工具組", ("清潔", "工具組")),
+    ("", ("清潔", "異動費")),
+])
+def test_change_order_service_fee(text, expected):
+    assert atm.change_order_service_fee(text) == expected
+
+
+@pytest.mark.parametrize("amount,order_no,expected", [
+    (2000, "", ("清潔", "新訓費")),
+    ("2,000", "", ("清潔", "新訓費")),
+    (2000, "LC00219084", ("清潔", "服務費用")),  # 有訂單的 2000 是服務費用
+    (4800, "LC00219084", ("清潔", "服務費用")),
+])
+def test_default_service_fee_fallback(amount, order_no, expected):
+    assert atm.default_service_fee(amount, order_no) == expected
+
+
+# ── ② 未指定列號：近 3 日 A:F 有資料、H:O 空白 ───────────
+def test_recent_unmatched_bank_rows():
+    rows = [
+        _row(A="日期"),
+        _row(A="2026/11/03", B="2026/11/03 10:00:00", E="4800"),          # 超過 3 日
+        _row(A="2026/11/05", B="2026/11/05 10:00:00", E="4800"),
+        _row(A="2026/11/06", B="2026/11/06 14:02:46", E="4800", J="LC1", K="蘇慧芬"),  # 已配對
+        _row(A="2026/11/06", B="2026/11/06 16:39:40", E="4800", F="檸檬家事"),
+        _row(A="2026/11/07", B="2026/11/07 08:14:10", E="400", F="90344實"),
+        _row(G="--,,"),                                                   # 只有 G 公式
+        _row(I="2026.11", J="LC2", K="王蘭香", L="4800"),                 # 下方待配對區
+        _row(B="2026/11/07 09:00:00", E="2400"),                          # A 空白看 B
+    ]
+    assert atm.recent_unmatched_bank_rows(rows, today=date(2026, 11, 7)) == [3, 5, 6, 9]
+
+
+# ── ③ 只挑確定配對的列 ───────────────────────────────
 def test_rows_ready_for_reconcile_only_confirmed_matches():
     b = "2026/11/06 09:28:58"
     rows = [
@@ -68,13 +93,14 @@ class _ReconWS:
         self.cells[(r, c)] = v
 
 
-def _setup_reconcile(monkeypatch, status, invoice_after_issue):
+def _setup_reconcile(monkeypatch, status, invoice_after_issue, paid_at="2026-11-06 09:00:00"):
     ws = _ReconWS([_row(), _row(B="2026/11/06 09:00", E="4800", J="LC00219084", K="許文菁", L="4800", T="已配對")])
-    state = {"status": status, "invoice": "", "mail": 0, "issued": 0}
+    state = {"status": status, "invoice": "", "mail": 0, "issued": 0, "paid_at": paid_at}
+    monkeypatch.setattr(atm, "today_tw", lambda: date(2026, 11, 6))
 
     def find(session, order_no):
         return {"purchase_id": 9, "order_no": order_no, "total": 4800, "fare": 0, "payway": "2",
-                "purchase_status": state["status"], "paid_at": "2026-11-06 09:00:00" if state["status"] == "1" else "",
+                "purchase_status": state["status"], "paid_at": state["paid_at"] if state["status"] == "1" else "",
                 "invoice_no": state["invoice"]}
 
     def mark(session, pid):
@@ -123,6 +149,42 @@ def test_invoice_not_issued_skips_mail_and_is_listed(monkeypatch):
     assert [d["order_no"] for d in result["no_invoice"]] == ["LC00219084"]
     assert ws.cells[(2, atm.COL_RECON_STATUS)] == "已更新系統（未開發票）"
     assert ws.cells[(2, atm.COL_PAID_AT)] == "2026-11-06 09:00:00"
+    assert ws.cells[(2, atm.COL_MAIL_STATUS)] == "未開發票，未發信"
+
+
+def test_mail_only_when_paid_today(monkeypatch):
+    # 後台付款時間不是今天（例如補按已付款時後台帶入入帳日）→ 不發信
+    ws, state = _setup_reconcile(monkeypatch, status="0", invoice_after_issue="AB12345678",
+                                 paid_at="2026-11-05 17:00:00")
+    result = atm.process_atm_rows("台北", "2", session=object())
+    assert state["mail"] == 0 and result["success"] == 1
+    assert ws.cells[(2, atm.COL_MAIL_STATUS)] == "非當日付款，未發信"
+
+
+# ── 手動 ②＋③：只處理這次剛配對的列 ─────────────────
+def test_match_and_reconcile_only_this_runs_matched_rows(monkeypatch):
+    b = "2026/11/07 08:14:10"
+    sheet = [
+        _row(),
+        _row(B=b, E="4800", J="LC00219001", K="甲", L="4800", T="已配對"),   # 以前配對、還沒 ③
+        _row(B=b, E="4800", J="LC00219002", K="乙", L="4800", T="已配對"),   # 這次配對
+        _row(B=b, E="2400", J="LC00219003", K="丙", L="2400", T="需確認"),   # 這次配對但需確認
+    ]
+    ws = type("W", (), {"get_all_values": lambda self: sheet})()
+    calls = {}
+    monkeypatch.setattr(atm, "auto_match_bank_rows", lambda **kw: calls.setdefault("match", kw) and {"matched_rows": [3, 4]})
+    monkeypatch.setattr(atm, "get_atm_worksheet", lambda region: ws)
+
+    def fake_process(**kw):
+        calls["process"] = kw
+        return {"success": 1}
+
+    monkeypatch.setattr(atm, "process_atm_rows", fake_process)
+    item = atm.match_and_reconcile("台北", session=object(), row_spec="")
+    assert item["reconcile_rows"] == [3]
+    assert calls["process"]["row_spec"] == "3"
+    item = atm.match_and_reconcile("台北", session=object(), only_matched_rows=False)
+    assert item["reconcile_rows"] == [2, 3]
 
 
 # ── 行事曆 ───────────────────────────────────────────
@@ -269,3 +331,17 @@ def test_write_calendar_falls_back_to_lemonclean(monkeypatch):
                               now=datetime(2026, 11, 6, 8, 12, tzinfo=TZ), service_factory=lambda: service)
     assert events.inserted == [("jenny@lemonclean.com.tw", "【ATM對帳】今日完成 1 筆（11/06）")]
     assert msgs == ["已記入行事曆 jenny@lemonclean.com.tw：【ATM對帳】今日完成"]
+
+
+def test_preview_lists_rows_for_confirmation(monkeypatch):
+    sheet = [
+        _row(A="日期"),
+        _row(A="2026/11/06", B="2026/11/06 16:39:40", C="ＣＤ轉收", E="4800", F="檸檬家事"),
+        _row(A="2026/11/06", B="2026/11/06 14:02:46", E="4800", J="LC00219865", K="蘇慧芬"),
+    ]
+    ws = type("W", (), {"get_all_values": lambda self: sheet})()
+    monkeypatch.setattr(atm, "get_atm_worksheet", lambda region: ws)
+    assert atm.preview_recent_unmatched_bank_rows("台北", today=date(2026, 11, 7)) == [{
+        "列號": 2, "日期": "2026/11/06", "入帳時間": "2026/11/06 16:39:40",
+        "摘要": "ＣＤ轉收", "收入": "4800", "備註": "檸檬家事",
+    }]

@@ -512,7 +512,9 @@ def process_atm_rows(
             pre_paid_at = str(purchase.get("paid_at") or "").strip()
             already_paid = status_code == "1" or bool(pre_paid_at and not pre_paid_at.startswith("0000"))
             send_mail = do_send_mail and not already_paid
+            mail_note = ""  # 勾了發確認信卻沒發時寫進 S 欄的原因
             if do_send_mail and already_paid:
+                mail_note = "原已付款，未發信"
                 log("（訂單本來就已付款，不再發確認信）")
             invoice_missing_reason = ""
 
@@ -553,7 +555,15 @@ def process_atm_rows(
                     if not str(purchase.get("invoice_no") or "").strip():
                         invoice_missing_reason = invoice_missing_reason or "後台尚未回覆發票號碼"
                         log(f"⚠️ 第{r}列（{order_no}）：未開立發票（{invoice_missing_reason}），不發確認信")
+                        if send_mail:
+                            mail_note = "未開發票，未發信"
                         send_mail = False
+
+            # 2026-11-07 Jenny：只有「當日改成已付款」的訂單才發確認信
+            if send_mail and _bank_date(paid_at) != today_tw():
+                log(f"（付款時間 {paid_at} 不是今天，不發確認信）")
+                mail_note = "非當日付款，未發信"
+                send_mail = False
 
             if send_mail:
                 mail_resp = send_confirmation_mail(session, order_no)
@@ -577,8 +587,8 @@ def process_atm_rows(
                 updates.append((COL_INVOICE_NO, invoice_no))
             if send_mail:
                 updates.append((COL_MAIL_STATUS, "已發送"))
-            elif do_send_mail and already_paid:
-                updates.append((COL_MAIL_STATUS, "原已付款，未發信"))
+            elif mail_note:
+                updates.append((COL_MAIL_STATUS, mail_note))
             updates.append((COL_RECON_STATUS, "已更新系統（未開發票）" if invoice_missing_reason else "已更新系統"))
 
             _clear_data_validation(ws, r, COL_RECONCILED_AT, COL_RECON_STATUS)
@@ -780,8 +790,10 @@ def _format_match_text(year_month: str, service_type: str, fee_type: str, order_
 # -----------------------------------------------------------------------------
 # 待配對列規則（2026-11-06 Jenny）
 # 1. G 欄不得空白：G 是組合公式，沿用上方最近一列的公式。
-# 3. N/O 欄空白時：金額 2000 → 清潔／新訓費；其他金額 → 清潔／服務費用。
-#    清潔異動填入的列依異動內容：加時 → 清潔／加時；工具組 → 清潔／工具組。
+# 3. N/O 在資料進 ATM 分頁時就填好（2026-11-07 Jenny）：
+#    ① 待付款清單（後台訂單）→ 清潔／服務費用；
+#    清潔異動填入 → 工具組 → 清潔／工具組，其他 → 清潔／異動費。
+#    ② 配對直接沿用候選列的 N/O；舊資料 N/O 空白才補：有訂單 → 服務費用，無訂單 2000 → 新訓費。
 # 4. I（以及 N、O）欄要和上方一樣是下拉選單：複製上方最近一列的資料驗證。
 # -----------------------------------------------------------------------------
 COL_G_SUMMARY = 7   # G
@@ -792,16 +804,22 @@ TRAINEE_FEE_AMOUNT = 2000
 DROPDOWN_COLUMNS = [COL_I_MONTH, COL_N_SERVICE, COL_O_FEE]
 
 
-def default_service_fee(amount, change_text: str = "") -> tuple:
-    """回傳 N/O 欄預設值 (服務類別, 費用類別)。"""
+UNPAID_SERVICE_FEE = ("清潔", "服務費用")
+
+
+def change_order_service_fee(change_text: str = "") -> tuple:
+    """清潔異動填入 ATM 的 N/O：工具組 → 清潔／工具組；其他 → 清潔／異動費。"""
     text = str(change_text or "")
-    if "加時" in text:
-        return "清潔", "加時"
     if "工具組" in text or "工具包" in text:
         return "清潔", "工具組"
-    if _to_int_amount(amount) == TRAINEE_FEE_AMOUNT:
+    return "清潔", "異動費"
+
+
+def default_service_fee(amount, order_no: str = "") -> tuple:
+    """舊資料 N/O 空白時的補值：有訂單 → 服務費用；無訂單且 2000 → 新訓費。"""
+    if not str(order_no or "").strip() and _to_int_amount(amount) == TRAINEE_FEE_AMOUNT:
         return "清潔", "新訓費"
-    return "清潔", "服務費用"
+    return UNPAID_SERVICE_FEE
 
 
 def _fallback_g_formula(row: int) -> str:
@@ -903,32 +921,73 @@ def ensure_candidate_row_format(ws, target_rows: List[int], log=None) -> Dict:
     return result
 
 
+RECENT_MATCH_DAYS = 3
+
+
+def recent_unmatched_bank_rows(rows: List[List[str]], today: Optional[_date] = None,
+                               days: int = RECENT_MATCH_DAYS) -> List[int]:
+    """近 N 日（含今天）A:F 有銀行明細、H:O 全空白的列。日期看 A 欄，A 讀不到再看 B 欄。"""
+    today = today or today_tw()
+    since = today - timedelta(days=days - 1)
+    picked = []
+    for idx, row in enumerate(rows, start=1):
+        a_to_f = [memo.safe_cell(row, c) for c in range(1, 7)]
+        if not any(a_to_f):
+            continue
+        if any(memo.safe_cell(row, c) for c in range(8, 16)):  # H:O
+            continue
+        day = _bank_date(a_to_f[0]) or _bank_date(a_to_f[1])
+        if day is None or not (since <= day <= today):
+            continue
+        picked.append(idx)
+    return picked
+
+
+def preview_recent_unmatched_bank_rows(region: str, today: Optional[_date] = None) -> List[Dict]:
+    """盤點：列出 ② 留空列號時會處理的列，給介面先確認。"""
+    rows = memo.with_retry(get_atm_worksheet(region).get_all_values)
+    return [{
+        "列號": idx,
+        "日期": memo.safe_cell(rows[idx - 1], 1),
+        "入帳時間": memo.safe_cell(rows[idx - 1], COL_BANK_TIME),
+        "摘要": memo.safe_cell(rows[idx - 1], 3),
+        "收入": memo.safe_cell(rows[idx - 1], COL_BANK_INCOME),
+        "備註": memo.safe_cell(rows[idx - 1], COL_BANK_NOTE),
+    } for idx in recent_unmatched_bank_rows(rows, today=today)]
+
+
 def auto_match_bank_rows(
     region: str,
     row_spec: str = "",
     overwrite_existing: bool = False,
-    default_service_type: str = "清潔",
-    default_fee_type: str = "服務費用",
+    default_service_type: str = "",
+    default_fee_type: str = "",
     allow_review_prefill: bool = True,
     ui_logger=None,
+    today: Optional[_date] = None,
 ) -> Dict:
+    """row_spec 留空：只處理近 3 日 A:F 有資料但 H:O 空白的列（不再掃全部列）。"""
     log = make_logger(ui_logger)
     result = {
         "processed": 0, "success": 0, "failed": 0, "skipped": 0,
         "updated_orders": 0, "ambiguous": 0, "unmatched": 0,
         "confirm_required": 0, "non_order": 0, "split_payment": 0,
-        "errors": [],
+        "errors": [], "matched_rows": [],
     }
 
     ws = get_atm_worksheet(region)
     rows = memo.with_retry(ws.get_all_values)
-    target_row_nums = memo.parse_row_spec(row_spec) if str(row_spec or "").strip() else []
-    target_row_set = set(target_row_nums)
     log(f"===== 開始自動配對 ATM 銀行明細（{region}）=====")
-    if target_row_nums:
+    if str(row_spec or "").strip():
+        target_row_nums = memo.parse_row_spec(row_spec)
         log(f"指定銀行列號：{target_row_nums}")
     else:
-        log("未指定銀行列號，將掃描全部列")
+        target_row_nums = recent_unmatched_bank_rows(rows, today=today)
+        log(f"未指定列號：近 {RECENT_MATCH_DAYS} 日 A:F 有資料、H:O 空白的列 → {target_row_nums or '無'}")
+        if not target_row_nums:
+            log("===== 自動配對完成 =====")
+            return result
+    target_row_set = set(target_row_nums)
 
     COL_BANK_TIME = 2
     COL_INCOME = 5
@@ -963,12 +1022,10 @@ def auto_match_bank_rows(
 
         if amount is None:
             continue
-        # N/O 空白時：2000 → 新訓費，其他金額 → 服務費用（呼叫端另指定預設時以呼叫端為準）
-        rule_service, rule_fee = default_service_fee(amount)
+        # N/O 沿用候選列（① 待付款／清潔異動進來時已填好）；舊資料空白才補
+        rule_service, rule_fee = default_service_fee(amount, order_no)
         service_type = memo.safe_cell(row, COL_SERVICE_TYPE) or default_service_type or rule_service
-        fee_type = memo.safe_cell(row, COL_FEE_TYPE) or (
-            rule_fee if default_fee_type in ("", "服務費用") else default_fee_type
-        )
+        fee_type = memo.safe_cell(row, COL_FEE_TYPE) or default_fee_type or rule_fee
         if not order_no and not (name and (service_type or fee_type)):
             continue
 
@@ -1253,6 +1310,7 @@ def auto_match_bank_rows(
             log(f"⚠️ 補 G 欄公式／下拉選單失敗：{exc}")
             result["errors"].append(f"補 G 欄公式／下拉選單失敗：{exc}")
 
+    result["matched_rows"] = sorted(set(touched_rows))
     log("===== 自動配對完成 =====")
     return result
 
@@ -1346,6 +1404,8 @@ def search_atm_unpaid_orders(session, date_until: Optional[str] = None, ui_logge
             "fare": fare,
             "net_amount": net_amount,
             "line_url": line_url,
+            # 客戶匯款帳號後 5 碼（有填才有）→ M 欄，② 用來比對 F 欄
+            "last_code": str(item.get("account5") or "").strip(),
         })
         log(f"  - {year_month}　{order_no}　{name}　總金額{total} - 車馬費{fare} = {net_amount}")
 
@@ -1417,19 +1477,20 @@ def paste_atm_unpaid_list(region: str, rows: List[Dict], ui_logger=None) -> Dict
     pasted_at = _now_text()
     for offset, row in enumerate(pending_rows):
         row_num = start_row + offset
+        # 2026-11-07 Jenny：ATM 待對帳時就把 H:O 填完整（H 見下方、I:L 訂單、M 後 5 碼、N/O 清潔／服務費用）
         updates.append({
-            "range": f"I{row_num}:L{row_num}",
+            "range": f"I{row_num}:O{row_num}",
             "values": [[
                 row["year_month"],
                 row["order_no"],
                 row["name"],
                 row["net_amount"],
+                row.get("last_code", ""),
+                *UNPAID_SERVICE_FEE,
             ]],
         })
         updates.append({"range": f"P{row_num}", "values": [[pasted_at]]})
         updates.append({"range": f"T{row_num}", "values": [["待對帳"]]})
-        updates.append({"range": f"N{row_num}:O{row_num}",
-                        "values": [list(default_service_fee(row["net_amount"]))]})
 
         # H 欄 LINE 連結只在原儲存格為空時寫入，避免覆蓋人工資料。
         existing_h = ""
@@ -1451,7 +1512,7 @@ def paste_atm_unpaid_list(region: str, rows: List[Dict], ui_logger=None) -> Dict
     result["pasted"] = len(pending_rows)
     result["start_row"] = start_row
     log(
-        f"✅ 已新增 {len(pending_rows)} 筆至 I{start_row}:L{end_row}；"
+        f"✅ 已新增 {len(pending_rows)} 筆至 H{start_row}:O{end_row}；"
         f"略過 {result['skipped_duplicates']} 筆重複訂單"
     )
     return result
@@ -1496,8 +1557,8 @@ def append_change_order_charges(region: str, rows: List[Dict], ui_logger=None) -
         range_name=f"I{start_row}:L{end_row}",
         value_input_option="RAW",
     )
-    # N/O 依異動內容：加時 → 清潔／加時；工具組 → 清潔／工具組；其他依金額
-    service_fee = [list(default_service_fee(row.get("amount", 0), row.get("change_text", ""))) for row in rows]
+    # N/O 依異動內容：工具組 → 清潔／工具組；其他 → 清潔／異動費
+    service_fee = [list(change_order_service_fee(row.get("change_text", ""))) for row in rows]
     memo.with_retry(
         ws.update,
         values=service_fee,
@@ -1680,6 +1741,40 @@ def rows_ready_for_reconcile(rows: List[List[str]], from_date: Optional[_date] =
     return ready
 
 
+def match_and_reconcile(region: str, session, row_spec: str = "", ui_logger=None,
+                        allow_review_prefill: bool = True, overwrite_existing: bool = False,
+                        do_mark_paid: bool = True, do_issue_invoice: bool = True, do_send_mail: bool = True,
+                        only_matched_rows: bool = True, today: Optional[_date] = None) -> Dict:
+    """② 配對銀行明細後接著 ③ 更新系統對帳。
+
+    ③ 只處理 T 欄「已配對」的列（見 rows_ready_for_reconcile）；only_matched_rows=True（手動勾選 ②＋③）
+    時再限縮為這次 ② 剛配對的列。確認信只發給這次才改成已付款、付款日是今天的訂單。
+    """
+    log = make_logger(ui_logger)
+    item = {"match": {}, "reconcile": {}, "reconcile_rows": []}
+    log(f"===== ② 配對銀行明細（{region}）=====")
+    item["match"] = auto_match_bank_rows(
+        region=region, row_spec=row_spec, overwrite_existing=overwrite_existing,
+        allow_review_prefill=allow_review_prefill, ui_logger=ui_logger, today=today,
+    )
+    ws = get_atm_worksheet(region)
+    ready = rows_ready_for_reconcile(memo.with_retry(ws.get_all_values))
+    if only_matched_rows:
+        matched = set(item["match"].get("matched_rows") or [])
+        ready = [r for r in ready if r in matched]
+    item["reconcile_rows"] = ready
+    if not ready:
+        log(f"{region}：沒有已配對、待更新系統的列")
+        return item
+    log(f"===== ③ 更新系統對帳（{region}）：第 {ready} 列 =====")
+    item["reconcile"] = process_atm_rows(
+        region=region, row_spec=",".join(str(r) for r in ready),
+        do_mark_paid=do_mark_paid, do_issue_invoice=do_issue_invoice, do_send_mail=do_send_mail,
+        ui_logger=ui_logger, session=session,
+    )
+    return item
+
+
 def run_scheduled_match_and_reconcile(ui_logger=None) -> Dict:
     """每日排程：台北／台中各跑 ② 配對銀行明細，再對確定配對的列跑 ③ 更新系統對帳
     （按已付款＋開立發票＋發確認信，與手動預設相同）。"""
@@ -1703,26 +1798,11 @@ def run_scheduled_match_and_reconcile(ui_logger=None) -> Dict:
             if not email or not password:
                 raise RuntimeError(f"缺少「{region}」後台 email/password")
 
-            log(f"===== ② 配對銀行明細（{region}）=====")
-            item["match"] = auto_match_bank_rows(region=region, ui_logger=ui_logger)
-
-            ws = get_atm_worksheet(region)
-            ready = rows_ready_for_reconcile(memo.with_retry(ws.get_all_values))
-            item["reconcile_rows"] = ready
-            if not ready:
-                log(f"{region}：沒有已配對、待更新系統的列")
-                continue
-
             memo.set_runtime_credentials(email, password)
             session = memo.login(ui_logger=ui_logger)
             try:
-                log(f"===== ③ 更新系統對帳（{region}）：第 {ready} 列 =====")
-                item["reconcile"] = process_atm_rows(
-                    region=region,
-                    row_spec=",".join(str(r) for r in ready),
-                    do_mark_paid=True, do_issue_invoice=True, do_send_mail=True,
-                    ui_logger=ui_logger, session=session,
-                )
+                item.update(match_and_reconcile(region, session=session, ui_logger=ui_logger,
+                                                only_matched_rows=False))
             finally:
                 session.close()
         except Exception as exc:
