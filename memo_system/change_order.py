@@ -866,7 +866,7 @@ def calc_change_fee(order: dict, service_date: date, change_person: int = None,
         if tier == "free":
             calc_note = (
                 f"{workday_note}，儲值金客：4個工作天以上，免收異動費 = $0；"
-                "若有平日/週末互轉，請另選互轉情境計算每人時差額"
+                "若有平日/週末互轉，請勾選「同時改平日／週末」計算每人時差額"
             )
         else:
             calc_note = (
@@ -885,7 +885,7 @@ def calc_change_fee(order: dict, service_date: date, change_person: int = None,
         if tier == "free":
             calc_note = (
                 f"{workday_note}，一般客：4個工作天以上，免收異動費 = $0；"
-                "若有平日/週末互轉，請另選互轉情境計算每人時差額"
+                "若有平日/週末互轉，請勾選「同時改平日／週末」計算每人時差額"
             )
         else:
             calc_note = (

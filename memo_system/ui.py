@@ -1424,6 +1424,18 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         "加時(待收款)", "減時(待退款)", "客訴(待退款)", "物損(待退款)",
     ]
 
+    DAY_TYPE_OPTIONS = ["異動平日轉週末(待收款)", "異動週末轉平日(待退款)"]
+
+    def build_day_type_row(order, direction, service_note, customer_type, service_date):
+        """平日／週末互轉差額列；可單獨選情境，也可與異動費同時產生。"""
+        to_weekend = direction == DAY_TYPE_OPTIONS[0]
+        time_fee_info = change_order.calc_flat_person_hour_fee(
+            hours=order.get("service_hours", 0), person=order.get("cleaner_count", 0),
+            rate=change_order.day_type_price_difference(service_date, order),
+            label="平日轉週末每人時差額" if to_weekend else "週末轉平日每人時差額")
+        builder = change_order.build_weekday_to_weekend_row if to_weekend else change_order.build_weekend_to_weekday_row
+        return builder(order, time_fee_info, service_note, customer_type=customer_type, service_date=service_date)
+
     def _order_money(order, key, default=0):
         try: return int(round(float((order or {}).get(key, default) or 0)))
         except: return default
@@ -1603,6 +1615,13 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                 change_person = st.number_input("異動人數", min_value=1, step=1, value=1, key="co_time_person")
             manual_amount = None
             if is_manual_refund: manual_amount = st.number_input("退款金額", min_value=0, step=50, value=0, key="co_manual_amount")
+            also_day_type = None
+            if scenario in ("異動費(待收款)", "異動費(待退款)"):
+                if st.checkbox("同時改平日／週末（另產生一列差額）", value=False, key="co_also_day_type"):
+                    _orig = selected_orders[0].get("service_date")
+                    _default_dir = 1 if (_orig and _orig.weekday() >= 5) else 0
+                    also_day_type = st.radio("互轉方向", DAY_TYPE_OPTIONS, index=_default_dir, horizontal=True, key="co_day_type_dir")
+                    st.caption("異動費與平日／週末差額會各寫一列，金額分開計算、分開回填。")
         with c2:
             customer_type = "一般"
             st.caption("啟用自訂價格後，客戶類別依會員儲值金（含購物金）餘額自動判定。")
@@ -1628,12 +1647,8 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                         time_fee_info = change_order.calc_time_change_fee(service_date_input, hours=change_hours, person=change_person, order=order)
                         row = change_order.build_reducetime_row(order, time_fee_info, service_note, customer_type=customer_type, service_date=service_date_input)
                         calc_rows.append(apply_time_change_label(row, scenario, time_change_timing)); continue
-                    if scenario == "異動平日轉週末(待收款)":
-                        time_fee_info = change_order.calc_flat_person_hour_fee(hours=order.get("service_hours", 0), person=order.get("cleaner_count", 0), rate=change_order.day_type_price_difference(service_date_input, order), label="平日轉週末每人時差額")
-                        calc_rows.append(change_order.build_weekday_to_weekend_row(order, time_fee_info, service_note, customer_type=customer_type, service_date=service_date_input)); continue
-                    if scenario == "異動週末轉平日(待退款)":
-                        time_fee_info = change_order.calc_flat_person_hour_fee(hours=order.get("service_hours", 0), person=order.get("cleaner_count", 0), rate=change_order.day_type_price_difference(service_date_input, order), label="週末轉平日每人時差額")
-                        calc_rows.append(change_order.build_weekend_to_weekday_row(order, time_fee_info, service_note, customer_type=customer_type, service_date=service_date_input)); continue
+                    if scenario in DAY_TYPE_OPTIONS:
+                        calc_rows.append(build_day_type_row(order, scenario, service_note, customer_type, service_date_input)); continue
                     if scenario == "客訴(待退款)":
                         calc_rows.append(change_order.build_manual_refund_row(order, manual_amount, change_order.TYPE_COMPLAINT_REFUND, service_note, customer_type=customer_type, service_date=service_date_input)); continue
                     if scenario == "物損(待退款)":
@@ -1645,6 +1660,8 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                         fee_info = apply_refund_fee_on_service_amount(order, fee_info)
                         row = change_order.build_refund_row(order, fee_info, service_note, customer_type=customer_type, service_date=service_date_input)
                         calc_rows.append(apply_refund_j_note(row, fee_info))
+                    if also_day_type:
+                        calc_rows.append(build_day_type_row(order, also_day_type, service_note, customer_type, service_date_input))
                 st.session_state.co_calc_rows = calc_rows
                 co_log(f"✅ 試算完成，共 {len(calc_rows)} 筆"); st.rerun()
             except Exception as e:
