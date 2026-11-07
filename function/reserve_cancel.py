@@ -1,5 +1,11 @@
 # -*- coding: utf-8 -*-
-"""Helpers for system reserve-order tagging and safe cancellation."""
+"""Helpers for system reserve-order tagging and safe cancellation.
+
+變更紀錄
+- 2026-11-07：訂單列表卡片同步解析「專員」（staff），供保留單盤點顯示專員姓名。
+- 2026-11-07：保留單查詢只保留「已付款」訂單；取消、待付款等其他狀態一律不顯示，
+  並在查詢診斷列出被排除的張數。
+"""
 
 from __future__ import annotations
 
@@ -16,6 +22,8 @@ CANCELLED_RESERVE_MEMO = "取消系統保留單"
 PROXY_RESERVE_MEMO = "代客保留"
 PROXY_FILTER = "代客保留（客人備註含關鍵字）"
 CANCELLED_PREFIX = "取消"
+# 保留單查詢只顯示此付款狀態的訂單（取消、待付款不顯示）。
+PAID_STATUS = "已付款"
 
 
 def _is_active_proxy_memo(memo: str, keyword: str) -> bool:
@@ -132,6 +140,12 @@ def _fetch_phone_orders_fast(
             if not pid or pid in seen:
                 continue
             seen.add(pid)
+            # 2026-11-07：從同一張卡片解析專員姓名（例如「陳靜怡 X 檸檬人1」），不另打 API。
+            if not item.get("staff"):
+                try:
+                    item["staff"] = orders._extract_staff_line(block.get("lines", []))
+                except Exception:
+                    item["staff"] = ""
             service_date = str(item.get("service_date") or "")
             if service_date:
                 page_dates.append(service_date)
@@ -173,6 +187,7 @@ def find_reserve_orders(
     )
 
     candidates = []
+    excluded_status: dict = {}
     for row in all_rows:
         row_phone = re.sub(r"\D", "", str(row.get("phone") or ""))
         if row_phone and row_phone != phone:
@@ -184,6 +199,11 @@ def find_reserve_orders(
             period = re.sub(r"\s+", "", str(row.get("period") or ""))
             if period not in periods_set:
                 continue
+        # 2026-11-07：只顯示已付款；取消、待付款或解析不到狀態的都排除。
+        status = re.sub(r"\s+", "", str(row.get("payment_status") or "")) or "（解析不到）"
+        if status != PAID_STATUS:
+            excluded_status[status] = excluded_status.get(status, 0) + 1
+            continue
         candidates.append(row)
 
     session, base_url = co._new_logged_in_session(env_name, backend_email, backend_password)
@@ -223,6 +243,7 @@ def find_reserve_orders(
     found.sort(key=lambda x: (x.get("service_date", ""), x.get("period", ""), x.get("order_no", "")))
     debug.update({
         "date_period_candidates": len(candidates),
+        "excluded_status": excluded_status,
         "memo_matches": len(found),
         "detail_errors": detail_errors,
     })
