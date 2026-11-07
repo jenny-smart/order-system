@@ -873,57 +873,117 @@ def _nearest_above(rows: set, target: int) -> int:
     return max(above) if above else 0
 
 
+def _nearest(rows: set, target: int, exclude: set = frozenset()) -> int:
+    """上方最近一列；上方沒有就找下方最近一列。"""
+    usable = {r for r in rows if r not in exclude and r != target}
+    above = [r for r in usable if r < target]
+    if above:
+        return max(above)
+    below = [r for r in usable if r > target]
+    return min(below) if below else 0
+
+
+def _copy_request(ws, source: int, target: int, col_start: int, col_end: int, paste_type: str) -> Dict:
+    return {"copyPaste": {
+        "source": {"sheetId": ws.id, "startRowIndex": source - 1, "endRowIndex": source,
+                   "startColumnIndex": col_start - 1, "endColumnIndex": col_end},
+        "destination": {"sheetId": ws.id, "startRowIndex": target - 1, "endRowIndex": target,
+                        "startColumnIndex": col_start - 1, "endColumnIndex": col_end},
+        "pasteType": paste_type, "pasteOrientation": "NORMAL",
+    }}
+
+
 def ensure_candidate_row_format(ws, target_rows: List[int], log=None) -> Dict:
-    """G 欄補公式、I/N/O 欄補下拉選單（都參照上方最近一列）。"""
+    """每次寫入／移動 G:O 後呼叫（2026-11-07 Jenny：G 欄不得空白；I 欄固定下拉選單、格式一致）。
+
+    1. G:O 格式（含 I／N／O 下拉選單、字型、數字格式）整段複製參考列；參考列＝上方最近一列 I 欄有下拉選單的列，
+       上方沒有就用下方最近一列。
+    2. G 空白就複製最近一列的 G 公式（上下都找不到才用預設組合公式）。
+    """
     log = log or (lambda msg: None)
-    result = {"g_filled": 0, "dropdown_copied": 0}
+    result = {"g_filled": 0, "dropdown_copied": 0, "format_copied": 0}
     target_rows = sorted({int(r) for r in target_rows if r})
     if not target_rows:
         return result
-    last = max(target_rows)
+    upto = max(max(target_rows), int(getattr(ws, "row_count", 0) or 0))
 
-    formulas = _g_formulas(ws, last)
-    formula_rows = {i for i, f in enumerate(formulas, start=1) if f.startswith("=")}
+    validation = _rows_with_validation(ws, DROPDOWN_COLUMNS, upto)
+    i_rows = validation.get(COL_I_MONTH, set())
     requests = []
+    for row in target_rows:
+        ref = _nearest(i_rows, row, exclude=set(target_rows) - i_rows)
+        if not ref:
+            continue
+        requests.append(_copy_request(ws, ref, row, COL_G_SUMMARY, COL_O_FEE, "PASTE_FORMAT"))
+        result["format_copied"] += 1
+        if row not in i_rows:
+            result["dropdown_copied"] += 1
+    if not i_rows:
+        log("⚠️ 整張 ATM 分頁 I 欄都沒有下拉選單可參照，請先手動設定一列")
+
+    formulas = _g_formulas(ws, upto)
+    formula_rows = {i for i, f in enumerate(formulas, start=1) if f.startswith("=")}
     for row in target_rows:
         current = formulas[row - 1] if row - 1 < len(formulas) else ""
         if str(current).strip():
             continue
-        source = _nearest_above(formula_rows, row)
+        source = _nearest(formula_rows, row)
         if source:
-            requests.append({"copyPaste": {
-                "source": {"sheetId": ws.id, "startRowIndex": source - 1, "endRowIndex": source,
-                           "startColumnIndex": COL_G_SUMMARY - 1, "endColumnIndex": COL_G_SUMMARY},
-                "destination": {"sheetId": ws.id, "startRowIndex": row - 1, "endRowIndex": row,
-                                "startColumnIndex": COL_G_SUMMARY - 1, "endColumnIndex": COL_G_SUMMARY},
-                "pasteType": "PASTE_FORMULA", "pasteOrientation": "NORMAL",
-            }})
+            requests.append(_copy_request(ws, source, row, COL_G_SUMMARY, COL_G_SUMMARY, "PASTE_FORMULA"))
         else:
             memo.with_retry(ws.update, f"G{row}", [[_fallback_g_formula(row)]], value_input_option="USER_ENTERED")
-            log(f"⚠️ 第{row}列：上方找不到 G 欄公式，改用預設組合公式")
+            log(f"⚠️ 第{row}列：找不到 G 欄公式可參照，改用預設組合公式")
         result["g_filled"] += 1
-
-    validation = _rows_with_validation(ws, DROPDOWN_COLUMNS, last)
-    for row in target_rows:
-        for col in DROPDOWN_COLUMNS:
-            if row in validation.get(col, set()):
-                continue
-            source = _nearest_above(validation.get(col, set()), row)
-            if not source:
-                continue
-            requests.append({"copyPaste": {
-                "source": {"sheetId": ws.id, "startRowIndex": source - 1, "endRowIndex": source,
-                           "startColumnIndex": col - 1, "endColumnIndex": col},
-                "destination": {"sheetId": ws.id, "startRowIndex": row - 1, "endRowIndex": row,
-                                "startColumnIndex": col - 1, "endColumnIndex": col},
-                "pasteType": "PASTE_DATA_VALIDATION", "pasteOrientation": "NORMAL",
-            }})
-            result["dropdown_copied"] += 1
 
     if requests:
         memo.with_retry(ws.spreadsheet.batch_update, {"requests": requests})
     if result["g_filled"] or result["dropdown_copied"]:
-        log(f"已補 G 欄公式 {result['g_filled']} 格、下拉選單 {result['dropdown_copied']} 格")
+        log(f"已補 G 欄公式 {result['g_filled']} 格、I 欄下拉選單 {result['dropdown_copied']} 列（G:O 格式統一 {result['format_copied']} 列）")
+    return result
+
+
+def normalize_atm_rows(region: str, ui_logger=None, ws=None) -> Dict:
+    """整理現有 ATM 分頁：凡 I:L 有資料的列，G 補公式、G:O 格式統一（I 下拉選單），
+    N/O 兩欄都空白時補值：有訂單 → 清潔異動有同訂單同金額的收款列就用 異動費／工具組，否則 服務費用；
+    沒有訂單 → 2000 新訓費，其他只填「清潔」、費用留人工。"""
+    log = make_logger(ui_logger)
+    ws = ws or get_atm_worksheet(region)
+    rows = memo.with_retry(ws.get_all_values)
+    data_rows = [idx for idx, row in enumerate(rows, start=1)
+                 if idx > 1 and any(memo.safe_cell(row, c) for c in range(COL_I_MONTH, COL_ORDER_AMOUNT + 1))]
+    result = {"rows": len(data_rows), "no_filled": 0}
+    if not data_rows:
+        return result
+
+    change_fee: Dict[tuple, tuple] = {}
+    try:
+        from . import change_order
+
+        for crow in memo.with_retry(change_order.get_worksheet(region).get_all_values)[1:]:
+            no, amount = memo.safe_cell(crow, 7), _to_int_amount(memo.safe_cell(crow, 14))
+            if no and amount and memo.safe_cell(crow, 3) == change_order.TYPE_CHARGE:
+                change_fee[(no, amount)] = change_order_service_fee(f"{memo.safe_cell(crow, 3)} {memo.safe_cell(crow, 10)}")
+    except Exception as exc:
+        log(f"⚠️ 讀取「{region}」清潔異動失敗，N/O 一律依訂單判斷：{exc}")
+
+    updates = []
+    for idx in data_rows:
+        row = rows[idx - 1]
+        if memo.safe_cell(row, COL_N_SERVICE) or memo.safe_cell(row, COL_O_FEE):
+            continue
+        order_no = memo.safe_cell(row, COL_ORDER_NO)
+        amount = _to_int_amount(memo.safe_cell(row, COL_ORDER_AMOUNT))
+        if not order_no and amount is None:
+            continue
+        values = change_fee.get((order_no, amount)) if order_no else None
+        values = values or default_service_fee(amount, order_no)
+        updates.append({"range": f"N{idx}:O{idx}", "values": [list(values)]})
+    if updates:
+        memo.with_retry(ws.batch_update, updates, value_input_option="RAW")
+        result["no_filled"] = len(updates)
+    result.update(ensure_candidate_row_format(ws, data_rows, log=log))
+    log(f"✅ 已整理 ATM 分頁 {len(data_rows)} 列：N/O 補值 {result['no_filled']} 列、G 補公式 {result['g_filled']} 格、"
+        f"I 欄補下拉 {result['dropdown_copied']} 列")
     return result
 
 
@@ -1121,11 +1181,26 @@ def auto_match_bank_rows(
         "updated_orders": 0, "ambiguous": 0, "unmatched": 0,
         "confirm_required": 0, "non_order": 0, "split_payment": 0,
         "errors": [], "matched_rows": [],
+        # 需人工處理（畫面表格）：列號／類型／訂單／姓名／金額／說明
+        "review": [],
     }
 
+    def add_review(row_idx: int, kind: str, text: str, c: Optional[Dict] = None, amount=None) -> None:
+        c = c or {}
+        result["review"].append({
+            "列號": row_idx, "類型": kind, "訂單": c.get("order_no") or "",
+            "姓名": c.get("name") or "", "金額": amount if amount is not None else c.get("amount", ""),
+            "說明": text,
+        })
+
     ws = get_atm_worksheet(region)
-    rows = memo.with_retry(ws.get_all_values)
     log(f"===== 開始自動配對 ATM 銀行明細（{region}）=====")
+    # 先整理現有列：G 補公式、G:O 格式統一、N/O 空白補值（候選列 N/O 正確，配對時才會帶對）
+    try:
+        normalize_atm_rows(region, ui_logger=ui_logger, ws=ws)
+    except Exception as exc:
+        log(f"⚠️ 整理 ATM 分頁 G:O 失敗：{exc}")
+    rows = memo.with_retry(ws.get_all_values)
     if str(row_spec or "").strip():
         target_row_nums = memo.parse_row_spec(row_spec)
         log(f"指定銀行列號：{target_row_nums}")
@@ -1204,6 +1279,7 @@ def auto_match_bank_rows(
 
     log(f"可配對候選訂單：{len(candidates)} 筆")
     touched_rows: List[int] = []
+    cleared_rows: List[int] = []  # 候選資料移走後的原列：G 也不得空白、格式要一致
     refunds_cache: Optional[List[Dict]] = None
     invoice_titles: Dict[str, str] = {}
 
@@ -1216,7 +1292,10 @@ def auto_match_bank_rows(
         except Exception as exc:
             text = f"回填清潔異動失敗：{exc}"
         result.setdefault("change_order_collected", []).append(f"第{row_idx}列 {c['order_no']}：{text}")
-        log(f"{'✅' if text.startswith('已回填') else '⚠️'} 第{row_idx}列 {c['order_no']}：{text}")
+        ok = text.startswith("已回填") and "另有" not in text
+        if not ok:
+            add_review(row_idx, "清潔異動未回填" if not text.startswith("已回填") else "清潔異動多列", text, c)
+        log(f"{'✅' if ok else '⚠️'} 第{row_idx}列 {c['order_no']}：{text}")
 
     def invoice_title_of(order_no: str) -> str:
         if order_no not in invoice_titles:
@@ -1270,6 +1349,7 @@ def auto_match_bank_rows(
                 else:
                     result["unmatched"] += 1; result["failed"] += 1
                     result["errors"].append(f"第{idx}列：支出 ${expense}，{status_text}")
+                    add_review(idx, "支出／退款待確認", f"{note}：{status_text}", amount=expense)
                     log(f"❌ 第{idx}列：支出 ${expense}，{status_text}")
                 continue
 
@@ -1298,6 +1378,7 @@ def auto_match_bank_rows(
             )
             if len(sum_combinations) > 1:
                 text = "多筆加總有多組可能，請人工確認"
+                add_review(idx, "多筆候選", f"{note}：{text}", amount=income)
                 result["ambiguous"] += 1
                 result["failed"] += 1
                 result["errors"].append(f"第{idx}列：{text}")
@@ -1324,6 +1405,7 @@ def auto_match_bank_rows(
 
                 if len(target_rows) < len(combo):
                     text = f"找到唯一的 {len(combo)} 筆加總組合，但相同時間/備註的空白續列不足"
+                    add_review(idx, "需確認", "、".join(c["order_no"] for c in combo) + f"：{text}", amount=income)
                     result["confirm_required"] += 1
                     result["failed"] += 1
                     result["errors"].append(f"第{idx}列：{text}")
@@ -1352,6 +1434,7 @@ def auto_match_bank_rows(
                             memo.with_retry(ws.update_cell, source_row, COL_MOVE_WITH_MATCH, "")
                         _clear_data_validation(ws, source_row, COL_RECON_STATUS, COL_RECON_STATUS)
                         memo.with_retry(ws.update_cell, source_row, COL_RECON_STATUS, "")
+                        cleared_rows.append(source_row)
 
                     touched_rows.append(target_row)
                     if c["order_no"]:
@@ -1432,6 +1515,7 @@ def auto_match_bank_rows(
                 )
                 if not evidence_ok:
                     text = f"待人工確認：同金額候選 {c.get('order_no') or '-'} {c.get('name')}，但缺少末碼/姓名/時間依據"
+                    add_review(idx, "未配對", f"{note}：{text}", amount=income)
                     result["unmatched"] += 1
                     result["failed"] += 1
                     result["errors"].append(f"第{idx}列：{text}")
@@ -1476,6 +1560,7 @@ def auto_match_bank_rows(
                     _copy_data_validation(ws, idx, source_row, [COL_EXTRA, COL_MONTH, COL_SERVICE_TYPE, COL_FEE_TYPE])
                     _clear_data_validation(ws, source_row, COL_RECON_STATUS, COL_RECON_STATUS)
                     memo.with_retry(ws.update_cell, source_row, COL_RECON_STATUS, "")
+                    cleared_rows.append(source_row)
                     log(f"↳ 已從下方待配對列表移除原候選列第{source_row}列 H:O 與 T")
 
                 if needs_confirm:
@@ -1485,6 +1570,7 @@ def auto_match_bank_rows(
                     if is_split:
                         result["split_payment"] += 1
                     result["errors"].append(f"第{idx}列：已預填需確認 {status_text} {c['order_no'] or '-'} {c['name']}（{match_type}）")
+                    add_review(idx, status_text, f"已預填，請確認（{match_type}；F 欄：{note}）", c)
                     log(f"⚠️ 第{idx}列：已預填需使用者確認 → {c['order_no'] or '-'} {c['name']} ${c['amount']}（{status_text}／{match_type}）")
                 else:
                     log(f"✅ 第{idx}列：{match_type} → {c['order_no']} {c['name']} ${c['amount']}")
@@ -1497,6 +1583,7 @@ def auto_match_bank_rows(
 
             elif len(matches) > 1:
                 text = "多筆候選：" + "、".join(f"{c.get('order_no') or '-'} {c.get('name')}" for c in matches[:5])
+                add_review(idx, "多筆候選", f"{note}：{text}", amount=income)
                 result["ambiguous"] += 1
                 result["failed"] += 1
                 result["errors"].append(f"第{idx}列：{text}")
@@ -1519,6 +1606,7 @@ def auto_match_bank_rows(
                     text = f"待人工確認：同金額候選 {c.get('order_no') or '-'} {c['name']}，但缺少末碼/姓名/時間依據"
                 else:
                     text = "待人工確認"
+                add_review(idx, "未配對", f"{note}：{text}", amount=income)
                 result["unmatched"] += 1
                 result["failed"] += 1
                 result["errors"].append(f"第{idx}列：{text}")
@@ -1527,12 +1615,13 @@ def auto_match_bank_rows(
         except Exception as e:
             msg = f"❌ 第{idx}列配對失敗：{e}"
             log(msg)
+            add_review(idx, "執行錯誤", str(e))
             result["failed"] += 1
             result["errors"].append(msg)
 
-    if touched_rows:
+    if touched_rows or cleared_rows:
         try:
-            ensure_candidate_row_format(ws, touched_rows, log=log)
+            ensure_candidate_row_format(ws, touched_rows + cleared_rows, log=log)
         except Exception as exc:
             log(f"⚠️ 補 G 欄公式／下拉選單失敗：{exc}")
             result["errors"].append(f"補 G 欄公式／下拉選單失敗：{exc}")
