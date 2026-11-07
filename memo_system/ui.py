@@ -1224,7 +1224,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
 
     def render_atm_auto_match_mode():
         step("4", "配對銀行明細")
-        st.markdown('<div class="info-strip"><b>配對依據</b><ul><li>金額 + 末碼</li><li>金額 + 姓名</li><li>金額 + 備註或時間</li><li>一筆收入可配對 2～5 筆訂單加總；須有末碼/姓名依據且組合唯一</li></ul></div>', unsafe_allow_html=True)
+        st.markdown('<div class="info-strip"><b>配對依據</b><ul><li>金額 + 末碼</li><li>金額 + 姓名</li><li>金額 + 公司名稱（F 欄像公司時比對訂單發票抬頭）</li><li>金額 + 備註或時間</li><li>一筆收入可配對 2～5 筆訂單加總；須有末碼/姓名依據且組合唯一</li></ul></div>', unsafe_allow_html=True)
         st.markdown('<div class="warn-strip"><b>配對限制</b><ul><li>只靠金額不會自動配對</li><li>必須有末碼、姓名、備註或時間依據</li></ul></div>', unsafe_allow_html=True)
 
         c1, c2 = st.columns([1, 3])
@@ -1293,7 +1293,9 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                         both = atm.match_and_reconcile(region, session=session, row_spec=row_spec.strip(), overwrite_existing=overwrite_existing, allow_review_prefill=allow_review_prefill, ui_logger=atm_match_ui_log)
                         result = _merge_match_reconcile_result(both)
                     else:
-                        result = atm.auto_match_bank_rows(region=region, row_spec=row_spec.strip(), overwrite_existing=overwrite_existing, allow_review_prefill=allow_review_prefill, ui_logger=atm_match_ui_log)
+                        # 帶後台 session：F 欄像公司名稱時要查訂單發票抬頭
+                        session = get_session(ui_logger=atm_match_ui_log)
+                        result = atm.auto_match_bank_rows(region=region, row_spec=row_spec.strip(), overwrite_existing=overwrite_existing, allow_review_prefill=allow_review_prefill, ui_logger=atm_match_ui_log, session=session)
                 atm_match_ui_log("===== 配對銀行明細完成 =====")
                 st.session_state.atm_match_result = result
                 render_atm_result(result, result_container_local)

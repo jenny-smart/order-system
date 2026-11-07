@@ -420,3 +420,42 @@ def test_preview_lists_rows_for_confirmation(monkeypatch):
         "列號": 2, "日期": "2026/11/06", "入帳時間": "2026/11/06 16:39:40",
         "摘要": "ＣＤ轉收", "收入": "4800", "備註": "檸檬家事",
     }]
+
+
+# ── 公司匯款：F 欄像公司名稱 → 比對訂單發票抬頭 ─────────
+@pytest.mark.parametrize("note,title,expected", [
+    ("檸檬家事", "", False),
+    ("康健診所", "康健診所", True),
+    ("宏達國際電子股份", "宏達國際電子股份有限公司", True),     # 銀行備註截斷
+    ("宏達國際", "宏達國際電子股份有限公司", True),
+    ("宏達國際", "台積電股份有限公司", False),
+    ("ＡＢＣ科技有限公司", "ABC科技有限公司", True),           # 全形半形
+])
+def test_company_name_matches(note, title, expected):
+    assert atm.looks_like_company(note) is (note != "檸檬家事")
+    assert atm.company_name_matches(note, title) is expected
+
+
+def test_auto_match_company_transfer_uses_invoice_title(monkeypatch):
+    rows = [
+        _row(A="日期"),
+        _row(A="2026/11/06", B="2026/11/06 10:00:00", C="跨行轉入", E="4,800", F="宏達國際電子股份"),
+        _row(),
+        _row(I="2026.11", J="LC00219101", K="王小明", L="4800"),
+        _row(I="2026.11", J="LC00219102", K="陳大華", L="4800"),
+    ]
+    titles = {"LC00219101": {"company_title": "台積電股份有限公司"},
+              "LC00219102": {"company_title": "宏達國際電子股份有限公司"}}
+    monkeypatch.setattr(atm, "find_purchase_by_order_no", lambda session, no: titles.get(no))
+    ws = _MatchWS(rows)
+    monkeypatch.setattr(atm, "get_atm_worksheet", lambda region: ws)
+    for name in ("_clear_data_validation", "_copy_data_validation", "ensure_candidate_row_format"):
+        monkeypatch.setattr(atm, name, lambda *a, **k: None)
+    result = atm.auto_match_bank_rows("台北", today=date(2026, 11, 7), session=object())
+    assert ws.writes["H2:O2"][2] == "LC00219102"
+    assert ws.writes[(2, atm.COL_RECON_STATUS)] == "已配對"
+    # 沒有 session（無法查抬頭）→ 不配對，留人工
+    ws2 = _MatchWS([list(r) for r in rows])
+    monkeypatch.setattr(atm, "get_atm_worksheet", lambda region: ws2)
+    atm.auto_match_bank_rows("台北", today=date(2026, 11, 7))
+    assert "H2:O2" not in ws2.writes

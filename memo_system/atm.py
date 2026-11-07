@@ -1010,6 +1010,39 @@ def match_refund(refunds: List[Dict], bank_day: Optional[_date], amount: Optiona
     return None, "清潔異動找不到同日退款"
 
 
+# 公司匯款：F 欄像公司名稱時，比對同金額訂單的發票抬頭（2026-11-07 Jenny）
+COMPANY_HINT = re.compile(
+    r"公司|有限|股份|企業|集團|實業|科技|國際|工程|建設|診所|醫院|醫療|牙醫|藥局|工作室|事務所|"
+    r"商行|商號|行號|協會|學會|基金會|管委會|管理委員會|學校|幼兒園|補習班|銀行|餐廳|飯店|旅館|民宿"
+)
+COMPANY_SUFFIX = re.compile(r"(股份)?有限公司|公司|企業社|商行|商號|行號")
+INVOICE_TITLE_KEYS = ("company_title", "invoice_title", "companyTitle", "buyer_name", "title")
+
+
+def looks_like_company(note: str) -> bool:
+    return bool(COMPANY_HINT.search(str(note or "")))
+
+
+def _company_core(text: str) -> str:
+    return COMPANY_SUFFIX.sub("", _compact_text(text))
+
+
+def company_name_matches(note: str, invoice_title: str) -> bool:
+    """銀行備註常被截斷或省略「股份有限公司」：去掉公司字尾後互相包含（至少 2 字）或高度相似就算相符。"""
+    a, b = _company_core(note), _company_core(invoice_title)
+    if len(a) < 2 or len(b) < 2:
+        return False
+    return a in b or b in a or _similar_text(a, b, threshold=0.8)
+
+
+def purchase_invoice_title(purchase: Optional[Dict]) -> str:
+    for key in INVOICE_TITLE_KEYS:
+        value = str((purchase or {}).get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
 def _trainee_name(note: str) -> str:
     return re.sub(r"(新訓|新訓費).*$", "", str(note or "")).strip()
 
@@ -1045,8 +1078,10 @@ def auto_match_bank_rows(
     allow_review_prefill: bool = True,
     ui_logger=None,
     today: Optional[_date] = None,
+    session=None,
 ) -> Dict:
-    """row_spec 留空：只處理近 3 日 A:F 有資料但 H:O 空白的列（不再掃全部列）。"""
+    """row_spec 留空：只處理近 3 個上班日 A:F 有資料但 H:O 空白的列（不再掃全部列）。
+    有 session 時，F 欄像公司名稱會到後台查同金額訂單的發票抬頭比對。"""
     log = make_logger(ui_logger)
     result = {
         "processed": 0, "success": 0, "failed": 0, "skipped": 0,
@@ -1137,6 +1172,16 @@ def auto_match_bank_rows(
     log(f"可配對候選訂單：{len(candidates)} 筆")
     touched_rows: List[int] = []
     refunds_cache: Optional[List[Dict]] = None
+    invoice_titles: Dict[str, str] = {}
+
+    def invoice_title_of(order_no: str) -> str:
+        if order_no not in invoice_titles:
+            try:
+                invoice_titles[order_no] = purchase_invoice_title(find_purchase_by_order_no(session, order_no))
+            except Exception as exc:
+                invoice_titles[order_no] = ""
+                log(f"⚠️ 查訂單 {order_no} 發票抬頭失敗：{exc}")
+        return invoice_titles[order_no]
 
     for idx, row in enumerate(rows, start=1):
         try:
@@ -1276,6 +1321,13 @@ def auto_match_bank_rows(
             split_candidates = [c for c in candidates if _is_split_payment_candidate(income, c, note)]
             code_matches = [c for c in amount_candidates if c["last_code"] and _bank_note_has_code(note, c["last_code"])]
             name_matches = [c for c in amount_candidates if _note_matches_name(note, c["name"])]
+            company_matches = []
+            if not code_matches and not name_matches and session is not None and looks_like_company(note):
+                order_candidates = [c for c in amount_candidates if c.get("order_no")]
+                company_matches = [c for c in order_candidates if company_name_matches(note, invoice_title_of(c["order_no"]))]
+                if order_candidates and not company_matches:
+                    titles = "、".join(f"{c['order_no']}「{invoice_title_of(c['order_no']) or '無抬頭'}」" for c in order_candidates[:5])
+                    log(f"第{idx}列：F 欄「{note}」像公司名稱，同金額訂單發票抬頭不符：{titles}")
 
             match_type = ""
             matches = []
@@ -1289,6 +1341,10 @@ def auto_match_bank_rows(
                 matches = name_matches; match_type = "備註姓名+金額"
             elif len(name_matches) > 1:
                 matches = name_matches; match_type = "備註姓名+金額"
+            elif len(company_matches) == 1:
+                matches = company_matches; match_type = "公司抬頭+金額"
+            elif len(company_matches) > 1:
+                matches = company_matches; match_type = "公司抬頭+金額"
             elif len(split_candidates) == 1:
                 matches = [dict(split_candidates[0], split_reason="疑似拆單")]
                 match_type = "疑似拆單"; needs_confirm = True
@@ -1324,6 +1380,7 @@ def auto_match_bank_rows(
                 evidence_ok = (
                     str(match_type).startswith("末碼+金額")
                     or str(match_type).startswith("備註姓名+金額")
+                    or str(match_type).startswith("公司抬頭+金額")
                     or "F欄與K欄姓名相近" in str(match_type)
                     or "M欄日期時間=B欄" in str(match_type)
                     or str(match_type).startswith("疑似拆單")
@@ -1879,7 +1936,7 @@ def match_and_reconcile(region: str, session, row_spec: str = "", ui_logger=None
     log(f"===== ② 配對銀行明細（{region}）=====")
     item["match"] = auto_match_bank_rows(
         region=region, row_spec=row_spec, overwrite_existing=overwrite_existing,
-        allow_review_prefill=allow_review_prefill, ui_logger=ui_logger, today=today,
+        allow_review_prefill=allow_review_prefill, ui_logger=ui_logger, today=today, session=session,
     )
     ws = get_atm_worksheet(region)
     ready = rows_ready_for_reconcile(memo.with_retry(ws.get_all_values))
