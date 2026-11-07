@@ -416,6 +416,8 @@ def process_atm_rows(
     result = {
         "processed": 0, "success": 0, "failed": 0,
         "skipped": 0, "errors": [],
+        # 逐筆結果（給排程寫行事曆）：completed＝完成對帳；no_invoice＝已付款但未開立發票
+        "completed": [], "no_invoice": [],
     }
 
     row_nums = memo.parse_row_spec(row_spec)
@@ -506,6 +508,15 @@ def process_atm_rows(
             log(f"找到 purchase_id={purchase_id}")
 
             updates = []
+            # 2026-11-06 Jenny：訂單本來就已付款時，千萬不要再發確認信
+            pre_paid_at = str(purchase.get("paid_at") or "").strip()
+            already_paid = status_code == "1" or bool(pre_paid_at and not pre_paid_at.startswith("0000"))
+            send_mail = do_send_mail and not already_paid
+            mail_note = ""  # 勾了發確認信卻沒發時寫進 S 欄的原因
+            if do_send_mail and already_paid:
+                mail_note = "原已付款，未發信"
+                log("（訂單本來就已付款，不再發確認信）")
+            invoice_missing_reason = ""
 
             if do_mark_paid:
                 if str(purchase.get("purchase_status") or "") == "1":
@@ -531,16 +542,30 @@ def process_atm_rows(
                 if purchase.get("invoice_no"):
                     log(f"（已有發票號碼 {purchase['invoice_no']}，略過開立發票）")
                 else:
-                    issue_invoice(session, purchase_id)
-                    log("✅ 已按下「開立發票」")
+                    # 開立發票失敗不再整列中止：付款狀態照樣回寫，但不發確認信，並列入「未開立發票」
+                    try:
+                        issue_invoice(session, purchase_id)
+                        log("✅ 已按下「開立發票」")
+                    except Exception as exc:
+                        invoice_missing_reason = f"開立發票失敗：{exc}"
                     refreshed = find_purchase_by_order_no(session, order_no)
                     if not refreshed:
                         raise ValueError(f"開立發票後無法重新查到同一訂單 {order_no}")
                     purchase = refreshed
                     if not str(purchase.get("invoice_no") or "").strip():
-                        raise ValueError(f"後台尚未回覆訂單 {order_no} 的發票號碼，停止 Sheet 回填")
+                        invoice_missing_reason = invoice_missing_reason or "後台尚未回覆發票號碼"
+                        log(f"⚠️ 第{r}列（{order_no}）：未開立發票（{invoice_missing_reason}），不發確認信")
+                        if send_mail:
+                            mail_note = "未開發票，未發信"
+                        send_mail = False
 
-            if do_send_mail:
+            # 2026-11-07 Jenny：只有「當日改成已付款」的訂單才發確認信
+            if send_mail and _bank_date(paid_at) != today_tw():
+                log(f"（付款時間 {paid_at} 不是今天，不發確認信）")
+                mail_note = "非當日付款，未發信"
+                send_mail = False
+
+            if send_mail:
                 mail_resp = send_confirmation_mail(session, order_no)
                 log(f"✅ 已發確認信，回應：{mail_resp}")
 
@@ -560,9 +585,11 @@ def process_atm_rows(
                 updates.append((COL_PAID_AT, paid_at))
             if invoice_no:
                 updates.append((COL_INVOICE_NO, invoice_no))
-            if do_send_mail:
+            if send_mail:
                 updates.append((COL_MAIL_STATUS, "已發送"))
-            updates.append((COL_RECON_STATUS, "已更新系統"))
+            elif mail_note:
+                updates.append((COL_MAIL_STATUS, mail_note))
+            updates.append((COL_RECON_STATUS, "已更新系統（未開發票）" if invoice_missing_reason else "已更新系統"))
 
             _clear_data_validation(ws, r, COL_RECONCILED_AT, COL_RECON_STATUS)
 
@@ -572,6 +599,14 @@ def process_atm_rows(
 
             result["processed"] += 1
             result["success"] += 1
+            detail = {
+                "region": region, "row": r, "order_no": order_no, "name": customer_name,
+                "amount": sheet_order_amount, "invoice_no": invoice_no,
+                "already_paid": already_paid, "mail_sent": send_mail,
+            }
+            result["completed"].append(detail)
+            if invoice_missing_reason:
+                result["no_invoice"].append(dict(detail, reason=invoice_missing_reason))
 
         except Exception as e:
             msg = f"❌ 第{r}列 失敗：{e}"
@@ -752,32 +787,323 @@ def _format_match_text(year_month: str, service_type: str, fee_type: str, order_
     return f"{year_month}-{service_type}-{fee_type},{order_no},{name}"
 
 
+# -----------------------------------------------------------------------------
+# 待配對列規則（2026-11-06 Jenny）
+# 1. G 欄不得空白：G 是組合公式，沿用上方最近一列的公式。
+# 3. N/O 在資料進 ATM 分頁時就填好（2026-11-07 Jenny）：
+#    ① 待付款清單（後台訂單）→ 清潔／服務費用；
+#    清潔異動填入 → 工具組 → 清潔／工具組，其他 → 清潔／異動費。
+#    ② 配對直接沿用候選列的 N/O；舊資料 N/O 空白才補：有訂單 → 服務費用，無訂單 2000 → 新訓費。
+# 4. I（以及 N、O）欄要和上方一樣是下拉選單：複製上方最近一列的資料驗證。
+# -----------------------------------------------------------------------------
+COL_G_SUMMARY = 7   # G
+COL_I_MONTH = 9     # I
+COL_N_SERVICE = 14  # N
+COL_O_FEE = 15      # O
+TRAINEE_FEE_AMOUNT = 2000
+DROPDOWN_COLUMNS = [COL_I_MONTH, COL_N_SERVICE, COL_O_FEE]
+
+
+UNPAID_SERVICE_FEE = ("清潔", "服務費用")
+
+
+def change_order_service_fee(change_text: str = "") -> tuple:
+    """清潔異動填入 ATM 的 N/O：工具組 → 清潔／工具組；其他 → 清潔／異動費。"""
+    text = str(change_text or "")
+    if "工具組" in text or "工具包" in text:
+        return "清潔", "工具組"
+    return "清潔", "異動費"
+
+
+TRAINEE_SERVICE_FEE = ("清潔", "新訓費")
+
+
+def default_service_fee(amount, order_no: str = "") -> tuple:
+    """N/O 空白時的補值（2026-11-07 Jenny）：有訂單 → 清潔／服務費用；
+    沒有訂單編號：2000 → 清潔／新訓費，其他金額 → 費用類別留空給人工確認。"""
+    if str(order_no or "").strip():
+        return UNPAID_SERVICE_FEE
+    if _to_int_amount(amount) == TRAINEE_FEE_AMOUNT:
+        return TRAINEE_SERVICE_FEE
+    return "清潔", ""
+
+
+def _fallback_g_formula(row: int) -> str:
+    return f'=I{row}&"-"&N{row}&"-"&O{row}&","&J{row}&","&K{row}'
+
+
+def _g_formulas(ws, upto_row: int) -> List[str]:
+    """G1:G{upto_row} 的公式文字（不是計算結果）。"""
+    try:
+        values = memo.with_retry(ws.get, f"G1:G{upto_row}", value_render_option="FORMULA")
+    except Exception:
+        return []
+    return [str(r[0]) if r else "" for r in (values or [])]
+
+
+def _rows_with_validation(ws, columns: List[int], upto_row: int) -> Dict[int, set]:
+    """每一欄有資料驗證（下拉選單）的列號集合。"""
+    found: Dict[int, set] = {c: set() for c in columns}
+    if upto_row <= 0:
+        return found
+    try:
+        title = ws.title.replace("'", "''")
+        lo, hi = min(columns), max(columns)
+        a1 = f"'{title}'!{chr(64 + lo)}1:{chr(64 + hi)}{upto_row}"
+        meta = ws.spreadsheet.fetch_sheet_metadata(params={
+            "ranges": a1,
+            "fields": "sheets(properties.sheetId,data(startRow,startColumn,rowData.values.dataValidation))",
+        })
+    except Exception:
+        return found
+    for sheet in meta.get("sheets", []):
+        for block in sheet.get("data", []):
+            start_row = int(block.get("startRow", 0))
+            start_col = int(block.get("startColumn", 0))
+            for r_off, row_data in enumerate(block.get("rowData", []) or []):
+                for c_off, cell in enumerate(row_data.get("values", []) or []):
+                    col = start_col + c_off + 1
+                    if col in found and cell.get("dataValidation"):
+                        found[col].add(start_row + r_off + 1)
+    return found
+
+
+def _nearest_above(rows: set, target: int) -> int:
+    above = [r for r in rows if r < target]
+    return max(above) if above else 0
+
+
+def ensure_candidate_row_format(ws, target_rows: List[int], log=None) -> Dict:
+    """G 欄補公式、I/N/O 欄補下拉選單（都參照上方最近一列）。"""
+    log = log or (lambda msg: None)
+    result = {"g_filled": 0, "dropdown_copied": 0}
+    target_rows = sorted({int(r) for r in target_rows if r})
+    if not target_rows:
+        return result
+    last = max(target_rows)
+
+    formulas = _g_formulas(ws, last)
+    formula_rows = {i for i, f in enumerate(formulas, start=1) if f.startswith("=")}
+    requests = []
+    for row in target_rows:
+        current = formulas[row - 1] if row - 1 < len(formulas) else ""
+        if str(current).strip():
+            continue
+        source = _nearest_above(formula_rows, row)
+        if source:
+            requests.append({"copyPaste": {
+                "source": {"sheetId": ws.id, "startRowIndex": source - 1, "endRowIndex": source,
+                           "startColumnIndex": COL_G_SUMMARY - 1, "endColumnIndex": COL_G_SUMMARY},
+                "destination": {"sheetId": ws.id, "startRowIndex": row - 1, "endRowIndex": row,
+                                "startColumnIndex": COL_G_SUMMARY - 1, "endColumnIndex": COL_G_SUMMARY},
+                "pasteType": "PASTE_FORMULA", "pasteOrientation": "NORMAL",
+            }})
+        else:
+            memo.with_retry(ws.update, f"G{row}", [[_fallback_g_formula(row)]], value_input_option="USER_ENTERED")
+            log(f"⚠️ 第{row}列：上方找不到 G 欄公式，改用預設組合公式")
+        result["g_filled"] += 1
+
+    validation = _rows_with_validation(ws, DROPDOWN_COLUMNS, last)
+    for row in target_rows:
+        for col in DROPDOWN_COLUMNS:
+            if row in validation.get(col, set()):
+                continue
+            source = _nearest_above(validation.get(col, set()), row)
+            if not source:
+                continue
+            requests.append({"copyPaste": {
+                "source": {"sheetId": ws.id, "startRowIndex": source - 1, "endRowIndex": source,
+                           "startColumnIndex": col - 1, "endColumnIndex": col},
+                "destination": {"sheetId": ws.id, "startRowIndex": row - 1, "endRowIndex": row,
+                                "startColumnIndex": col - 1, "endColumnIndex": col},
+                "pasteType": "PASTE_DATA_VALIDATION", "pasteOrientation": "NORMAL",
+            }})
+            result["dropdown_copied"] += 1
+
+    if requests:
+        memo.with_retry(ws.spreadsheet.batch_update, {"requests": requests})
+    if result["g_filled"] or result["dropdown_copied"]:
+        log(f"已補 G 欄公式 {result['g_filled']} 格、下拉選單 {result['dropdown_copied']} 格")
+    return result
+
+
+RECENT_MATCH_WORKDAYS = 3
+
+
+def recent_workdays_start(today: _date, workdays: int = RECENT_MATCH_WORKDAYS) -> _date:
+    """近 N 個上班日（含今天，今天是上班日才算一天）的第一天；中間連假不計入。
+    例：週一 → 上週四；週六 → 週三；春節連假後第一天 → 連假前 2 個上班日。"""
+    try:
+        from shared.weekend_reminder_schedule import is_off_day, load_work_calendar
+
+        calendar = load_work_calendar()
+    except Exception:
+        calendar, is_off_day = {}, (lambda value, _cal: value.weekday() >= 5)
+    day = today
+    counted = 0 if is_off_day(today, calendar) else 1
+    while counted < workdays:
+        day = previous_workday(day)
+        counted += 1
+    return day
+
+
+def recent_unmatched_bank_rows(rows: List[List[str]], today: Optional[_date] = None,
+                               workdays: int = RECENT_MATCH_WORKDAYS) -> List[int]:
+    """近 3 個上班日（含今天；中間休假日的入帳也一併納入）A:F 有銀行明細、H:O 全空白的列。
+    日期看 A 欄，A 讀不到再看 B 欄。"""
+    today = today or today_tw()
+    since = recent_workdays_start(today, workdays)
+    picked = []
+    for idx, row in enumerate(rows, start=1):
+        a_to_f = [memo.safe_cell(row, c) for c in range(1, 7)]
+        if not any(a_to_f):
+            continue
+        if any(memo.safe_cell(row, c) for c in range(8, 16)):  # H:O
+            continue
+        day = _bank_date(a_to_f[0]) or _bank_date(a_to_f[1])
+        if day is None or not (since <= day <= today):
+            continue
+        picked.append(idx)
+    return picked
+
+
+COL_BANK_EXPENSE = 4  # D：支出（退款、新訓費等轉出）
+REFUND_SERVICE_FEE = ("清潔", "退款")
+
+
+def load_change_order_refunds(region: str) -> List[Dict]:
+    """清潔異動分頁裡的退款列：退款日期（AC）、訂單（G）、姓名（H）、金額（T 匯款金額，空白用 S 退款金額）。"""
+    from . import change_order
+
+    values = memo.with_retry(change_order.get_worksheet(region).get_all_values)
+    col = lambda letter: sum((ord(ch) - 64) * 26 ** i for i, ch in enumerate(reversed(letter)))
+    refunds = []
+    for row in values[1:]:
+        refund_day = _bank_date(memo.safe_cell(row, col("AC")))
+        order_no = memo.safe_cell(row, col("G"))
+        if not refund_day or not order_no:
+            continue
+        amounts = {a for a in (_to_int_amount(memo.safe_cell(row, col("T"))),
+                               _to_int_amount(memo.safe_cell(row, col("S")))) if a}
+        service_day = _bank_date(memo.safe_cell(row, col("I")))
+        refunds.append({
+            "date": refund_day, "order_no": order_no, "name": memo.safe_cell(row, col("H")),
+            "amounts": amounts, "line_url": memo.safe_cell(row, col("D")),
+            "year_month": f"{service_day:%Y.%m}" if service_day else f"{refund_day:%Y.%m}",
+        })
+    return refunds
+
+
+def match_refund(refunds: List[Dict], bank_day: Optional[_date], amount: Optional[int],
+                 used_order_nos: Optional[set] = None) -> tuple:
+    """退款日期＝銀行日期、金額相同（T 匯款金額或 S 退款金額）且唯一才配對。
+    回傳 (退款資料或 None, 狀態／原因)；已出現在 ATM J 欄的訂單不再使用。"""
+    used = used_order_nos or set()
+    same_day = [r for r in refunds if bank_day and r["date"] == bank_day and r["order_no"] not in used]
+    exact = [r for r in same_day if amount in r["amounts"]]
+    if len(exact) == 1:
+        return exact[0], "退款"
+    if len(exact) > 1:
+        return None, f"同日同金額退款 {len(exact)} 筆，請人工確認"
+    if same_day:
+        return None, f"清潔異動同日退款 {len(same_day)} 筆但金額不符，請人工確認"
+    return None, "清潔異動找不到同日退款"
+
+
+# 公司匯款：F 欄像公司名稱時，比對同金額訂單的發票抬頭（2026-11-07 Jenny）
+COMPANY_HINT = re.compile(
+    r"公司|有限|股份|企業|集團|實業|科技|國際|工程|建設|診所|醫院|醫療|牙醫|藥局|工作室|事務所|"
+    r"商行|商號|行號|協會|學會|基金會|管委會|管理委員會|學校|幼兒園|補習班|銀行|餐廳|飯店|旅館|民宿"
+)
+COMPANY_SUFFIX = re.compile(r"(股份)?有限公司|公司|企業社|商行|商號|行號")
+INVOICE_TITLE_KEYS = ("company_title", "invoice_title", "companyTitle", "buyer_name", "title")
+
+
+def looks_like_company(note: str) -> bool:
+    return bool(COMPANY_HINT.search(str(note or "")))
+
+
+def _company_core(text: str) -> str:
+    return COMPANY_SUFFIX.sub("", _compact_text(text))
+
+
+def company_name_matches(note: str, invoice_title: str) -> bool:
+    """銀行備註常被截斷或省略「股份有限公司」：去掉公司字尾後互相包含（至少 2 字）或高度相似就算相符。"""
+    a, b = _company_core(note), _company_core(invoice_title)
+    if len(a) < 2 or len(b) < 2:
+        return False
+    return a in b or b in a or _similar_text(a, b, threshold=0.8)
+
+
+def purchase_invoice_title(purchase: Optional[Dict]) -> str:
+    for key in INVOICE_TITLE_KEYS:
+        value = str((purchase or {}).get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _trainee_name(note: str) -> str:
+    return re.sub(r"(新訓|新訓費).*$", "", str(note or "")).strip()
+
+
+def preview_recent_unmatched_bank_rows(region: str, today: Optional[_date] = None) -> List[Dict]:
+    """盤點：列出 ② 留空列號時會處理的列，給介面先確認。"""
+    rows = memo.with_retry(get_atm_worksheet(region).get_all_values)
+    return [{
+        "列號": idx,
+        "日期": memo.safe_cell(rows[idx - 1], 1),
+        "入帳時間": memo.safe_cell(rows[idx - 1], COL_BANK_TIME),
+        "摘要": memo.safe_cell(rows[idx - 1], 3),
+        "收入": memo.safe_cell(rows[idx - 1], COL_BANK_INCOME),
+        "備註": memo.safe_cell(rows[idx - 1], COL_BANK_NOTE),
+    } for idx in recent_unmatched_bank_rows(rows, today=today)]
+
+
+def _write_trainee_fee(ws, idx: int, bank_day: Optional[_date], amount: int, note: str) -> None:
+    """沒有訂單的 2000：I 入帳月份、K 備註裡的姓名、L 金額、N/O 清潔／新訓費；T 標「新訓費」（③ 不會處理）。"""
+    memo.with_retry(ws.update, f"I{idx}:O{idx}", [[
+        f"{bank_day:%Y.%m}" if bank_day else "", "", _trainee_name(note), amount, "", *TRAINEE_SERVICE_FEE,
+    ]], value_input_option="RAW")
+    _clear_data_validation(ws, idx, COL_RECON_STATUS, COL_RECON_STATUS)
+    memo.with_retry(ws.update_cell, idx, COL_RECON_STATUS, "新訓費")
+
+
 def auto_match_bank_rows(
     region: str,
     row_spec: str = "",
     overwrite_existing: bool = False,
-    default_service_type: str = "清潔",
-    default_fee_type: str = "服務費用",
+    default_service_type: str = "",
+    default_fee_type: str = "",
     allow_review_prefill: bool = True,
     ui_logger=None,
+    today: Optional[_date] = None,
+    session=None,
 ) -> Dict:
+    """row_spec 留空：只處理近 3 個上班日 A:F 有資料但 H:O 空白的列（不再掃全部列）。
+    有 session 時，F 欄像公司名稱會到後台查同金額訂單的發票抬頭比對。"""
     log = make_logger(ui_logger)
     result = {
         "processed": 0, "success": 0, "failed": 0, "skipped": 0,
         "updated_orders": 0, "ambiguous": 0, "unmatched": 0,
         "confirm_required": 0, "non_order": 0, "split_payment": 0,
-        "errors": [],
+        "errors": [], "matched_rows": [],
     }
 
     ws = get_atm_worksheet(region)
     rows = memo.with_retry(ws.get_all_values)
-    target_row_nums = memo.parse_row_spec(row_spec) if str(row_spec or "").strip() else []
-    target_row_set = set(target_row_nums)
     log(f"===== 開始自動配對 ATM 銀行明細（{region}）=====")
-    if target_row_nums:
+    if str(row_spec or "").strip():
+        target_row_nums = memo.parse_row_spec(row_spec)
         log(f"指定銀行列號：{target_row_nums}")
     else:
-        log("未指定銀行列號，將掃描全部列")
+        target_row_nums = recent_unmatched_bank_rows(rows, today=today)
+        since = recent_workdays_start(today or today_tw())
+        log(f"未指定列號：近 {RECENT_MATCH_WORKDAYS} 個上班日（{since:%m/%d} 起）A:F 有資料、H:O 空白的列 → {target_row_nums or '無'}")
+        if not target_row_nums:
+            log("===== 自動配對完成 =====")
+            return result
+    target_row_set = set(target_row_nums)
 
     COL_BANK_TIME = 2
     COL_INCOME = 5
@@ -809,11 +1135,13 @@ def auto_match_bank_rows(
         name = memo.safe_cell(row, COL_NAME)
         amount = _to_int_amount(memo.safe_cell(row, COL_AMOUNT))
         last_code = memo.safe_cell(row, COL_LAST_CODE)
-        service_type = memo.safe_cell(row, COL_SERVICE_TYPE) or default_service_type
-        fee_type = memo.safe_cell(row, COL_FEE_TYPE) or default_fee_type
 
         if amount is None:
             continue
+        # N/O 沿用候選列（① 待付款／清潔異動進來時已填好）；舊資料空白才補
+        rule_service, rule_fee = default_service_fee(amount, order_no)
+        service_type = memo.safe_cell(row, COL_SERVICE_TYPE) or default_service_type or rule_service
+        fee_type = memo.safe_cell(row, COL_FEE_TYPE) or default_fee_type or rule_fee
         if not order_no and not (name and (service_type or fee_type)):
             continue
 
@@ -842,6 +1170,18 @@ def auto_match_bank_rows(
                 matched_names.add(_compact_text(name_val))
 
     log(f"可配對候選訂單：{len(candidates)} 筆")
+    touched_rows: List[int] = []
+    refunds_cache: Optional[List[Dict]] = None
+    invoice_titles: Dict[str, str] = {}
+
+    def invoice_title_of(order_no: str) -> str:
+        if order_no not in invoice_titles:
+            try:
+                invoice_titles[order_no] = purchase_invoice_title(find_purchase_by_order_no(session, order_no))
+            except Exception as exc:
+                invoice_titles[order_no] = ""
+                log(f"⚠️ 查訂單 {order_no} 發票抬頭失敗：{exc}")
+        return invoice_titles[order_no]
 
     for idx, row in enumerate(rows, start=1):
         try:
@@ -852,8 +1192,41 @@ def auto_match_bank_rows(
             bank_time = memo.safe_cell(row, COL_BANK_TIME)
             note = memo.safe_cell(row, COL_NOTE)
             current_order_no = memo.safe_cell(row, COL_MATCH_ORDER_NO)
+            bank_day = _bank_date(memo.safe_cell(row, 1)) or _bank_date(bank_time)
 
             if income is None:
+                expense = _to_int_amount(memo.safe_cell(row, COL_BANK_EXPENSE))
+                if expense is None or current_order_no or memo.safe_cell(row, COL_SERVICE_TYPE):
+                    continue
+                # 支出（D 欄）：先找清潔異動同日退款；找不到且 2000 → 新訓費；其他人工確認
+                result["processed"] += 1
+                if refunds_cache is None:
+                    try:
+                        refunds_cache = load_change_order_refunds(region)
+                    except Exception as exc:
+                        refunds_cache = []
+                        log(f"⚠️ 讀取「{region}」清潔異動退款失敗：{exc}")
+                refund, status_text = match_refund(refunds_cache, bank_day, expense, used_order_nos)
+                if refund:
+                    used_order_nos.add(refund["order_no"])
+                    memo.with_retry(ws.update, f"H{idx}:O{idx}", [[
+                        refund["line_url"], refund["year_month"], refund["order_no"], refund["name"],
+                        expense, "", *REFUND_SERVICE_FEE,
+                    ]], value_input_option="RAW")
+                    _clear_data_validation(ws, idx, COL_RECON_STATUS, COL_RECON_STATUS)
+                    memo.with_retry(ws.update_cell, idx, COL_RECON_STATUS, status_text)
+                    touched_rows.append(idx)
+                    result["success"] += 1
+                    log(f"✅ 第{idx}列：支出 ${expense} → 清潔異動退款 {refund['order_no']} {refund['name']}")
+                elif expense == TRAINEE_FEE_AMOUNT:
+                    _write_trainee_fee(ws, idx, bank_day, expense, note)
+                    touched_rows.append(idx)
+                    result["success"] += 1; result["non_order"] += 1
+                    log(f"✅ 第{idx}列：支出 $2000、沒有訂單 → 清潔／新訓費")
+                else:
+                    result["unmatched"] += 1; result["failed"] += 1
+                    result["errors"].append(f"第{idx}列：支出 ${expense}，{status_text}")
+                    log(f"❌ 第{idx}列：支出 ${expense}，{status_text}")
                 continue
 
             result["processed"] += 1
@@ -936,6 +1309,7 @@ def auto_match_bank_rows(
                         _clear_data_validation(ws, source_row, COL_RECON_STATUS, COL_RECON_STATUS)
                         memo.with_retry(ws.update_cell, source_row, COL_RECON_STATUS, "")
 
+                    touched_rows.append(target_row)
                     if c["order_no"]:
                         used_order_nos.add(c["order_no"])
                     log(f"✅ 第{target_row}列：多訂單加總 → {c['order_no']} {c['name']} ${c['amount']}")
@@ -947,6 +1321,13 @@ def auto_match_bank_rows(
             split_candidates = [c for c in candidates if _is_split_payment_candidate(income, c, note)]
             code_matches = [c for c in amount_candidates if c["last_code"] and _bank_note_has_code(note, c["last_code"])]
             name_matches = [c for c in amount_candidates if _note_matches_name(note, c["name"])]
+            company_matches = []
+            if not code_matches and not name_matches and session is not None and looks_like_company(note):
+                order_candidates = [c for c in amount_candidates if c.get("order_no")]
+                company_matches = [c for c in order_candidates if company_name_matches(note, invoice_title_of(c["order_no"]))]
+                if order_candidates and not company_matches:
+                    titles = "、".join(f"{c['order_no']}「{invoice_title_of(c['order_no']) or '無抬頭'}」" for c in order_candidates[:5])
+                    log(f"第{idx}列：F 欄「{note}」像公司名稱，同金額訂單發票抬頭不符：{titles}")
 
             match_type = ""
             matches = []
@@ -960,6 +1341,10 @@ def auto_match_bank_rows(
                 matches = name_matches; match_type = "備註姓名+金額"
             elif len(name_matches) > 1:
                 matches = name_matches; match_type = "備註姓名+金額"
+            elif len(company_matches) == 1:
+                matches = company_matches; match_type = "公司抬頭+金額"
+            elif len(company_matches) > 1:
+                matches = company_matches; match_type = "公司抬頭+金額"
             elif len(split_candidates) == 1:
                 matches = [dict(split_candidates[0], split_reason="疑似拆單")]
                 match_type = "疑似拆單"; needs_confirm = True
@@ -995,6 +1380,7 @@ def auto_match_bank_rows(
                 evidence_ok = (
                     str(match_type).startswith("末碼+金額")
                     or str(match_type).startswith("備註姓名+金額")
+                    or str(match_type).startswith("公司抬頭+金額")
                     or "F欄與K欄姓名相近" in str(match_type)
                     or "M欄日期時間=B欄" in str(match_type)
                     or str(match_type).startswith("疑似拆單")
@@ -1035,6 +1421,7 @@ def auto_match_bank_rows(
                 _clear_data_validation(ws, idx, COL_RECON_STATUS, COL_RECON_STATUS)
                 memo.with_retry(ws.update_cell, idx, COL_RECONCILED_AT, _now_text())
                 memo.with_retry(ws.update_cell, idx, COL_RECON_STATUS, status_text)
+                touched_rows.append(idx)
 
                 if source_row and source_row != idx:
                     _copy_data_validation(ws, idx, source_row, [COL_EXTRA, COL_MONTH, COL_SERVICE_TYPE, COL_FEE_TYPE])
@@ -1069,6 +1456,15 @@ def auto_match_bank_rows(
                 result["errors"].append(f"第{idx}列：{text}")
                 log(f"⚠️ 第{idx}列：{text}")
 
+            elif income == TRAINEE_FEE_AMOUNT and (
+                "新訓" in note or not any(c.get("order_no") for c in amount_candidates)
+            ):
+                # 沒有訂單可對、金額 2000 → 清潔／新訓費（其他金額一律人工確認）
+                _write_trainee_fee(ws, idx, bank_day, income, note)
+                touched_rows.append(idx)
+                result["success"] += 1; result["non_order"] += 1
+                log(f"✅ 第{idx}列：收入 $2000、沒有訂單 → 清潔／新訓費")
+
             else:
                 if len(amount_candidates) > 1:
                     text = f"待人工確認：同金額候選 {len(amount_candidates)} 筆，但缺少末碼/姓名/時間依據"
@@ -1088,6 +1484,14 @@ def auto_match_bank_rows(
             result["failed"] += 1
             result["errors"].append(msg)
 
+    if touched_rows:
+        try:
+            ensure_candidate_row_format(ws, touched_rows, log=log)
+        except Exception as exc:
+            log(f"⚠️ 補 G 欄公式／下拉選單失敗：{exc}")
+            result["errors"].append(f"補 G 欄公式／下拉選單失敗：{exc}")
+
+    result["matched_rows"] = sorted(set(touched_rows))
     log("===== 自動配對完成 =====")
     return result
 
@@ -1181,6 +1585,8 @@ def search_atm_unpaid_orders(session, date_until: Optional[str] = None, ui_logge
             "fare": fare,
             "net_amount": net_amount,
             "line_url": line_url,
+            # 客戶匯款帳號後 5 碼（有填才有）→ M 欄，② 用來比對 F 欄
+            "last_code": str(item.get("account5") or "").strip(),
         })
         log(f"  - {year_month}　{order_no}　{name}　總金額{total} - 車馬費{fare} = {net_amount}")
 
@@ -1252,13 +1658,16 @@ def paste_atm_unpaid_list(region: str, rows: List[Dict], ui_logger=None) -> Dict
     pasted_at = _now_text()
     for offset, row in enumerate(pending_rows):
         row_num = start_row + offset
+        # 2026-11-07 Jenny：ATM 待對帳時就把 H:O 填完整（H 見下方、I:L 訂單、M 後 5 碼、N/O 清潔／服務費用）
         updates.append({
-            "range": f"I{row_num}:L{row_num}",
+            "range": f"I{row_num}:O{row_num}",
             "values": [[
                 row["year_month"],
                 row["order_no"],
                 row["name"],
                 row["net_amount"],
+                row.get("last_code", ""),
+                *UNPAID_SERVICE_FEE,
             ]],
         })
         updates.append({"range": f"P{row_num}", "values": [[pasted_at]]})
@@ -1275,11 +1684,16 @@ def paste_atm_unpaid_list(region: str, rows: List[Dict], ui_logger=None) -> Dict
             })
 
     memo.with_retry(ws.batch_update, updates, value_input_option="RAW")
+    try:
+        ensure_candidate_row_format(ws, list(range(start_row, end_row + 1)), log=log)
+    except Exception as exc:
+        log(f"⚠️ 補 G 欄公式／下拉選單失敗：{exc}")
+        result["errors"].append(f"補 G 欄公式／下拉選單失敗：{exc}")
 
     result["pasted"] = len(pending_rows)
     result["start_row"] = start_row
     log(
-        f"✅ 已新增 {len(pending_rows)} 筆至 I{start_row}:L{end_row}；"
+        f"✅ 已新增 {len(pending_rows)} 筆至 H{start_row}:O{end_row}；"
         f"略過 {result['skipped_duplicates']} 筆重複訂單"
     )
     return result
@@ -1324,6 +1738,18 @@ def append_change_order_charges(region: str, rows: List[Dict], ui_logger=None) -
         range_name=f"I{start_row}:L{end_row}",
         value_input_option="RAW",
     )
+    # N/O 依異動內容：工具組 → 清潔／工具組；其他 → 清潔／異動費
+    service_fee = [list(change_order_service_fee(row.get("change_text", ""))) for row in rows]
+    memo.with_retry(
+        ws.update,
+        values=service_fee,
+        range_name=f"N{start_row}:O{end_row}",
+        value_input_option="RAW",
+    )
+    try:
+        ensure_candidate_row_format(ws, list(range(start_row, end_row + 1)), log=log)
+    except Exception as exc:
+        log(f"⚠️ 補 G 欄公式／下拉選單失敗：{exc}")
 
     result.update({"pasted": len(rows), "start_row": start_row})
     log(f"✅ 已同步 {len(rows)} 筆待收款資料至 ATM 工作表 I{start_row}:L{end_row}")
@@ -1456,6 +1882,119 @@ def run_scheduled_unpaid_sync(ui_logger=None, date_until: Optional[str] = None) 
 
     if errors:
         raise RuntimeError("；".join(errors))
+    return results
+
+
+AUTO_RECONCILE_STATUSES = ("已配對", "已配對（多訂單加總）")
+# 2026-11-06 Jenny：排程 ③ 不處理 11/6 之前（B 欄銀行入帳日）的資料
+AUTO_RECONCILE_FROM = _date(2026, 11, 6)
+
+
+def _bank_date(value) -> Optional[_date]:
+    m = re.search(r"(\d{4})[/\-.](\d{1,2})[/\-.](\d{1,2})", str(value or ""))
+    if not m:
+        return None
+    try:
+        return _date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    except ValueError:
+        return None
+
+
+def rows_ready_for_reconcile(rows: List[List[str]], from_date: Optional[_date] = AUTO_RECONCILE_FROM) -> List[int]:
+    """③ 排程只處理 ② 確定配對（T＝已配對）、左側有銀行明細、J 有訂單編號、M 不是取消訂單的列，
+    而且 B 欄入帳日不早於 from_date（讀不到日期也不處理）。
+    需確認／疑似拆單／非訂單收入一律留給人工。"""
+    ready = []
+    for idx, row in enumerate(rows, start=1):
+        if memo.safe_cell(row, COL_RECON_STATUS) not in AUTO_RECONCILE_STATUSES:
+            continue
+        if from_date:
+            bank_day = _bank_date(memo.safe_cell(row, COL_BANK_TIME))
+            if bank_day is None or bank_day < from_date:
+                continue
+        if _to_int_amount(memo.safe_cell(row, COL_BANK_INCOME)) is None:
+            continue
+        if not re.fullmatch(r"[A-Za-z]{2}\d{6,}", memo.safe_cell(row, COL_ORDER_NO)):
+            continue
+        if memo.safe_cell(row, COL_STATUS_NOTE) == "取消訂單":
+            continue
+        ready.append(idx)
+    return ready
+
+
+def match_and_reconcile(region: str, session, row_spec: str = "", ui_logger=None,
+                        allow_review_prefill: bool = True, overwrite_existing: bool = False,
+                        do_mark_paid: bool = True, do_issue_invoice: bool = True, do_send_mail: bool = True,
+                        only_matched_rows: bool = True, today: Optional[_date] = None) -> Dict:
+    """② 配對銀行明細後接著 ③ 更新系統對帳。
+
+    ③ 只處理 T 欄「已配對」的列（見 rows_ready_for_reconcile）；only_matched_rows=True（手動勾選 ②＋③）
+    時再限縮為這次 ② 剛配對的列。確認信只發給這次才改成已付款、付款日是今天的訂單。
+    """
+    log = make_logger(ui_logger)
+    item = {"match": {}, "reconcile": {}, "reconcile_rows": []}
+    log(f"===== ② 配對銀行明細（{region}）=====")
+    item["match"] = auto_match_bank_rows(
+        region=region, row_spec=row_spec, overwrite_existing=overwrite_existing,
+        allow_review_prefill=allow_review_prefill, ui_logger=ui_logger, today=today, session=session,
+    )
+    ws = get_atm_worksheet(region)
+    ready = rows_ready_for_reconcile(memo.with_retry(ws.get_all_values))
+    if only_matched_rows:
+        matched = set(item["match"].get("matched_rows") or [])
+        ready = [r for r in ready if r in matched]
+    item["reconcile_rows"] = ready
+    if not ready:
+        log(f"{region}：沒有已配對、待更新系統的列")
+        return item
+    log(f"===== ③ 更新系統對帳（{region}）：第 {ready} 列 =====")
+    item["reconcile"] = process_atm_rows(
+        region=region, row_spec=",".join(str(r) for r in ready),
+        do_mark_paid=do_mark_paid, do_issue_invoice=do_issue_invoice, do_send_mail=do_send_mail,
+        ui_logger=ui_logger, session=session,
+    )
+    return item
+
+
+def run_scheduled_match_and_reconcile(ui_logger=None) -> Dict:
+    """每日排程：台北／台中各跑 ② 配對銀行明細，再對確定配對的列跑 ③ 更新系統對帳
+    （按已付款＋開立發票＋發確認信，與手動預設相同）。"""
+    log = make_logger(ui_logger)
+    results = {}
+    errors = []
+
+    try:
+        from accounts import ACCOUNTS
+    except Exception:
+        ACCOUNTS = {}
+
+    for region in ("台北", "台中"):
+        prefix = REGION_SECRET_PREFIX[region]
+        item = {"match": {}, "reconcile": {}, "reconcile_rows": []}
+        results[region] = item
+        try:
+            account = ACCOUNTS.get(region, {}) if isinstance(ACCOUNTS, dict) else {}
+            email = str(account.get("email") or _secret_text(f"{prefix}_EMAIL")).strip()
+            password = str(account.get("password") or _secret_text(f"{prefix}_PASSWORD")).strip()
+            if not email or not password:
+                raise RuntimeError(f"缺少「{region}」後台 email/password")
+
+            memo.set_runtime_credentials(email, password)
+            session = memo.login(ui_logger=ui_logger)
+            try:
+                item.update(match_and_reconcile(region, session=session, ui_logger=ui_logger,
+                                                only_matched_rows=False))
+            finally:
+                session.close()
+        except Exception as exc:
+            errors.append(f"{region}：{exc}")
+            item["error"] = str(exc)
+            log(f"❌ {region}：{exc}")
+
+    if errors:
+        exc = RuntimeError("；".join(errors))
+        exc.results = results  # 讓呼叫端仍能印出另一區的結果
+        raise exc
     return results
 
 

@@ -1283,6 +1283,8 @@ def append_rows_to_sheet(region: str, rows: list, ui_logger=None):
                     "order_no": row.get("G", ""),
                     "name": row.get("H", ""),
                     "amount": row.get("N", 0),
+                    # 異動內容（C 類型＋J 說明）決定 ATM N/O：加時／工具組
+                    "change_text": f"{row.get('C', '')} {row.get('J', '')}",
                 })
             atm_result = atm.append_change_order_charges(
                 region=region,

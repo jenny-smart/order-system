@@ -1192,7 +1192,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
             else:
                 st.metric("查到筆數", len(rows))
                 st.text("\n".join(f"{r['year_month']}　{r['order_no']}　{r['name']}　${r['net_amount']}" for r in rows))
-                st.markdown(f'<div class="warn-strip">⚠️ 確認貼上後，會把以上 {len(rows)} 筆資料寫入「{region}」ATM 對帳工作表的 I~L 欄。</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="warn-strip">⚠️ 確認貼上後，會把以上 {len(rows)} 筆資料寫入「{region}」ATM 對帳工作表的 H~O 欄（LINE 連結、月份、訂單、姓名、金額、後5碼、清潔／服務費用）。</div>', unsafe_allow_html=True)
                 if st.button(f"🚀 貼上到「{region}」ATM 對帳工作表", type="primary", use_container_width=True):
                     try:
                         atm_list_ui_log(f"===== 開始貼上到「{region}」ATM 對帳工作表 =====")
@@ -1208,24 +1208,67 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
             st.markdown("---"); step("5", "貼上結果")
             pr = st.session_state.get("atm_list_paste_result")
             if pr.get("errors"): st.error("；".join(pr["errors"]))
-            else: st.success(f"✅ 已從第 {pr.get('start_row')} 列開始，貼上 {pr.get('pasted', 0)} 筆資料到 I~L 欄。")
+            else: st.success(f"✅ 已從第 {pr.get('start_row')} 列開始，貼上 {pr.get('pasted', 0)} 筆資料到 H~O 欄。")
+
+    def _merge_match_reconcile_result(both):
+        """②＋③ 結果合併成一張結果卡：錯誤兩邊都列，成功／失敗以 ③ 為主並保留 ② 的配對統計。"""
+        match = both.get("match") or {}
+        rec = both.get("reconcile") or {}
+        merged = {**DEFAULT_RESULT, **match}
+        merged["errors"] = list(match.get("errors") or []) + [f"③ {e}" for e in (rec.get("errors") or [])]
+        if rec:
+            merged["success"] = rec.get("success", 0)
+            merged["failed"] = match.get("failed", 0) + rec.get("failed", 0)
+            merged["errors"] += [f"③ 第{d['row']}列 {d['order_no']} 未開立發票，未發確認信" for d in rec.get("no_invoice") or []]
+        return merged
 
     def render_atm_auto_match_mode():
         step("4", "配對銀行明細")
-        st.markdown('<div class="info-strip"><b>配對依據</b><ul><li>金額 + 末碼</li><li>金額 + 姓名</li><li>金額 + 備註或時間</li><li>一筆收入可配對 2～5 筆訂單加總；須有末碼/姓名依據且組合唯一</li></ul></div>', unsafe_allow_html=True)
+        st.markdown('<div class="info-strip"><b>配對依據</b><ul><li>金額 + 末碼</li><li>金額 + 姓名</li><li>金額 + 公司名稱（F 欄像公司時比對訂單發票抬頭）</li><li>金額 + 備註或時間</li><li>一筆收入可配對 2～5 筆訂單加總；須有末碼/姓名依據且組合唯一</li></ul></div>', unsafe_allow_html=True)
         st.markdown('<div class="warn-strip"><b>配對限制</b><ul><li>只靠金額不會自動配對</li><li>必須有末碼、姓名、備註或時間依據</li></ul></div>', unsafe_allow_html=True)
 
-        row_spec = st.text_input("指定銀行列號", placeholder="例如：762-764,767-771")
-        c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
+        c1, c2 = st.columns([1, 3])
         with c1: region = region_selectbox("地區", "atm_match_region", email)
-        with c2: default_service_type = st.text_input("預設服務類別", value="清潔", key="atm_match_service_type")
-        with c3: default_fee_type = st.text_input("預設費用類別", value="服務費用", key="atm_match_fee_type")
-        with c4:
-            st.markdown("<div style='height:26px'></div>", unsafe_allow_html=True)
-            overwrite_existing = st.checkbox("覆蓋已配對列", value=False, key="atm_match_overwrite")
-        allow_review_prefill = st.checkbox("允許需確認候選預填", value=True, key="atm_match_allow_review_prefill")
+        with c2: row_spec = st.text_input("指定銀行列號（選填）", placeholder="留空＝自動處理近 3 個上班日（連假不算）A:F 有資料、H:O 空白的列；例如：762-764,767-771")
+        st.caption("N/O 沿用下方待配對列（待付款＝清潔／服務費用；清潔異動＝清潔／異動費或工具組）。沒有訂單：2000＝清潔／新訓費；支出（D 欄）先找清潔異動同日同金額退款＝清潔／退款；其他留給人工確認。")
+        c3, c4 = st.columns(2)
+        with c3: allow_review_prefill = st.checkbox("允許需確認候選預填", value=True, key="atm_match_allow_review_prefill")
+        with c4: overwrite_existing = st.checkbox("覆蓋已配對列", value=False, key="atm_match_overwrite")
+        with_reconcile = st.checkbox(
+            "配對後一併執行 ③ 更新系統對帳（按已付款＋開立發票＋發確認信）", value=False, key="atm_match_with_reconcile",
+            help="只處理這次配對成「已配對」的列；需確認／疑似拆單／非訂單收入不處理。確認信只發給這次改成已付款、付款日是今天的訂單。",
+        )
 
-        execute_btn = st.button("🚀 配對銀行明細", use_container_width=True, disabled=not st.session_state.credentials_ready)
+        # 先盤點：列出這次要處理的列，確認後再執行
+        if st.button("🔍 盤點要處理的列", use_container_width=True, key="atm_match_preview_btn"):
+            try:
+                if row_spec.strip():
+                    wanted = set(memo.parse_row_spec(row_spec.strip()))
+                    all_rows = memo.with_retry(atm.get_atm_worksheet(region).get_all_values)
+                    preview = [{"列號": r, "日期": memo.safe_cell(all_rows[r - 1], 1), "入帳時間": memo.safe_cell(all_rows[r - 1], 2),
+                                "摘要": memo.safe_cell(all_rows[r - 1], 3), "收入": memo.safe_cell(all_rows[r - 1], 5),
+                                "備註": memo.safe_cell(all_rows[r - 1], 6)} for r in sorted(wanted) if r <= len(all_rows)]
+                else:
+                    preview = atm.preview_recent_unmatched_bank_rows(region)
+                st.session_state.atm_match_preview = {"region": region, "row_spec": row_spec.strip(), "rows": preview}
+            except Exception as e:
+                st.error(f"盤點失敗：{e}")
+        preview = st.session_state.get("atm_match_preview")
+        if preview and (preview["region"], preview["row_spec"]) != (region, row_spec.strip()):
+            preview = None  # 地區或列號改了，要重新盤點
+        if preview is not None:
+            if preview["rows"]:
+                st.markdown(f"**將處理 {len(preview['rows'])} 列：** " + "、".join(str(r["列號"]) for r in preview["rows"]))
+                st.dataframe(preview["rows"], use_container_width=True, hide_index=True)
+            else:
+                st.info("沒有要處理的列（近 3 個上班日 A:F 有資料、H:O 空白的列為 0）。")
+
+        execute_btn = st.button("🚀 ② 配對＋③ 更新系統對帳" if with_reconcile else "🚀 配對銀行明細", use_container_width=True, disabled=not st.session_state.credentials_ready)
+        if preview is not None and not row_spec.strip():
+            # 執行盤點時確認過的那幾列，避免盤點後新進的列沒看過就被處理
+            row_spec = ",".join(str(r["列號"]) for r in preview["rows"])
+            if execute_btn and not row_spec:
+                st.info("盤點結果沒有要處理的列。"); execute_btn = False
 
         with st.expander("執行 LOG", expanded=True):
             log_box_local = st.empty()
@@ -1245,7 +1288,14 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                 st.session_state.logs = []; st.session_state.atm_match_result = None
                 atm_match_ui_log(f"===== 開始配對銀行明細（{region}）=====")
                 with st.spinner("配對中，請稍候…"):
-                    result = atm.auto_match_bank_rows(region=region, row_spec=row_spec.strip(), overwrite_existing=overwrite_existing, default_service_type=default_service_type.strip() or "清潔", default_fee_type=default_fee_type.strip() or "服務費用", allow_review_prefill=allow_review_prefill, ui_logger=atm_match_ui_log)
+                    if with_reconcile:
+                        session = get_session(ui_logger=atm_match_ui_log)
+                        both = atm.match_and_reconcile(region, session=session, row_spec=row_spec.strip(), overwrite_existing=overwrite_existing, allow_review_prefill=allow_review_prefill, ui_logger=atm_match_ui_log)
+                        result = _merge_match_reconcile_result(both)
+                    else:
+                        # 帶後台 session：F 欄像公司名稱時要查訂單發票抬頭
+                        session = get_session(ui_logger=atm_match_ui_log)
+                        result = atm.auto_match_bank_rows(region=region, row_spec=row_spec.strip(), overwrite_existing=overwrite_existing, allow_review_prefill=allow_review_prefill, ui_logger=atm_match_ui_log, session=session)
                 atm_match_ui_log("===== 配對銀行明細完成 =====")
                 st.session_state.atm_match_result = result
                 render_atm_result(result, result_container_local)

@@ -45,7 +45,9 @@ def test_new_order_still_added_below_pending_rows():
     result, ws = _paste(_sheet(), [_item("LC00219397", "黃妙禎"), _item("LC00219999", "新客人")])
     assert result["pasted"] == 1 and result["skipped_duplicates"] == 1
     ranges = [u["range"] for u in ws.batch_update.call_args.args[0]]
-    assert ranges[0] == "I10:L10"  # 王蘭香（第 9 列）下方
+    assert ranges[0] == "I10:O10"  # 王蘭香（第 9 列）下方；H:O 一次填完整（M 後5碼、N/O 清潔／服務費用）
+    first = ws.batch_update.call_args.args[0][0]["values"][0]
+    assert first[1] == "LC00219999" and first[-2:] == ["清潔", "服務費用"]
 
 
 def test_previous_workday_skips_weekends_and_holidays():
