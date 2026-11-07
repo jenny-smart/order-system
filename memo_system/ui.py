@@ -1221,7 +1221,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
             try:
                 with st.spinner("整理中，請稍候…"):
                     nr = atm.normalize_atm_rows(region, ui_logger=atm_list_ui_log)
-                st.success(f"✅ 已整理 {nr['rows']} 列：N/O 補值 {nr['no_filled']} 列、G 補公式 {nr.get('g_filled', 0)} 格、I 欄補下拉 {nr.get('dropdown_copied', 0)} 列")
+                st.success(f"✅ 已整理 {nr['rows']} 列：N/O 補值 {nr['no_filled']} 列、G 補公式 {nr.get('g_filled', 0)} 格、下拉／格式套用 {nr.get('format_copied', 0)} 列、I 欄改回文字月份 {nr.get('month_fixed', 0)} 格")
             except Exception as e:
                 st.error(f"整理失敗：{e}")
 

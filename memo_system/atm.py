@@ -893,15 +893,26 @@ def _copy_request(ws, source: int, target: int, col_start: int, col_end: int, pa
     }}
 
 
-def ensure_candidate_row_format(ws, target_rows: List[int], log=None) -> Dict:
-    """每次寫入／移動 G:O 後呼叫（2026-11-07 Jenny：G 欄不得空白；I 欄固定下拉選單、格式一致）。
+def _month_text(value) -> str:
+    """I 欄月份一律存成文字「YYYY.MM」。數字 2026.11／2026.1 → 2026.11／2026.10；日期序號 → 該日期年月。"""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return str(value or "").strip()
+    if value > 20000:  # 日期序號（例 46327 = 2026-11-01）
+        day = _date(1899, 12, 30) + timedelta(days=int(value))
+        return f"{day:%Y.%m}"
+    return f"{value:.2f}"
 
-    1. G:O 格式（含 I／N／O 下拉選單、字型、數字格式）整段複製參考列；參考列＝上方最近一列 I 欄有下拉選單的列，
-       上方沒有就用下方最近一列。
-    2. G 空白就複製最近一列的 G 公式（上下都找不到才用預設組合公式）。
+
+def ensure_candidate_row_format(ws, target_rows: List[int], log=None) -> Dict:
+    """每次寫入／移動 G:O 後呼叫（2026-11-07 Jenny：G 欄不得空白；I/N/O 固定下拉選單、格式一致）。
+
+    1. 範本列＝最後一列 I、N、O 三欄都有下拉選單的列（沒有就用最後一列 I 有下拉的列）；
+       所有目標列的 G:O 格式（含下拉選單）一律從同一範本列複製，不再一列抄上一列（會把舊格式一路傳下去）。
+    2. I 欄數字格式固定為文字；I 欄若存成數字（2026.11）或日期，改寫成文字「2026.11」，避免顯示成 1905/07。
+    3. G 空白就複製範本列（或最近一列）的 G 公式。
     """
     log = log or (lambda msg: None)
-    result = {"g_filled": 0, "dropdown_copied": 0, "format_copied": 0}
+    result = {"g_filled": 0, "dropdown_copied": 0, "format_copied": 0, "month_fixed": 0}
     target_rows = sorted({int(r) for r in target_rows if r})
     if not target_rows:
         return result
@@ -909,17 +920,26 @@ def ensure_candidate_row_format(ws, target_rows: List[int], log=None) -> Dict:
 
     validation = _rows_with_validation(ws, DROPDOWN_COLUMNS, upto)
     i_rows = validation.get(COL_I_MONTH, set())
+    full_rows = i_rows & validation.get(COL_N_SERVICE, set()) & validation.get(COL_O_FEE, set())
+    template = max(full_rows or i_rows or {0})
     requests = []
+    if template:
+        for row in target_rows:
+            if row == template:
+                continue
+            requests.append(_copy_request(ws, template, row, COL_G_SUMMARY, COL_O_FEE, "PASTE_FORMAT"))
+            result["format_copied"] += 1
+            if not ({row} <= full_rows):
+                result["dropdown_copied"] += 1
+    else:
+        log("⚠️ 整張 ATM 分頁沒有 I 欄下拉選單可當範本，請先手動設定一列（I、N、O 下拉選單）")
     for row in target_rows:
-        ref = _nearest(i_rows, row, exclude=set(target_rows) - i_rows)
-        if not ref:
-            continue
-        requests.append(_copy_request(ws, ref, row, COL_G_SUMMARY, COL_O_FEE, "PASTE_FORMAT"))
-        result["format_copied"] += 1
-        if row not in i_rows:
-            result["dropdown_copied"] += 1
-    if not i_rows:
-        log("⚠️ 整張 ATM 分頁 I 欄都沒有下拉選單可參照，請先手動設定一列")
+        requests.append({"repeatCell": {
+            "range": {"sheetId": ws.id, "startRowIndex": row - 1, "endRowIndex": row,
+                      "startColumnIndex": COL_I_MONTH - 1, "endColumnIndex": COL_I_MONTH},
+            "cell": {"userEnteredFormat": {"numberFormat": {"type": "TEXT"}}},
+            "fields": "userEnteredFormat.numberFormat",
+        }})
 
     formulas = _g_formulas(ws, upto)
     formula_rows = {i for i, f in enumerate(formulas, start=1) if f.startswith("=")}
@@ -927,7 +947,7 @@ def ensure_candidate_row_format(ws, target_rows: List[int], log=None) -> Dict:
         current = formulas[row - 1] if row - 1 < len(formulas) else ""
         if str(current).strip():
             continue
-        source = _nearest(formula_rows, row)
+        source = template if template in formula_rows else _nearest(formula_rows, row)
         if source:
             requests.append(_copy_request(ws, source, row, COL_G_SUMMARY, COL_G_SUMMARY, "PASTE_FORMULA"))
         else:
@@ -937,8 +957,24 @@ def ensure_candidate_row_format(ws, target_rows: List[int], log=None) -> Dict:
 
     if requests:
         memo.with_retry(ws.spreadsheet.batch_update, {"requests": requests})
-    if result["g_filled"] or result["dropdown_copied"]:
-        log(f"已補 G 欄公式 {result['g_filled']} 格、I 欄下拉選單 {result['dropdown_copied']} 列（G:O 格式統一 {result['format_copied']} 列）")
+
+    # I 欄數字／日期 → 文字「YYYY.MM」
+    try:
+        raw = memo.with_retry(ws.get, f"I1:I{upto}", value_render_option="UNFORMATTED_VALUE") or []
+    except Exception:
+        raw = []
+    month_updates = []
+    for row in target_rows:
+        value = raw[row - 1][0] if row - 1 < len(raw) and raw[row - 1] else ""
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            month_updates.append({"range": f"I{row}", "values": [[_month_text(value)]]})
+    if month_updates:
+        memo.with_retry(ws.batch_update, month_updates, value_input_option="RAW")
+        result["month_fixed"] = len(month_updates)
+
+    if result["g_filled"] or result["dropdown_copied"] or result["month_fixed"]:
+        log(f"已補 G 欄公式 {result['g_filled']} 格、G:O 格式從第{template}列套用 {result['format_copied']} 列、"
+            f"I 欄改回文字月份 {result['month_fixed']} 格")
     return result
 
 
@@ -982,8 +1018,8 @@ def normalize_atm_rows(region: str, ui_logger=None, ws=None) -> Dict:
         memo.with_retry(ws.batch_update, updates, value_input_option="RAW")
         result["no_filled"] = len(updates)
     result.update(ensure_candidate_row_format(ws, data_rows, log=log))
-    log(f"✅ 已整理 ATM 分頁 {len(data_rows)} 列：N/O 補值 {result['no_filled']} 列、G 補公式 {result['g_filled']} 格、"
-        f"I 欄補下拉 {result['dropdown_copied']} 列")
+    log(f"✅ 已整理 ATM 分頁 {len(data_rows)} 列：N/O 補值 {result['no_filled']} 列、G 補公式 {result.get('g_filled', 0)} 格、"
+        f"下拉／格式套用 {result.get('format_copied', 0)} 列、I 欄改回文字月份 {result.get('month_fixed', 0)} 格")
     return result
 
 
