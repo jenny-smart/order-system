@@ -7,6 +7,7 @@
 - 2026-11-07：查詢只顯示已付款保留單；每日統計加上星期與各時段張數；
   查詢診斷顯示因付款狀態（取消、待付款等）排除的張數。
 - 2026-11-07：客人備註篩選「全部（僅供查看）」改為「全部」，可直接勾選取消。
+- 2026-11-07：取消進度結果表改中文欄位並顯示專員姓名。
 """
 
 from datetime import date
@@ -488,6 +489,22 @@ def _render_reserve_inventory(rows: list) -> None:
 CANCEL_CHUNK_SIZE = 3
 
 
+def _cancel_result_table(results: list) -> pd.DataFrame:
+    """取消結果：日期、時段、訂單編號、專員、客人備註、結果、說明。"""
+    out = []
+    for r in results or []:
+        out.append({
+            "日期": r.get("service_date", ""),
+            "時段": r.get("period", ""),
+            "訂單編號": r.get("order_no", ""),
+            "專員": str(r.get("staff") or "").strip() or "無人力",
+            "客人備註": r.get("customer_memo", ""),
+            "結果": "成功" if r.get("ok") else "失敗／跳過",
+            "說明": r.get("message", ""),
+        })
+    return pd.DataFrame(out)
+
+
 def _render_reserve_cancel_job(env, backend_email, backend_password, machine) -> None:
     """分批取消（每批 3 張）；每批結束才重繪，此時可按暫停／繼續／結束。"""
     job = st.session_state.get("reserve_cancel_job")
@@ -523,7 +540,7 @@ def _render_reserve_cancel_job(env, backend_email, backend_password, machine) ->
                 message=f"成功 {ok} / {job['total']} 張",
             )
     if job["results"]:
-        st.dataframe(pd.DataFrame(job["results"]), width="stretch", hide_index=True)
+        st.dataframe(_cancel_result_table(job["results"]), width="stretch", hide_index=True)
     if status == "done":
         _render_proxy_address_cleanup(job, env, backend_email, backend_password)
     if status == "running" and job["pending"]:
