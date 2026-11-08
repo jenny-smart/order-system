@@ -1436,19 +1436,6 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         builder = change_order.build_weekday_to_weekend_row if to_weekend else change_order.build_weekend_to_weekday_row
         return builder(order, time_fee_info, service_note, customer_type=customer_type, service_date=service_date)
 
-    def _order_money(order, key, default=0):
-        try: return int(round(float((order or {}).get(key, default) or 0)))
-        except: return default
-
-    def _format_money_for_ui(amount):
-        try: return str(int(round(float(amount or 0))))
-        except: return str(amount or "")
-
-    def _refund_rate_by_workdays(workdays):
-        if workdays >= 4: return 5
-        if workdays <= 1: return 50
-        return 30
-
     def apply_time_change_label(row, scenario, timing):
         prefix = f"{timing}加時" if scenario == "加時(待收款)" else f"{timing}減時"
         j = str(row.get("J", ""))
@@ -1457,46 +1444,6 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         if j: row["J"] = j
         note = str(row.get("_calc_note", ""))
         if note: row["_calc_note"] = f"{prefix}，{note}"
-        return row
-
-    def apply_refund_fee_on_service_amount(order, fee_info):
-        info = dict(fee_info or {})
-        workdays = int(info.get("workdays", 0) or 0)
-        from service_pricing import load_config
-        if load_config()['enabled']:
-            info['refund_amount'] = max(change_order.get_service_amount(order) - info['change_fee'], 0)
-            return info
-        if (order or {}).get("payway") == "儲值金":
-            return info
-        total = _order_money(order, "total", 0)
-        travel_fee = _order_money(order, "travel_fee", 0)
-        service_amount = max(total - travel_fee, 0)
-        rate_percent = _refund_rate_by_workdays(workdays)
-        change_fee = round(service_amount * rate_percent / 100)
-        refund_amount = max(service_amount - change_fee, 0)
-        info.update({
-            "tier": f"refund_{rate_percent}_percent", "change_fee": change_fee,
-            "billing_units": None, "rate_amount": None, "rate_percent": rate_percent,
-            "service_amount": service_amount, "travel_fee": travel_fee,
-            "refund_amount": refund_amount,
-            "calc_note": (f"{info.get('change_date_text') or change_order.change_date_text()}："
-                          f"服務前{workdays}個工作天異動，退款情境收 {rate_percent}% 異動費："
-                          f"總金額{total} - 車馬費{travel_fee} = 服務費{service_amount}；"
-                          f"服務費{service_amount} × {rate_percent}% = 異動費${change_fee}；退款${refund_amount}"),
-        })
-        return info
-
-    def apply_refund_j_note(row, fee_info):
-        workdays = int((fee_info or {}).get("workdays", 0) or 0)
-        rate_percent = (fee_info or {}).get("rate_percent")
-        change_fee = _format_money_for_ui((fee_info or {}).get("change_fee", row.get("_change_fee", 0)))
-        refund_amount = _format_money_for_ui(row.get("_refund_amount", row.get("_calc_amount", 0)))
-        if rate_percent:
-            row["J"] = f"服務前{workdays}個工作天異動，收{rate_percent}%異動費${change_fee}，退款${refund_amount}"
-        else:
-            row["J"] = f"服務前{workdays}個工作天異動，收異動費${change_fee}，退款${refund_amount}"
-        date_text = (fee_info or {}).get("change_date_text") or change_order.change_date_text()
-        row["J"] = f"{date_text}：{row['J']}"
         return row
 
     def render_calc_amount_html(row):
@@ -1616,7 +1563,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
             manual_amount = None
             if is_manual_refund: manual_amount = st.number_input("退款金額", min_value=0, step=50, value=0, key="co_manual_amount")
             also_day_type = None
-            if scenario in ("異動費(待收款)", "異動費(待退款)"):
+            if scenario == "異動費(待收款)":
                 if st.checkbox("同時改平日／週末（另產生一列差額）", value=False, key="co_also_day_type"):
                     _orig = selected_orders[0].get("service_date")
                     _default_dir = 1 if (_orig and _orig.weekday() >= 5) else 0
@@ -1653,13 +1600,14 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                         calc_rows.append(change_order.build_manual_refund_row(order, manual_amount, change_order.TYPE_COMPLAINT_REFUND, service_note, customer_type=customer_type, service_date=service_date_input)); continue
                     if scenario == "物損(待退款)":
                         calc_rows.append(change_order.build_manual_refund_row(order, manual_amount, change_order.TYPE_DAMAGE_REFUND, service_note, customer_type=customer_type, service_date=service_date_input)); continue
-                    fee_info = change_order.calc_change_fee(order, service_date=service_date_input)
                     if scenario == "異動費(待收款)":
+                        # 改期、仍要服務：VIP／一般客都依工作天數收改期異動費
+                        fee_info = change_order.calc_change_fee(order, service_date=service_date_input)
                         calc_rows.append(change_order.build_charge_row(order, fee_info, service_note, customer_type=customer_type, service_date=service_date_input))
                     else:
-                        fee_info = apply_refund_fee_on_service_amount(order, fee_info)
-                        row = change_order.build_refund_row(order, fee_info, service_note, customer_type=customer_type, service_date=service_date_input)
-                        calc_rows.append(apply_refund_j_note(row, fee_info))
+                        # 取消、不服務：VIP 免收；一般客不分工作天數收 5%
+                        fee_info = change_order.calc_cancel_fee(order, service_date=service_date_input)
+                        calc_rows.append(change_order.build_refund_row(order, fee_info, service_note, customer_type=customer_type, service_date=service_date_input))
                     if also_day_type:
                         calc_rows.append(build_day_type_row(order, also_day_type, service_note, customer_type, service_date_input))
                 st.session_state.co_calc_rows = calc_rows
