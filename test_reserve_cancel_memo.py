@@ -44,6 +44,26 @@ class ReserveCancelMemoTest(unittest.TestCase):
         skipped = [r for r in results if not r["ok"]]
         self.assertEqual([r["order_no"] for r in skipped], ["LC2"])
 
+    def test_cancel_all_filter_handles_any_memo(self):
+        from unittest.mock import patch
+        rows = [{"purchase_id": str(i), "order_no": f"LC{i}", "service_date": "2027-01-01", "cancel_any_memo": True}
+                for i in range(1, 5)]
+        memos = {"1": "", "2": "系統保留單", "3": "幫林小姐先保留", "4": "取消系統保留單"}
+        calls = []
+
+        def cancel(env, email, password, group, **kw):
+            calls.append(([r["order_no"] for r in group], kw["customer_memo"]))
+            return [{"order_no": r["order_no"], "ok": True} for r in group]
+
+        with patch.object(rc.co, "_new_logged_in_session", return_value=(None, "")), \
+                patch.object(rc.co, "fetch_order_cancel_details", side_effect=lambda s, b, pid: {"memo": memos[pid]}), \
+                patch.object(rc.co, "cancel_orders", side_effect=cancel), \
+                patch.object(rc, "append_log_rows"):
+            results = rc.cancel_reserve_orders("dev", "e", "p", rows, 4)
+        self.assertEqual(calls, [(["LC1", "LC2"], "取消系統保留單"), (["LC3"], "取消幫林小姐先保留")])
+        self.assertEqual([r["order_no"] for r in results if not r["ok"]], ["LC4"])
+        self.assertTrue(rc._memo_matches_filter("任何內容", rc.ALL_FILTER))
+
 
 if __name__ == "__main__":
     unittest.main()
