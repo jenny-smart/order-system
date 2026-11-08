@@ -908,6 +908,55 @@ def calc_change_fee(order: dict, service_date: date, change_person: int = None,
     }
 
 
+CANCEL_FEE_PERCENT_REGULAR = 5  # 一般客取消服務（待退款）固定收服務費 5%，不分工作天數
+
+
+def calc_cancel_fee(order: dict, service_date: date,
+                    today: Union[date, datetime] = None) -> dict:
+    """
+    取消服務（異動費＋待退款）：
+    - VIP：免收異動費，服務費全退。
+    - 一般客：不論服務前幾個工作天取消，一律收服務費 5% 取消異動費。
+    服務費基礎＝訂單總金額－車馬費（車馬費不列入比例計算）。
+    """
+    workdays = _count_workdays_before(service_date, today=today)
+    date_text = change_date_text(today)
+    timing = f"{date_text}：{_workday_note({'workdays': workdays})}"
+    service_amount = get_service_amount(order)
+    if pricing_tier(order) == "vip":
+        rate_percent, change_fee = 0, 0
+        calc_note = f"{timing}取消服務，VIP 免收異動費 = $0；退款${service_amount}"
+    else:
+        rate_percent = CANCEL_FEE_PERCENT_REGULAR
+        change_fee = round(service_amount * rate_percent / 100)
+        calc_note = (f"{timing}取消服務，一般客不分工作天數收 {rate_percent}% 取消異動費："
+                     f"服務費{service_amount} × {rate_percent}% = ${change_fee}；"
+                     f"退款${max(service_amount - change_fee, 0)}")
+    return {
+        "workdays": workdays,
+        "tier": "cancel_vip_free" if rate_percent == 0 else f"cancel_{rate_percent}_percent",
+        "change_fee": change_fee,
+        "billing_units": None,
+        "rate_amount": None,
+        "rate_percent": rate_percent,
+        "service_amount": service_amount,
+        "travel_fee": get_travel_fee(order),
+        "refund_amount": max(service_amount - change_fee, 0),
+        "calc_note": calc_note,
+        "change_date_text": date_text,
+    }
+
+
+def format_cancel_fee_j(fee_info: dict) -> str:
+    """取消服務（待退款）J 欄文案。"""
+    timing = f"{fee_info.get('change_date_text') or change_date_text()}：{_change_timing_label(fee_info)}取消"
+    fee = _format_money(fee_info.get("change_fee"))
+    refund = _format_money(fee_info.get("refund_amount"))
+    if not fee_info.get("rate_percent"):
+        return f"{timing}，VIP免收異動費，退款${refund}"
+    return f"{timing}，收{fee_info['rate_percent']}%取消異動費${fee}，退款${refund}"
+
+
 def calc_refund_amount(order: dict, change_fee: int) -> int:
     """應退款 = 服務費基礎（總金額 − 車馬費）− 異動費。車馬費不列入退款比例計算。"""
     return max(get_service_amount(order) - _money_int(change_fee), 0)
@@ -1014,7 +1063,10 @@ def build_refund_row(order: dict, change_fee_info: dict, service_note: str,
     """退服務 → 異動服務退款（待退款），餘額退還"""
     refund_amount = calc_refund_amount(order, change_fee_info["change_fee"])
     i_value = _format_service_datetime(service_date, order.get("period_text", ""))
-    j_value = _format_change_fee_j(order, change_fee_info)
+    if str(change_fee_info.get("tier", "")).startswith("cancel_"):
+        j_value = format_cancel_fee_j(change_fee_info)
+    else:
+        j_value = _format_change_fee_j(order, change_fee_info)
     return {
         "A": "清潔", "B": _pending_status_for_order(order, "refund"), "C": TYPE_REFUND,
         "D": order.get("line_url", ""),
