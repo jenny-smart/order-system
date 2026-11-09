@@ -7,6 +7,7 @@
 #   付款狀態／客人備註／客服備註。只查詢，不修改後台。
 # 更新記錄：
 # 2026-11-10
+# - ② 客服備註需註記：「註記」欄放最前方（與排程「客服備註」分頁相同）。
 # - 頁面：電話改為後台訂單管理電話搜尋連結；查詢結果分兩區，與每日 10:00 排程相同：
 #   ① 客人備註非空白　② 客服備註需註記（標示 VIP 但非儲值金付款、**N- 但已非首次服務）。
 # - 新增 created_from／created_to：依訂購時間（列表卡片的 YYYY-MM-DD HH:MM:SS）
@@ -162,12 +163,12 @@ def find_notice_flag_orders(candidates: List[Dict], session, log=None) -> List[D
         if not note:
             continue
         result.append({
+            "註記": note.replace("\n", "；"),
             "訂單號碼": x.get("order_no", ""),
             "客人姓名": x.get("name", ""),
             "電話": x.get("phone", ""),
             "服務日期": _memo.display_service_date(x),
             "付款方式": x.get("payway", ""),
-            "註記": note.replace("\n", "；"),
             "客服備註": own,
         })
     result.sort(key=lambda r: r["訂單號碼"])

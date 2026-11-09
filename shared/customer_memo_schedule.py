@@ -15,7 +15,7 @@
   訂單編號已在分頁上的不重複貼；沒有「客人備註」分頁時自動建立並寫標題列。
 - 同一批訂單另外檢查客服備註：標示 **VIP** 但付款方式不是儲值金、或有 **N-XXX** 但已非首次
   服務（同電話＋同地址有更早的訂單）→ 貼到同一個內勤工作表單的「客服備註」分頁：
-  訂單編號／客人姓名／客人電話／服務日期／付款方式／註記／客服備註（電話一樣是搜尋連結）。
+  註記（最前方）／訂單編號／客人姓名／客人電話／服務日期／付款方式／客服備註（電話一樣是搜尋連結）。
 - 貼完在 jenny@hers.com.tw 行事曆記一則「【客人備註】台北 N 筆、台中 M 筆」（寫不進去改寫
   jenny@lemonclean.com.tw；可用 CUSTOMER_MEMO_CALENDAR_ID 指定），內容列出逐筆訂單與工作表連結。
 
@@ -40,7 +40,8 @@ SHEET_CATEGORY = "內勤工作表單"
 TAB_TITLE = "客人備註"
 HEADER = ["訂單編號", "客人姓名", "客人電話", "服務日期", "客人備註", "客服備註"]
 NOTICE_TAB_TITLE = "客服備註"
-NOTICE_HEADER = ["訂單編號", "客人姓名", "客人電話", "服務日期", "付款方式", "註記", "客服備註"]
+NOTICE_HEADER = ["註記", "訂單編號", "客人姓名", "客人電話", "服務日期", "付款方式", "客服備註"]
+NOTICE_KEY_COL = 2  # 「客服備註」分頁的訂單編號在 B 欄（A 欄是註記）
 CALENDAR_IDS = ("jenny@hers.com.tw", "jenny@lemonclean.com.tw")
 CALENDAR_PREFIX = "【客人備註】"
 
@@ -98,14 +99,14 @@ def build_sheet_rows(rows: list[dict], base_url: str) -> list[list[str]]:
 
 
 def build_notice_sheet_rows(rows: list[dict], base_url: str) -> list[list[str]]:
-    """「客服備註」分頁的列。"""
+    """「客服備註」分頁的列（註記放最前方）。"""
     return [[
+        str(r.get("註記", "") or ""),
         str(r.get("訂單號碼", "") or ""),
         str(r.get("客人姓名", "") or ""),
         phone_cell(base_url, r.get("電話", "")),
         str(r.get("服務日期", "") or ""),
         str(r.get("付款方式", "") or ""),
-        str(r.get("註記", "") or ""),
         str(r.get("客服備註", "") or ""),
     ] for r in rows]
 
@@ -142,16 +143,18 @@ def get_tab(region: str, title: str = TAB_TITLE, header: list[str] = HEADER, spr
     return spreadsheet, ws
 
 
-def append_rows(ws, sheet_rows: list[list[str]], width: int = len(HEADER)) -> int:
-    """貼到最下方；訂單編號已在 A 欄的不重複貼。回傳實際貼入筆數。"""
+def append_rows(ws, sheet_rows: list[list[str]], width: int = len(HEADER), key_col: int = 1) -> int:
+    """貼到最下方；訂單編號（key_col 欄）已在分頁上的不重複貼。回傳實際貼入筆數。"""
     from memo_system.memo import with_retry
 
-    col_a = with_retry(ws.col_values, 1)
-    existing = {str(v).strip() for v in col_a if str(v).strip()}
-    new_rows = [r for r in sheet_rows if r[0] and r[0] not in existing]
+    keys = with_retry(ws.col_values, key_col)
+    existing = {str(v).strip() for v in keys if str(v).strip()}
+    idx = key_col - 1
+    new_rows = [r for r in sheet_rows if r[idx] and r[idx] not in existing]
     if not new_rows:
         return 0
-    start = max(last_data_row(col_a), 1) + 1
+    col_a = keys if key_col == 1 else with_retry(ws.col_values, 1)
+    start = max(last_data_row(col_a), last_data_row(keys), 1) + 1
     end = start + len(new_rows) - 1
     if end > ws.row_count:
         with_retry(ws.add_rows, end - ws.row_count + 100)
@@ -273,7 +276,7 @@ def run(env: str = "prod", today: date | None = None, regions=REGIONS, dry_run: 
                 _, nws = get_tab(region, NOTICE_TAB_TITLE, NOTICE_HEADER, spreadsheet=spreadsheet)
                 item["notice_sheet_url"] = f"https://docs.google.com/spreadsheets/d/{spreadsheet.id}/edit#gid={nws.id}"
                 item["notice_saved"] = append_rows(nws, build_notice_sheet_rows(notice_rows, memo.BASE_URL),
-                                                   width=len(NOTICE_HEADER))
+                                                   width=len(NOTICE_HEADER), key_col=NOTICE_KEY_COL)
                 print(f"SAVE {region} 客服備註貼入 {item['notice_saved']} 筆", flush=True)
         except Exception as exc:
             item["error"] = f"{type(exc).__name__}: {exc}"

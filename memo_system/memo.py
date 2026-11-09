@@ -3,6 +3,11 @@
 # ============================================================
 # 更新記錄：
 # 2026-11-10
+# - 查詢（By 電話／By 搜尋條件）除了未處理訂單，另外檢查同條件內「已處理」且客服備註
+#   本來就有內容的訂單（服務日期 ≥ 今天）：標示 **VIP** 但付款方式不是儲值金、或 **N-**
+#   已非首次服務 → 列為 section="processed"（畫面③），可勾選執行（保留原備註＋註記）。
+#   本來就有客服備註但同地址無歷史的訂單，執行時也保留原備註（不再套固定新成單提醒）。
+# - find_latest_same_order 只取服務日期早於目前訂單、非取消／退款的訂單當「前次」。
 # - 寫入客服備註成功後，同步檢查會員管理該地址的[備註]（sync_address_memo）：
 #   會員管理頁內嵌 memberAddressList 找出同地址的地址 ID → 讀地址備註頁內嵌的
 #   list；最上方那則（以上方為主）空白才填入本次寫入的客服備註（去掉【服務異動】
@@ -747,7 +752,8 @@ def search_orders_by_order_no(session, order_no: str) -> List[Dict]:
     return parse_purchase_list_page(r.text)
 
 
-def search_by_conditions_once(session, date_mode: str, date_start: str, date_end: str, purchase_status_name: str) -> List[Dict]:
+def search_by_conditions_once(session, date_mode: str, date_start: str, date_end: str, purchase_status_name: str,
+                              progress: str = "0") -> List[Dict]:
     purchase_status_map = {
         "未付款": "0",
         "已付款": "1",
@@ -773,7 +779,7 @@ def search_by_conditions_once(session, date_mode: str, date_start: str, date_end
         "isRefund": "",
         "payway": "",
         "purchase_status": purchase_status,
-        "progress_status": "0",
+        "progress_status": progress,
         "invoiceStatus": "",
         "otherFee": "",
         "orderBy": "",
@@ -789,15 +795,16 @@ def search_by_conditions_once(session, date_mode: str, date_start: str, date_end
     items = fetch_purchase_list_all_pages(session, params)
     filtered = [
         x for x in items
-        if x.get("status_code") == "0" and (not purchase_status or x.get("purchase_status") == purchase_status)
+        if x.get("status_code") == progress and (not purchase_status or x.get("purchase_status") == purchase_status)
     ]
     return filtered
 
 
-def search_by_conditions(session, date_mode: str, date_start: str, date_end: str, purchase_status_name: str) -> List[Dict]:
+def search_by_conditions(session, date_mode: str, date_start: str, date_end: str, purchase_status_name: str,
+                         progress: str = "0") -> List[Dict]:
     if purchase_status_name == "全部":
-        unpaid = search_by_conditions_once(session, date_mode, date_start, date_end, "未付款")
-        paid = search_by_conditions_once(session, date_mode, date_start, date_end, "已付款")
+        unpaid = search_by_conditions_once(session, date_mode, date_start, date_end, "未付款", progress)
+        paid = search_by_conditions_once(session, date_mode, date_start, date_end, "已付款", progress)
         merged = {}
         for x in unpaid + paid:
             merged[x["order_no"]] = x
@@ -805,7 +812,46 @@ def search_by_conditions(session, date_mode: str, date_start: str, date_end: str
         items.sort(key=lambda x: (display_service_date(x), x.get("order_no", "")))
         return items
 
-    return search_by_conditions_once(session, date_mode, date_start, date_end, purchase_status_name)
+    return search_by_conditions_once(session, date_mode, date_start, date_end, purchase_status_name, progress)
+
+
+NOTICE_FLAG_KEYS = ("付款方式：", "新客標記：")
+
+
+def is_notice_flag_row(row: Dict) -> bool:
+    """客服備註需註記：標示 VIP 但非儲值金付款、或 **N- 已非首次服務。"""
+    change = str(row.get("service_change", "") or "")
+    return any(k in change for k in NOTICE_FLAG_KEYS)
+
+
+def might_need_notice_flag(item: Dict) -> bool:
+    own = strip_change_block(item.get("notice", ""))
+    return bool(own) and (VIP_TAG in own or bool(N_TAG_RE.search(own)))
+
+
+def upcoming(item: Dict) -> bool:
+    dt = item_service_date_obj(item)
+    return bool(dt) and dt >= today_tw()
+
+
+def processed_flag_rows(items: List[Dict], history_for, log=None) -> List[Dict]:
+    """
+    已處理、服務日期 ≥ 今天、客服備註本來就有內容的訂單中，需註記的列（section="processed"）。
+    history_for(item) 回傳同電話歷史訂單（判斷 **N- 是否已非首次服務）。
+    """
+    rows = []
+    for item in items:
+        if item.get("status_code") != "1" or not upcoming(item) or not might_need_notice_flag(item):
+            continue
+        row = build_preview_row(item, history_for(item))
+        if not is_notice_flag_row(row):
+            continue
+        row["section"] = "processed"
+        row["can_autofill"] = True
+        rows.append(row)
+    if log:
+        log(f"[已處理客服備註檢查] 需註記 {len(rows)} 筆")
+    return rows
 
 
 def parse_select_value(select_el):
@@ -1246,7 +1292,12 @@ def find_latest_same_order(current_item: Dict, history_items: List[Dict]) -> Opt
         and same_phone(x.get("phone", ""), current_item.get("phone", ""))
         and same_address(x.get("address", ""), current_item.get("address", ""))
         and item_service_date_obj(x)
+        and x.get("purchase_status") not in ("2", "3")
     ]
+    # 「前次」只算服務日期早於目前訂單的（不把之後的訂單當成前次）
+    current_dt = item_service_date_obj(current_item)
+    if current_dt:
+        same = [x for x in same if item_service_date_obj(x) < current_dt]
     if not same:
         return None
     same.sort(key=lambda k: item_service_date_obj(k), reverse=True)
@@ -1429,8 +1480,8 @@ def get_target_and_source_for_order(session, target: Dict, log, override_notice:
         current["notice"] = str(target_form.get("notice", "") or "")
     own_notice = strip_change_block(current.get("notice", ""))
 
-    if own_notice and has_history:
-        # 目前訂單本來就有客服備註：保留原備註，只加註記（N- 改 O-）
+    if own_notice:
+        # 目前訂單本來就有客服備註：保留原備註，只加註記（已非首次服務才 N- 改 O-）
         prev = source or find_latest_same_order(target_item, items)
         new_notice = compose_notice_for(current, prev, source, has_history)
         change = service_change_text(prev or {}, current, has_history)
@@ -1729,6 +1780,8 @@ def preview_by_phone(phone, ui_logger=None, session=None):
         if idx == total or idx == 1 or idx % 5 == 0:
             log(f"[整理預覽進度] {idx}/{total}")
 
+    preview.extend(processed_flag_rows(items, lambda _item: items, log=log))
+
     preview.sort(
         key=lambda x: (
             0 if x.get("can_autofill") else 1,
@@ -1795,8 +1848,6 @@ def preview_by_conditions(date_mode, date_start, date_end, purchase_status_name,
         context_label="搜尋條件主列表"
     )
 
-    if not items:
-        return []
 
     phone_cache = {}
     preview = []
@@ -1824,6 +1875,26 @@ def preview_by_conditions(date_mode, date_start, date_end, purchase_status_name,
 
         if idx == len(items) or idx == 1 or idx % 5 == 0:
             log(f"[整理預覽進度] {idx}/{len(items)}")
+
+    # 已處理且客服備註本來就有內容的訂單：只檢查 VIP 非儲值金／**N- 已非首次服務
+    log("[已處理客服備註檢查] 開始抓同條件已處理訂單")
+    processed = search_by_conditions(session, date_mode, date_start, date_end, purchase_status_name, progress="1")
+    processed = [x for x in processed if x.get("order_no") not in {r["order_id"] for r in preview}]
+    log(f"[已處理客服備註檢查] 已處理 {len(processed)} 筆，讀取明細")
+    processed = enrich_items_from_detail(session, processed, log=log, context_label="已處理訂單")
+
+    def _history_for(item):
+        phone = normalize_phone(item.get("phone", ""))
+        if not phone:
+            return [item]
+        if phone not in phone_cache:
+            history = search_all_orders_by_phone(session, phone)
+            phone_cache[phone] = enrich_items_from_detail(session, history, phone, log=log,
+                                                          context_label=f"電話 {phone} 歷史訂單")
+        return phone_cache[phone]
+
+    candidates = [x for x in processed if x.get("status_code") == "1" and upcoming(x) and might_need_notice_flag(x)]
+    preview.extend(processed_flag_rows(candidates, _history_for, log=log))
 
     dedup = {}
     for row in preview:
