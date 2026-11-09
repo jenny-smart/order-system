@@ -3,6 +3,15 @@
 # ============================================================
 # 更新記錄：
 # 2026-11-10
+# - 寫入客服備註成功後，同步檢查會員管理該地址的[備註]（sync_address_memo）：
+#   會員管理頁內嵌 memberAddressList 找出同地址的地址 ID → 讀地址備註頁內嵌的
+#   list；最上方那則（以上方為主）空白才填入本次寫入的客服備註（去掉【服務異動】
+#   行），已有內容不動，其他備註原樣保留一起送出。失敗只記 LOG，不影響訂單結果。
+# - 複製前次客服備註時比對服務項目與服務時數，任一不同就在備註最前面加一行
+#   「【服務異動】服務項目：前次 A／本次 B；時數：前次 X 小時／本次 Y 小時」
+#   （compose_copied_notice，只列有差異的項目）；預覽列表與實際寫入用同一個
+#   函式，重複複製時舊的異動行會先移除。服務項目、時數讀列表卡片文字，
+#   時數另以訂單修改頁 purchase JSON 的 hour 為優先。
 # - 修正勾選執行／單筆執行出現 APIError「Page Not Found」：order-system 的
 #   env.py 沒有 SHEET_ID、Streamlit secrets 也沒設，memo_log 用空白 ID 開
 #   Google Sheet 失敗，整個執行中斷。memo_log 改為輔助紀錄：開不了或寫入
@@ -35,6 +44,18 @@ import requests
 from bs4 import BeautifulSoup
 import gspread
 from google.oauth2.service_account import Credentials
+
+try:
+    from shared.text_parsing import _extract_clean_type_line, _extract_person_hour_line
+except Exception:  # memo_system 單獨使用時的備援
+    _CLEAN_TYPE_LABELS = ["居家清潔", "辦公室清潔", "裝修細清", "大掃除"]
+
+    def _extract_clean_type_line(text):
+        return next((label for label in _CLEAN_TYPE_LABELS if label in str(text or "")), "")
+
+    def _extract_person_hour_line(text):
+        m = re.search(r"(\d+)\s*人\s*(\d+(?:\.\d+)?)\s*(?:小時|時)", str(text or ""))
+        return (m.group(1), m.group(2)) if m else ("", "")
 
 
 # -----------------------------------------------------------------------------
@@ -558,6 +579,8 @@ def parse_purchase_row_text(txt: str) -> Dict:
         "service_date": "",
         "service_date_obj": None,
         "notice": "",
+        "clean_type": _extract_clean_type_line(txt),
+        "hour": normalize_hour(_extract_person_hour_line(txt)[1]),
         "row_text": txt,
         "_detail": {},
     }
@@ -783,6 +806,50 @@ def parse_select_value(select_el):
     return ""
 
 
+CHANGE_PREFIXES = ("【服務異動】", "【時數異動】")
+
+
+def normalize_hour(value) -> str:
+    """時數統一成字串：3.0 → "3"、2.5 → "2.5"；空值或 0 回傳空字串。"""
+    text = str(value if value is not None else "").strip()
+    if not text:
+        return ""
+    try:
+        num = float(text)
+    except ValueError:
+        return text
+    if num <= 0:
+        return ""
+    return str(int(num)) if num.is_integer() else str(num)
+
+
+def service_change_text(prev_type, cur_type, prev_hour, cur_hour) -> str:
+    """前次與本次服務項目／時數的差異說明；兩邊都有值且不同才列出，沒有差異回傳空字串。"""
+    parts = []
+    pt, ct = str(prev_type or "").strip(), str(cur_type or "").strip()
+    if pt and ct and pt != ct:
+        parts.append(f"服務項目：前次 {pt}／本次 {ct}")
+    ph, ch = normalize_hour(prev_hour), normalize_hour(cur_hour)
+    if ph and ch and ph != ch:
+        parts.append(f"時數：前次 {ph} 小時／本次 {ch} 小時")
+    return "；".join(parts)
+
+
+def compose_copied_notice(source_notice: str, prev_hour, current_hour, prev_type="", current_type="") -> str:
+    """
+    複製前次客服備註；服務項目或服務時數與前次不同時，在最前面註記差異。
+    來源備註裡舊的異動行先移除，避免一直累加。
+    """
+    lines = [ln for ln in str(source_notice or "").strip().splitlines()
+             if not ln.strip().startswith(CHANGE_PREFIXES)]
+    body = "\n".join(lines).strip()
+    change = service_change_text(prev_type, current_type, prev_hour, current_hour)
+    if change:
+        note = f"{CHANGE_PREFIXES[0]}{change}"
+        return f"{note}\n{body}" if body else note
+    return body
+
+
 def parse_purchase_json(page_html: str) -> Dict:
     """讀取訂單修改頁內嵌的 Vue purchase 物件（同 cancel_order._parse_purchase_json）。"""
     m = re.search(r"purchase:\s*(\{.*?\})\s*\n?\s*\}\s*\n?\s*\}", page_html or "", re.S)
@@ -864,6 +931,8 @@ def parse_edit_page(session, edit_url, phone=""):
     address_value = str(fields.get("address", "")).strip()
     progress = str(fields.get("progress", "") or fields.get("progress_status", "")).strip()
     purchase_status = str(fields.get("purchase_status", "")).strip()
+    hour_value = normalize_hour(purchase_json.get("hour") if purchase_json.get("hour") not in (None, "") else fields.get("hour", ""))
+    person_value = str(purchase_json.get("person") if purchase_json.get("person") not in (None, "") else fields.get("person", "") or "").strip()
 
     purchase_id = get_purchase_id_from_edit_url(edit_url)
 
@@ -890,6 +959,8 @@ def parse_edit_page(session, edit_url, phone=""):
         "fields": fields,
         "notice": notice,
         "customer_memo": customer_memo,
+        "hour": hour_value,
+        "person": person_value,
         "progress": progress,
         "status_name": status_name,
         "purchase_status": purchase_status,
@@ -933,6 +1004,8 @@ def enrich_item_from_detail(session, item: Dict, phone="") -> Dict:
         item["status"] = detail.get("status_name", "")
 
     item["notice"] = detail.get("notice", "") or item.get("notice", "")
+    item["hour"] = detail.get("hour", "") or item.get("hour", "")
+    item["person"] = detail.get("person", "") or item.get("person", "")
     item["customer_memo"] = detail.get("customer_memo", "") or item.get("customer_memo", "")
     item["_detail"] = detail
     return item
@@ -1061,7 +1134,14 @@ def build_preview_row(target: Dict, history_items: List[Dict]) -> Dict:
         "source_purchase_status_name": source.get("purchase_status_name", "") if source else "",
         "source_status_name": source.get("status", "") if source else "",
         "source_notice_exists": bool(source),
-        "source_notice_preview": str(source.get("notice", "")).strip() if source else "",
+        "source_notice_preview": compose_copied_notice(
+            source.get("notice", ""), source.get("hour"), target.get("hour"),
+            source.get("clean_type", ""), target.get("clean_type", ""),
+        ) if source else "",
+        "hour": normalize_hour(target.get("hour")),
+        "source_hour": normalize_hour(source.get("hour")) if source else "",
+        "clean_type": target.get("clean_type", ""),
+        "source_clean_type": source.get("clean_type", "") if source else "",
         "latest_same_order_id": latest.get("order_no", "") if latest else "",
         "latest_same_order_date": display_service_date(latest) if latest else "",
         "has_history": has_history,
@@ -1220,9 +1300,17 @@ def get_target_and_source_for_order(session, target: Dict, log, override_notice:
             }
         raise RuntimeError(f"❌ 處理失敗 {target_order_no}：同電話＋同地址有歷史訂單，但找不到已服務且有客服備註的來源單")
 
-    source_notice = str(source.get("notice", "")).strip()
-    if not source_notice:
+    if not str(source.get("notice", "")).strip():
         raise RuntimeError(f"❌ 處理失敗 {target_order_no}：來源單沒有客服備註")
+    current_hour = target_item.get("hour") or target_form.get("hour", "")
+    current_type = target_item.get("clean_type", "")
+    source_notice = compose_copied_notice(
+        source.get("notice", ""), source.get("hour"), current_hour,
+        source.get("clean_type", ""), current_type,
+    )
+    change = service_change_text(source.get("clean_type", ""), current_type, source.get("hour"), current_hour)
+    if change:
+        log(f"[服務異動] {change}，已註記於備註")
 
     return {
         "target_form": target_form,
@@ -1233,6 +1321,108 @@ def get_target_and_source_for_order(session, target: Dict, log, override_notice:
         "source": source,
         "source_notice": source_notice,
     }
+
+
+# ============================================================
+# 會員管理：地址[備註]
+# ============================================================
+def _extract_json_after(text: str, key: str):
+    """在頁面原始碼找 key 後面的 JSON 陣列／物件（例："memberAddressList": 或 list:）。"""
+    results = []
+    decoder = json.JSONDecoder()
+    for m in re.finditer(re.escape(key), text or ""):
+        start = m.end()
+        while start < len(text) and text[start] in " \t\r\n":
+            start += 1
+        try:
+            value, _ = decoder.raw_decode(text, start)
+            results.append(value)
+        except ValueError:
+            continue
+    return results
+
+
+def find_member_address(session, phone: str, address: str) -> Optional[Dict]:
+    """會員管理頁（/member?keyword=電話）內嵌 memberAddressList，找出同地址的那筆。"""
+    r = session_get(session, f"{BASE_URL}/member", params={"keyword": phone})
+    r.raise_for_status()
+    for address_list in _extract_json_after(r.text, '"memberAddressList":'):
+        if not isinstance(address_list, list):
+            continue
+        for item in address_list:
+            if isinstance(item, dict) and same_address(str(item.get("address", "")), address):
+                return item
+    return None
+
+
+def read_address_memos(session, address_id, phone: str):
+    """讀地址備註頁：回傳 (memos list[{id, memo}], token)。"""
+    url = f"{BASE_URL}/member/{address_id}/address_memo/edit"
+    r = session_get(session, url, params={"keyword": phone})
+    r.raise_for_status()
+    lists = _extract_json_after(r.text, "list:")
+    memos = lists[0] if lists and isinstance(lists[0], list) else None
+    if memos is None:
+        raise RuntimeError("讀不到地址備註清單")
+    soup = BeautifulSoup(r.text, "html.parser")
+    token_el = soup.select_one('input[name="_token"]') or soup.select_one('meta[name="csrf-token"]')
+    token = (token_el.get("value") or token_el.get("content") or "") if token_el else ""
+    if not token:
+        raise RuntimeError("讀不到地址備註頁 _token")
+    return memos, token
+
+
+def address_memo_text(notice: str) -> str:
+    """寫入地址備註用：去掉只屬於單次訂單的【服務異動】行。"""
+    lines = [ln for ln in str(notice or "").strip().splitlines() if not ln.strip().startswith(CHANGE_PREFIXES)]
+    return "\n".join(lines).strip()
+
+
+def sync_address_memo(session, phone: str, address: str, notice: str, log) -> str:
+    """
+    該客人該地址的[備註]最上方那則空白 → 填入 notice；已有內容不動。
+    其他備註原樣保留（同一頁 PUT 會整批覆蓋，所以全部一起送）。
+    回傳結果文字給 LOG；任何錯誤只回報，不拋出。
+    """
+    memo_text = address_memo_text(notice)
+    if not memo_text:
+        return "略過（沒有可填入的備註）"
+    try:
+        item = find_member_address(session, phone, address)
+        if not item or not item.get("id"):
+            return "略過（會員管理找不到這個地址）"
+        address_id = item["id"]
+        memos, token = read_address_memos(session, address_id, phone)
+
+        top = memos[0] if memos else None
+        if top and str(top.get("memo") or "").strip():
+            return "已有內容，未變更"
+
+        rows = [{"id": str(m.get("id") or ""), "memo": str(m.get("memo") or "")} for m in memos]
+        if rows:
+            rows[0]["memo"] = memo_text
+        else:
+            rows = [{"id": "", "memo": memo_text}]
+
+        data = [("_token", token), ("_method", "PUT")]
+        for row in rows:
+            data.append(("id[]", row["id"]))
+            data.append(("memo[]", row["memo"]))
+        resp = session_post(
+            session,
+            f"{BASE_URL}/member/{address_id}/address_memo",
+            params={"keyword": phone},
+            data=data,
+            allow_redirects=True,
+        )
+        resp.raise_for_status()
+
+        after, _ = read_address_memos(session, address_id, phone)
+        if after and str(after[0].get("memo") or "").strip():
+            return "已補填上回備註"
+        return "送出後驗證未看到備註，請人工確認"
+    except Exception as e:
+        return f"失敗（{type(e).__name__}: {str(e)[:80]}），請人工確認"
 
 
 def execute_target_order(session, target: Dict, source_type: str, source_value: str, log, log_ws, override_notice: Optional[str] = None):
@@ -1284,6 +1474,8 @@ def execute_target_order(session, target: Dict, source_type: str, source_value: 
         return {"ok": False, "error": reason_text, "updated_orders": 0}
 
     log(f"✅ 驗證成功 {target_order_no}")
+    address_memo_result = sync_address_memo(session, target_phone, target_addr, source_notice, log)
+    log(f"[地址備註] {target_order_no}：{address_memo_result}")
     append_log_row(
         log_ws=log_ws,
         source_type=source_type,
