@@ -4,6 +4,7 @@
 #       pages/訂單系統.py 呼叫。
 # 更新記錄：
 # 2026-11-10
+# - ①列表新增「時數（前次→本次）」欄；時數不同時備註最前面會自動加【時數異動】。
 # - 訂單客服備註（By 電話／By 搜尋條件）：拿掉上方「🚀 執行勾選項目」，
 #   改在①、②列表下方各放一顆批次執行按鈕，只執行該區勾選的訂單。
 # 2026-11-09
@@ -496,6 +497,8 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                     ref_no = r.get("source_order_id") or r.get("latest_same_order_id", "")
                     ref_dt = r.get("source_service_date") or r.get("latest_same_order_date", "")
                     row["參照訂單"] = f"{ref_no} {ref_dt}".strip()
+                    prev_h, cur_h = r.get("source_hour", ""), r.get("hour", "")
+                    row["時數（前次→本次）"] = (f"{prev_h}→{cur_h}" + ("　⚠️" if prev_h != cur_h else "")) if prev_h and cur_h else (cur_h or "")
                 row["狀態"] = _status_text(r)
                 row["客服備註（將寫入）"] = str(r.get("source_notice_preview", "") or "") if r.get("can_autofill") else ""
                 data.append(row)

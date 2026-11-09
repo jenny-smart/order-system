@@ -3,6 +3,10 @@
 # ============================================================
 # 更新記錄：
 # 2026-11-10
+# - 複製前次客服備註時比對服務時數：前次與本次時數不同，在備註最前面加一行
+#   「【時數異動】前次 X 小時／本次 Y 小時」（compose_copied_notice）；
+#   預覽列表與實際寫入用同一個函式，重複複製時舊的時數異動行會先移除。
+#   parse_edit_page／enrich 新增 hour、person 欄位。
 # - 修正勾選執行／單筆執行出現 APIError「Page Not Found」：order-system 的
 #   env.py 沒有 SHEET_ID、Streamlit secrets 也沒設，memo_log 用空白 ID 開
 #   Google Sheet 失敗，整個執行中斷。memo_log 改為輔助紀錄：開不了或寫入
@@ -783,6 +787,37 @@ def parse_select_value(select_el):
     return ""
 
 
+HOUR_CHANGE_PREFIX = "【時數異動】"
+
+
+def normalize_hour(value) -> str:
+    """時數統一成字串：3.0 → "3"、2.5 → "2.5"；空值或 0 回傳空字串。"""
+    text = str(value if value is not None else "").strip()
+    if not text:
+        return ""
+    try:
+        num = float(text)
+    except ValueError:
+        return text
+    if num <= 0:
+        return ""
+    return str(int(num)) if num.is_integer() else str(num)
+
+
+def compose_copied_notice(source_notice: str, prev_hour, current_hour) -> str:
+    """
+    複製前次客服備註；前次與本次服務時數不同時，在最前面註記兩次時數。
+    來源備註裡舊的【時數異動】行先移除，避免一直累加。
+    """
+    lines = [ln for ln in str(source_notice or "").strip().splitlines() if not ln.strip().startswith(HOUR_CHANGE_PREFIX)]
+    body = "\n".join(lines).strip()
+    prev_h, cur_h = normalize_hour(prev_hour), normalize_hour(current_hour)
+    if prev_h and cur_h and prev_h != cur_h:
+        note = f"{HOUR_CHANGE_PREFIX}前次 {prev_h} 小時／本次 {cur_h} 小時"
+        return f"{note}\n{body}" if body else note
+    return body
+
+
 def parse_purchase_json(page_html: str) -> Dict:
     """讀取訂單修改頁內嵌的 Vue purchase 物件（同 cancel_order._parse_purchase_json）。"""
     m = re.search(r"purchase:\s*(\{.*?\})\s*\n?\s*\}\s*\n?\s*\}", page_html or "", re.S)
@@ -864,6 +899,8 @@ def parse_edit_page(session, edit_url, phone=""):
     address_value = str(fields.get("address", "")).strip()
     progress = str(fields.get("progress", "") or fields.get("progress_status", "")).strip()
     purchase_status = str(fields.get("purchase_status", "")).strip()
+    hour_value = normalize_hour(purchase_json.get("hour") if purchase_json.get("hour") not in (None, "") else fields.get("hour", ""))
+    person_value = str(purchase_json.get("person") if purchase_json.get("person") not in (None, "") else fields.get("person", "") or "").strip()
 
     purchase_id = get_purchase_id_from_edit_url(edit_url)
 
@@ -890,6 +927,8 @@ def parse_edit_page(session, edit_url, phone=""):
         "fields": fields,
         "notice": notice,
         "customer_memo": customer_memo,
+        "hour": hour_value,
+        "person": person_value,
         "progress": progress,
         "status_name": status_name,
         "purchase_status": purchase_status,
@@ -933,6 +972,8 @@ def enrich_item_from_detail(session, item: Dict, phone="") -> Dict:
         item["status"] = detail.get("status_name", "")
 
     item["notice"] = detail.get("notice", "") or item.get("notice", "")
+    item["hour"] = detail.get("hour", "") or item.get("hour", "")
+    item["person"] = detail.get("person", "") or item.get("person", "")
     item["customer_memo"] = detail.get("customer_memo", "") or item.get("customer_memo", "")
     item["_detail"] = detail
     return item
@@ -1061,7 +1102,9 @@ def build_preview_row(target: Dict, history_items: List[Dict]) -> Dict:
         "source_purchase_status_name": source.get("purchase_status_name", "") if source else "",
         "source_status_name": source.get("status", "") if source else "",
         "source_notice_exists": bool(source),
-        "source_notice_preview": str(source.get("notice", "")).strip() if source else "",
+        "source_notice_preview": compose_copied_notice(source.get("notice", ""), source.get("hour"), target.get("hour")) if source else "",
+        "hour": normalize_hour(target.get("hour")),
+        "source_hour": normalize_hour(source.get("hour")) if source else "",
         "latest_same_order_id": latest.get("order_no", "") if latest else "",
         "latest_same_order_date": display_service_date(latest) if latest else "",
         "has_history": has_history,
@@ -1220,9 +1263,12 @@ def get_target_and_source_for_order(session, target: Dict, log, override_notice:
             }
         raise RuntimeError(f"❌ 處理失敗 {target_order_no}：同電話＋同地址有歷史訂單，但找不到已服務且有客服備註的來源單")
 
-    source_notice = str(source.get("notice", "")).strip()
-    if not source_notice:
+    if not str(source.get("notice", "")).strip():
         raise RuntimeError(f"❌ 處理失敗 {target_order_no}：來源單沒有客服備註")
+    current_hour = target_item.get("hour") or target_form.get("hour", "")
+    source_notice = compose_copied_notice(source.get("notice", ""), source.get("hour"), current_hour)
+    if normalize_hour(source.get("hour")) and normalize_hour(current_hour) and normalize_hour(source.get("hour")) != normalize_hour(current_hour):
+        log(f"[時數異動] 前次 {normalize_hour(source.get('hour'))} 小時／本次 {normalize_hour(current_hour)} 小時，已註記於備註")
 
     return {
         "target_form": target_form,
