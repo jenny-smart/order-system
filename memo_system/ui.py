@@ -6,6 +6,7 @@
 # 2026-11-10
 # - ①②列表的「電話」改為連結，點了直接開後台訂單管理的電話搜尋結果頁。
 # - ①列表「異動」欄移到最前面（選取之後），列出異動類別（項目／時間／付款／N→O）。
+# - 訂單本來就有客服備註時改為保留原備註＋註記（狀態欄顯示「保留原備註」）。
 # - ①列表新增「服務項目／服務時間（前次→本次）」「異動」欄；服務項目或時數不同
 #   時備註最前面會自動加【服務異動】段落。前次備註空白的列也會預填異動段落，
 #   執行時以畫面上的備註為準。
@@ -484,9 +485,12 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
             return f"{memo.PURCHASE_URL}?{urlencode(params)}"
 
         def _status_text(r):
+            has_hist = r.get("has_history", not r.get("is_new_order"))
+            if r.get("own_notice"):
+                return "保留原備註＋註記" if r.get("service_change") else "保留原備註"
             if r.get("can_autofill"):
                 return "複製最近已服務備註"
-            if r.get("has_history", not r.get("is_new_order")):
+            if has_hist:
                 return "前次備註空白，請填寫"
             return "新客，請填寫"
 
