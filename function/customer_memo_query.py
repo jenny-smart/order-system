@@ -6,11 +6,16 @@
 #   列出客人備註非空白的訂單：訂單號碼／客人姓名／電話／地址／
 #   付款狀態／客人備註／客服備註。只查詢，不修改後台。
 # 更新記錄：
+# 2026-11-10
+# - 新增 created_from／created_to：依訂購時間（列表卡片的 YYYY-MM-DD HH:MM:SS）
+#   篩選時間區間，給每日 10:00 排程（shared/customer_memo_schedule.py）使用。
+# - 結果新增「服務日期」欄。
 # 2026-11-09
 # - 新增。後台列表翻頁、訂單明細解析沿用 memo_system/memo.py 的共用函式。
 # ============================================================
+import re
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import streamlit as st
 
@@ -31,8 +36,27 @@ def is_proxy_order(item: Dict, customer_memo: str = "") -> bool:
     return any(k in memo_text for k in PROXY_MEMO_KEYWORDS)
 
 
-def search_customer_memo_orders(date_start: str, date_end: str, ui_logger=None, session=None) -> List[Dict]:
-    """購買日期區間＋全部付款狀態，排除代客預訂，只留客人備註非空白的訂單。"""
+def order_created_at(item: Dict) -> Optional[datetime]:
+    """列表卡片「訂購資訊」的訂購時間（第一個 YYYY-MM-DD HH:MM:SS）。"""
+    m = re.search(r"(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}(?::\d{2})?)", str(item.get("row_text", "") or ""))
+    if not m:
+        return None
+    text = f"{m.group(1)} {m.group(2)}"
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def search_customer_memo_orders(date_start: str, date_end: str, ui_logger=None, session=None,
+                                created_from: Optional[datetime] = None,
+                                created_to: Optional[datetime] = None) -> List[Dict]:
+    """
+    購買日期區間＋全部付款狀態，排除代客預訂，只留客人備註非空白的訂單。
+    有給 created_from／created_to（naive，台北時間）時，再依訂購時間篩選 [created_from, created_to)。
+    """
     log = ui_logger or (lambda m: None)
 
     if not date_start or not date_end:
@@ -64,6 +88,15 @@ def search_customer_memo_orders(date_start: str, date_end: str, ui_logger=None, 
         dt = x.get("raw_date_obj")
         if dt and start_dt and end_dt and not (start_dt <= dt <= end_dt):
             continue
+        if created_from or created_to:
+            created = order_created_at(x)
+            if created is None:
+                continue
+            if created_from and created < created_from:
+                continue
+            if created_to and created >= created_to:
+                continue
+            x["created_at"] = created
         candidates.append(x)
     log(f"[篩選] 排除代客預訂 {proxy_count} 筆，需讀取明細 {len(candidates)} 筆")
 
@@ -80,6 +113,7 @@ def search_customer_memo_orders(date_start: str, date_end: str, ui_logger=None, 
             "電話": x.get("phone", ""),
             "地址": x.get("address", ""),
             "付款狀態": x.get("purchase_status_name", ""),
+            "服務日期": _memo.display_service_date(x),
             "客人備註": memo_text,
             "客服備註": str(x.get("notice", "") or "").strip(),
         })
