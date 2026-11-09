@@ -44,6 +44,12 @@ ATM 對帳自動化模組
 - 支援一筆銀行收入由 2～5 筆訂單加總組成。只有金額總和相等、每筆都有
   末碼或姓名證據、且符合的組合唯一時才自動配對；多組可能或續列不足時
   保留人工確認，避免只靠金額誤配。
+
+修正（2026-11-09）：
+- 清潔異動「待退款」且退款方式為 ATM 時，同待收款寫入待配對區，L 欄負數、
+  N/O＝清潔／退款（下拉選單由 ensure_candidate_row_format 套用）。
+- ② 配對：負數候選列不參與收入配對；支出配對到同訂單清潔異動退款時，
+  移除該筆負數候選列，避免重複。排程取消訂單複查略過負數列。
 """
 import json
 import os
@@ -1341,6 +1347,7 @@ def auto_match_bank_rows(
     log(f"B 欄最後一列（銀行明細區）：第 {last_b_row} 列，待配對清單從第 {last_b_row + 1} 列起")
 
     candidates = []
+    refund_candidates: Dict[str, List[Dict]] = {}
     for idx, row in enumerate(rows, start=1):
         # 只從 B 欄最後一列下方找待配對清單，不回頭掃銀行明細區
         if idx <= last_b_row:
@@ -1351,6 +1358,11 @@ def auto_match_bank_rows(
         last_code = memo.safe_cell(row, COL_LAST_CODE)
 
         if amount is None:
+            continue
+        if amount < 0:
+            # 清潔異動 ATM 待退款（負數）：不參與收入配對，支出配對到同訂單退款時再移除
+            if order_no:
+                refund_candidates.setdefault(order_no, []).append({"row": idx, "amount": amount})
             continue
         # N/O 沿用候選列（① 待付款／清潔異動進來時已填好）；舊資料空白才補
         rule_service, rule_fee = default_service_fee(amount, order_no)
@@ -1447,6 +1459,12 @@ def auto_match_bank_rows(
                     touched_rows.append(idx)
                     result["success"] += 1
                     log(f"✅ 第{idx}列：支出 ${expense} → 清潔異動退款 {refund['order_no']} {refund['name']}")
+                    pending = refund_candidates.get(refund["order_no"]) or []
+                    if pending:
+                        source_row = pending.pop(0)["row"]
+                        memo.with_retry(ws.update, f"H{source_row}:O{source_row}", [[""] * 8], value_input_option="RAW")
+                        cleared_rows.append(source_row)
+                        log(f"↳ 已從下方待配對列表移除 ATM 待退款列第{source_row}列 H:O")
                 elif expense == TRAINEE_FEE_AMOUNT:
                     _write_trainee_fee(ws, idx, bank_day, expense, note)
                     touched_rows.append(idx)
@@ -1949,7 +1967,11 @@ def paste_atm_unpaid_list(region: str, rows: List[Dict], ui_logger=None) -> Dict
 
 
 def append_change_order_charges(region: str, rows: List[Dict], ui_logger=None) -> Dict:
-    """把清潔異動的待收款資料追加到同地區 ATM 工作表 I:L。"""
+    """把清潔異動的待收款／ATM 待退款追加到同地區 ATM 工作表（I:L 資料、N/O 類別、G 公式與下拉選單）。
+
+    rows 每筆：year_month, order_no, name, amount（待退款為負數）, change_text, kind（"charge"／"refund"）
+    2026-11-09 Jenny：ATM 待退款同樣寫入，金額負數，N/O＝清潔／退款（與支出配對一致）。
+    """
     log = make_logger(ui_logger)
     result = {"pasted": 0, "start_row": None}
     if not rows:
@@ -1987,8 +2009,11 @@ def append_change_order_charges(region: str, rows: List[Dict], ui_logger=None) -
         range_name=f"I{start_row}:L{end_row}",
         value_input_option="RAW",
     )
-    # N/O 依異動內容：工具組 → 清潔／工具組；其他 → 清潔／異動費
-    service_fee = [list(change_order_service_fee(row.get("change_text", ""))) for row in rows]
+    # N/O 依異動內容：工具組 → 清潔／工具組；其他 → 清潔／異動費；ATM 待退款 → 清潔／退款
+    service_fee = [
+        list(REFUND_SERVICE_FEE if row.get("kind") == "refund" else change_order_service_fee(row.get("change_text", "")))
+        for row in rows
+    ]
     memo.with_retry(
         ws.update,
         values=service_fee,
@@ -2001,7 +2026,8 @@ def append_change_order_charges(region: str, rows: List[Dict], ui_logger=None) -
         log(f"⚠️ 補 G 欄公式／下拉選單失敗：{exc}")
 
     result.update({"pasted": len(rows), "start_row": start_row})
-    log(f"✅ 已同步 {len(rows)} 筆待收款資料至 ATM 工作表 I{start_row}:L{end_row}")
+    refund_count = sum(1 for row in rows if row.get("kind") == "refund")
+    log(f"✅ 已同步 {len(rows) - refund_count} 筆待收款、{refund_count} 筆 ATM 待退款至 ATM 工作表 G{start_row}:O{end_row}")
     return result
 
 
@@ -2024,6 +2050,9 @@ def flag_cancelled_pending_orders(region: str, session, ui_logger=None) -> Dict:
         order_no = memo.safe_cell(row, COL_ORDER_NO)
         if not order_no or memo.safe_cell(row, COL_RECON_STATUS) == "已更新系統":
             continue
+        amount = _to_int_amount(memo.safe_cell(row, COL_ORDER_AMOUNT))
+        if amount is not None and amount < 0:
+            continue  # 清潔異動 ATM 待退款列，訂單取消是正常情況，不標記
         checked += 1
         purchase = find_purchase_by_order_no(session, order_no)
         raw_status = purchase.get("purchase_status") if purchase else None

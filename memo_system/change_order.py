@@ -1,11 +1,15 @@
 # ============================================================
 # 檔名：change_order.py
-# 版本：v3.4
+# 版本：v3.5
 # 模組：清潔異動模組：車馬費 / 異動服務收款 / 異動服務退款
 # 建立日期：2026-06-22
-# 最後更新：2026-08-27
+# 最後更新：2026-11-09
 #
 # Change Log
+# v3.5（2026-11-09）
+# - 階段 A 建立「待退款」且退款方式（R 欄）為 ATM 時，同步新增至同地區 ATM
+#   工作表待配對區，做法同待收款（G 公式、I/N/O 下拉選單），L 欄金額為負數
+#   （S 欄退款金額），N/O＝清潔／退款。
 # v3.4
 # - 服務異動的工作天、訂單篩選與加減時判斷統一使用台灣時區日期，避免
 #   Streamlit Cloud 在台灣凌晨仍以 UTC 前一天計算。
@@ -1269,6 +1273,18 @@ def build_manual_refund_row(order: dict, amount, refund_type_label: str, service
         "_calc_note": f"{refund_type_label}（人工輸入金額）= ${amount}",
     }
 
+def _is_atm_pending_refund(row: dict) -> bool:
+    """待退款且退款方式（R 欄）為 ATM／藍新ATM → 同步 ATM 工作表（負數）。VIP 待返儲值金不算。"""
+    return row.get("B") == STATUS_PENDING_REFUND and "ATM" in str(row.get("R", "")).upper()
+
+
+def _atm_amount(value) -> int:
+    try:
+        return int(round(float(str(value or 0).replace(",", "").replace("$", ""))))
+    except ValueError:
+        return 0
+
+
 def append_rows_to_sheet(region: str, rows: list, ui_logger=None):
     """
     把試算好的列（list of dict，欄位用 A/B/C/...）寫入清潔異動工作表最後一列之後。
@@ -1312,7 +1328,7 @@ def append_rows_to_sheet(region: str, rows: list, ui_logger=None):
             ws.update_acell(f"AD{target_row}", datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d %H:%M:%S"))
             ws.update_acell(f"AE{target_row}", "建立異動")
             written += 1
-            if row.get("B") == STATUS_PENDING_CHARGE:
+            if row.get("B") == STATUS_PENDING_CHARGE or _is_atm_pending_refund(row):
                 written_pending_charges.append(row)
             log(f"✅ 已寫入第 {target_row} 列：{row.get('G', '')}")
         except Exception as e:
@@ -1330,11 +1346,14 @@ def append_rows_to_sheet(region: str, rows: list, ui_logger=None):
                     f"{service_date_match.group(1)}.{int(service_date_match.group(2)):02d}"
                     if service_date_match else ""
                 )
+                is_refund = _is_atm_pending_refund(row)
                 atm_rows.append({
                     "year_month": year_month,
                     "order_no": row.get("G", ""),
                     "name": row.get("H", ""),
-                    "amount": row.get("N", 0),
+                    # ATM 待退款：金額＝S 欄退款金額，以負數寫入
+                    "amount": -abs(_atm_amount(row.get("S"))) if is_refund else row.get("N", 0),
+                    "kind": "refund" if is_refund else "charge",
                     # 異動內容（C 類型＋J 說明）決定 ATM N/O：加時／工具組
                     "change_text": f"{row.get('C', '')} {row.get('J', '')}",
                 })
