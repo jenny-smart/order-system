@@ -3,6 +3,10 @@
 # ============================================================
 # 更新記錄：
 # 2026-11-10
+# - 寫入客服備註成功後，同步檢查會員管理該地址的[備註]（sync_address_memo）：
+#   會員管理頁內嵌 memberAddressList 找出同地址的地址 ID → 讀地址備註頁內嵌的
+#   list；最上方那則（以上方為主）空白才填入本次寫入的客服備註（去掉【服務異動】
+#   行），已有內容不動，其他備註原樣保留一起送出。失敗只記 LOG，不影響訂單結果。
 # - 複製前次客服備註時比對服務項目與服務時數，任一不同就在備註最前面加一行
 #   「【服務異動】服務項目：前次 A／本次 B；時數：前次 X 小時／本次 Y 小時」
 #   （compose_copied_notice，只列有差異的項目）；預覽列表與實際寫入用同一個
@@ -1319,6 +1323,108 @@ def get_target_and_source_for_order(session, target: Dict, log, override_notice:
     }
 
 
+# ============================================================
+# 會員管理：地址[備註]
+# ============================================================
+def _extract_json_after(text: str, key: str):
+    """在頁面原始碼找 key 後面的 JSON 陣列／物件（例："memberAddressList": 或 list:）。"""
+    results = []
+    decoder = json.JSONDecoder()
+    for m in re.finditer(re.escape(key), text or ""):
+        start = m.end()
+        while start < len(text) and text[start] in " \t\r\n":
+            start += 1
+        try:
+            value, _ = decoder.raw_decode(text, start)
+            results.append(value)
+        except ValueError:
+            continue
+    return results
+
+
+def find_member_address(session, phone: str, address: str) -> Optional[Dict]:
+    """會員管理頁（/member?keyword=電話）內嵌 memberAddressList，找出同地址的那筆。"""
+    r = session_get(session, f"{BASE_URL}/member", params={"keyword": phone})
+    r.raise_for_status()
+    for address_list in _extract_json_after(r.text, '"memberAddressList":'):
+        if not isinstance(address_list, list):
+            continue
+        for item in address_list:
+            if isinstance(item, dict) and same_address(str(item.get("address", "")), address):
+                return item
+    return None
+
+
+def read_address_memos(session, address_id, phone: str):
+    """讀地址備註頁：回傳 (memos list[{id, memo}], token)。"""
+    url = f"{BASE_URL}/member/{address_id}/address_memo/edit"
+    r = session_get(session, url, params={"keyword": phone})
+    r.raise_for_status()
+    lists = _extract_json_after(r.text, "list:")
+    memos = lists[0] if lists and isinstance(lists[0], list) else None
+    if memos is None:
+        raise RuntimeError("讀不到地址備註清單")
+    soup = BeautifulSoup(r.text, "html.parser")
+    token_el = soup.select_one('input[name="_token"]') or soup.select_one('meta[name="csrf-token"]')
+    token = (token_el.get("value") or token_el.get("content") or "") if token_el else ""
+    if not token:
+        raise RuntimeError("讀不到地址備註頁 _token")
+    return memos, token
+
+
+def address_memo_text(notice: str) -> str:
+    """寫入地址備註用：去掉只屬於單次訂單的【服務異動】行。"""
+    lines = [ln for ln in str(notice or "").strip().splitlines() if not ln.strip().startswith(CHANGE_PREFIXES)]
+    return "\n".join(lines).strip()
+
+
+def sync_address_memo(session, phone: str, address: str, notice: str, log) -> str:
+    """
+    該客人該地址的[備註]最上方那則空白 → 填入 notice；已有內容不動。
+    其他備註原樣保留（同一頁 PUT 會整批覆蓋，所以全部一起送）。
+    回傳結果文字給 LOG；任何錯誤只回報，不拋出。
+    """
+    memo_text = address_memo_text(notice)
+    if not memo_text:
+        return "略過（沒有可填入的備註）"
+    try:
+        item = find_member_address(session, phone, address)
+        if not item or not item.get("id"):
+            return "略過（會員管理找不到這個地址）"
+        address_id = item["id"]
+        memos, token = read_address_memos(session, address_id, phone)
+
+        top = memos[0] if memos else None
+        if top and str(top.get("memo") or "").strip():
+            return "已有內容，未變更"
+
+        rows = [{"id": str(m.get("id") or ""), "memo": str(m.get("memo") or "")} for m in memos]
+        if rows:
+            rows[0]["memo"] = memo_text
+        else:
+            rows = [{"id": "", "memo": memo_text}]
+
+        data = [("_token", token), ("_method", "PUT")]
+        for row in rows:
+            data.append(("id[]", row["id"]))
+            data.append(("memo[]", row["memo"]))
+        resp = session_post(
+            session,
+            f"{BASE_URL}/member/{address_id}/address_memo",
+            params={"keyword": phone},
+            data=data,
+            allow_redirects=True,
+        )
+        resp.raise_for_status()
+
+        after, _ = read_address_memos(session, address_id, phone)
+        if after and str(after[0].get("memo") or "").strip():
+            return "已補填上回備註"
+        return "送出後驗證未看到備註，請人工確認"
+    except Exception as e:
+        return f"失敗（{type(e).__name__}: {str(e)[:80]}），請人工確認"
+
+
 def execute_target_order(session, target: Dict, source_type: str, source_value: str, log, log_ws, override_notice: Optional[str] = None):
     CURRENT_ROW_LOGS.clear()
 
@@ -1368,6 +1474,8 @@ def execute_target_order(session, target: Dict, source_type: str, source_value: 
         return {"ok": False, "error": reason_text, "updated_orders": 0}
 
     log(f"✅ 驗證成功 {target_order_no}")
+    address_memo_result = sync_address_memo(session, target_phone, target_addr, source_notice, log)
+    log(f"[地址備註] {target_order_no}：{address_memo_result}")
     append_log_row(
         log_ws=log_ws,
         source_type=source_type,
