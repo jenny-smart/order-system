@@ -4,6 +4,7 @@
 #       pages/訂單系統.py 呼叫。
 # 更新記錄：
 # 2026-11-10
+# - ①②列表的「電話」改為連結，點了直接開後台訂單管理的電話搜尋結果頁。
 # - ①列表新增「服務項目／服務時間（前次→本次）」「異動」欄；服務項目或時數不同
 #   時備註最前面會自動加【服務異動】段落。前次備註空白的列也會預填異動段落，
 #   執行時以畫面上的備註為準。
@@ -38,6 +39,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
     # -*- coding: utf-8 -*-
     import streamlit as st
     import re
+    from urllib.parse import urlencode
     import importlib
     from datetime import date, timedelta
     from . import memo
@@ -471,6 +473,15 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         notices = {}
         selected_ids = []
 
+        def phone_search_url(phone):
+            """後台訂單管理用電話搜尋的結果頁（依目前環境）。"""
+            digits = re.sub(r"\D", "", str(phone or ""))
+            if not digits:
+                return ""
+            params = memo.blank_list_params()
+            params["phone"] = digits
+            return f"{memo.PURCHASE_URL}?{urlencode(params)}"
+
         def _status_text(r):
             if r.get("can_autofill"):
                 return "複製最近已服務備註"
@@ -490,7 +501,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                     "選取": bool(r.get("can_autofill")),
                     "訂單號碼": r.get("order_id", ""),
                     "客戶": r.get("customer_name", ""),
-                    "電話": r.get("phone", ""),
+                    "電話": phone_search_url(r.get("phone", "")),
                     "地址": r.get("address", ""),
                     "服務日期": r.get("service_date", ""),
                     "付款狀態": r.get("purchase_status_name", ""),
@@ -515,6 +526,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                 disabled=disabled,
                 column_config={
                     "選取": st.column_config.CheckboxColumn("選取", width="small"),
+                    "電話": st.column_config.LinkColumn("電話", display_text=r"phone=(\d+)"),
                     "客服備註（將寫入）": st.column_config.TextColumn("客服備註（將寫入）", width="large"),
                 },
             )
