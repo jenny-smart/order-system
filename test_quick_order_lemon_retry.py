@@ -39,9 +39,11 @@ class LemonRetryTest(unittest.TestCase):
                 q._query_booking_slot_with_lemon_retry(object(), '', 'ATM', {'person': '2'}, '', SLOT, False)
             shift.assert_not_called()
 
-    def test_failed_retry_shows_actual_skip_reason(self):
-        with self.assertRaisesRegex(Exception, '檸檬人1：上4衝突'):
-            self.run_query(['[]', '[]'], pre={'success': False, 'message': '可用檸檬人不足', 'skipped': [{'name': '檸檬人1', 'reason': '上4衝突'}]})
+    def test_failed_retry_shows_summary_not_each_cleaner(self):
+        with self.assertRaises(Exception) as ctx:
+            self.run_query(['[]', '[]'], pre={'success': False, 'message': '可用檸檬人不足：需要 2 位，只補到 0 位', 'skipped': [{'name': '檸檬人1', 'reason': '上4衝突'}]})
+        self.assertIn('可用檸檬人不足', str(ctx.exception))
+        self.assertNotIn('檸檬人1：上4衝突', str(ctx.exception))
 
     def test_quick_uses_batch_shift_implementation(self):
         import shared.cleaner_shift as shifts

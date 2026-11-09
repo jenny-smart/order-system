@@ -351,8 +351,8 @@ def process_one_group_with_lemon_retry(session, rows_with_idx, token, gcal_servi
         pre = orders.ensure_lemon_cleaner_shifts(session=session, base_url=orders.BASE_URL, service_date=date_s, period_s=period_s, person_count=people) or {}
         assigned = pre.get("assigned", []) or []
         skipped = pre.get("skipped", []) or []
-        skipped_detail = "；".join(f"{item.get('name', '')}:{item.get('reason', '')}" for item in skipped[:8] if isinstance(item, dict))
-        logger(f"🍋 第 {row_no} 列補檸檬人：成功 {len(assigned)} 人；略過 {len(skipped)} 人；{pre.get('message', '')}" + (f"；略過明細：{skipped_detail}" if skipped_detail else ""))
+        # v2026.11.09-1：已勾班的檸檬人會自動換下一位，只記統計不逐位列出。
+        logger(f"🍋 第 {row_no} 列補檸檬人：成功 {len(assigned)} 人；略過 {len(skipped)} 人；{pre.get('message', '')}")
         if pre.get("success"): any_shift_added = True
     if not any_shift_added:
         return mark_lemon_staff(result)

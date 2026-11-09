@@ -1,9 +1,13 @@
 # ============================================================
 # 檔名：quick_order.py
-# 版本：v8.66
-# 最後更新：2026-10-16
+# 版本：v8.67
+# 最後更新：2026-11-09
 #
 # Change Log
+# v8.67
+# - 自動補檸檬人：已勾班／衝突時自動換下一位直到補滿，失敗訊息只顯示
+#   統計（已檢查幾位、幾位已有班），不再逐位列出。
+# - 修正當天沒有檸檬人勾班卻被判成「已勾班」的誤判（見 shared/cleaner_shift.py）。
 # v8.66
 # - 修正新客、建了會員但沒成單的客人、舊客新地址全部無法成單
 #   （後台班表回覆：[]）：v8.65 起地址流程完全不查服務區域，會員地址
@@ -4297,11 +4301,8 @@ def _query_booking_slot_with_lemon_retry(session, base_url, payway, data, token,
         found = slot_exists_in_section_response(raw, slot)
     if not found:
         service_date_of_slot = slot.split("_", 1)[0]
-        details = [str(pre.get("message") or "")]
-        for item in pre.get("skipped", []) or []:
-            if isinstance(item, dict):
-                details.append(f"{item.get('name', '')}：{item.get('reason') or item.get('message') or ''}")
-        shift_message = "；".join(x for x in details if x)
+        # v8.67：只顯示補班統計，不逐位列出檸檬人（逐位原因留在 pre["skipped"]）。
+        shift_message = str(pre.get("message") or "")
         period_of_slot = slot.split("_", 1)[1] if "_" in slot else ""
         others = _sections_on_date(raw, service_date_of_slot)
         raise Exception(

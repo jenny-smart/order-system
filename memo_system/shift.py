@@ -8,6 +8,9 @@
    讓 submit_shift_payload 能帶著這些欄位一起送出，符合 Laravel 的 method spoofing。
 2. submit_shift_payload 加上 month 參數，POST URL 帶 ?month=YYYY-MM。
 3. clear_person_shift_dates 確認當月有勾選才送出，無勾選直接略過。
+
+v2026.11.09-1：排班頁解析與送出欄位改用 shared/shift_page.py，
+與所有成單自動補檸檬人共用同一套程式（行為不變）。
 """
 import re
 from datetime import date, timedelta
@@ -17,6 +20,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from . import memo
+from shared.shift_page import parse_shift_page, build_shift_payload
 
 # -----------------------------------------------------------------------------
 # 類型對照表
@@ -186,28 +190,8 @@ def get_shift_page_state(
     url = f"{memo.BASE_URL}/cleaner1/{cleaner_id}/shift"
     r = memo.session_get(session, url, params={"month": month})
     r.raise_for_status()
-    soup = BeautifulSoup(r.text, "html.parser")
-
-    token_el = soup.select_one('input[name="_token"]')
-    token = token_el.get("value", "") if token_el else ""
-
-    # 抓所有 hidden input（排除 _token 本身，因為已單獨處理）
-    hidden_fields: Dict[str, str] = {}
-    for el in soup.select('input[type="hidden"]'):
-        name = el.get("name", "")
-        value = el.get("value", "")
-        if name and name != "_token":
-            hidden_fields[name] = value
-
-    # 抓已勾選的 shift_ radio
-    existing: Dict[str, str] = {}
-    for el in soup.select('input[name^="shift_"][checked]'):
-        name = el.get("name", "")
-        value = el.get("value", "")
-        key = name[len("shift_"):]
-        if value:
-            existing[key] = value
-
+    # v2026.11.09-1：與成單補檸檬人共用 shared/shift_page.py 解析。
+    token, existing, hidden_fields = parse_shift_page(r.text)
     return token, existing, hidden_fields
 
 
@@ -264,12 +248,8 @@ def submit_shift_payload(
     params = {"month": month} if month else {}
     referer = f"{url}?month={month}" if month else url
 
-    payload = {f"shift_{k}": v for k, v in merged.items()}
-    payload["_token"] = token
-
-    # 帶入 _method=PUT 等 Laravel hidden 欄位
-    if hidden_fields:
-        payload.update(hidden_fields)
+    # 帶入 _method=PUT 等 Laravel hidden 欄位（共用 shared/shift_page.py）
+    payload = build_shift_payload(token, merged, hidden_fields)
 
     resp = memo.session_post(
         session,
