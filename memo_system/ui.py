@@ -5,6 +5,7 @@
 # 更新記錄：
 # 2026-11-10
 # - ①②列表的「電話」改為連結，點了直接開後台訂單管理的電話搜尋結果頁。
+# - ①列表「異動」欄移到最前面（選取之後）。
 # - ①列表新增「服務項目／服務時間（前次→本次）」「異動」欄；服務項目或時數不同
 #   時備註最前面會自動加【服務異動】段落。前次備註空白的列也會預填異動段落，
 #   執行時以畫面上的備註為準。
@@ -497,20 +498,21 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
             section_selected = []
             data = []
             for r in items:
-                row = {
-                    "選取": bool(r.get("can_autofill")),
+                row = {"選取": bool(r.get("can_autofill"))}
+                if show_source:
+                    row["異動"] = "⚠️ 項目／時間不同" if r.get("service_change") else ""
+                row.update({
                     "訂單號碼": r.get("order_id", ""),
                     "客戶": r.get("customer_name", ""),
                     "電話": phone_search_url(r.get("phone", "")),
                     "地址": r.get("address", ""),
                     "服務日期": r.get("service_date", ""),
                     "付款狀態": r.get("purchase_status_name", ""),
-                }
+                })
                 if show_source:
                     ref_no = r.get("source_order_id") or r.get("latest_same_order_id", "")
                     ref_dt = r.get("source_service_date") or r.get("latest_same_order_date", "")
                     row["參照訂單"] = f"{ref_no} {ref_dt}".strip()
-                    row["異動"] = "⚠️ 項目／時間不同" if r.get("service_change") else ""
                     row["服務項目（前次→本次）"] = f"{r.get('source_service_items_text', '') or '-'} → {r.get('service_items_text', '') or '-'}"
                     row["服務時間（前次→本次）"] = f"{r.get('source_service_time_text', '') or '-'} → {r.get('service_time_text', '') or '-'}"
                 row["狀態"] = _status_text(r)
