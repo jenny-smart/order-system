@@ -5,6 +5,8 @@
 #
 # Change Log
 # v8.67
+# - 自動補檸檬人：先查班表當日當時段未配班人數，只補缺的人數（與批次共用
+#   shared/cleaner_shift.lemon_shortfall）。
 # - 自動補檸檬人：已勾班／衝突時自動換下一位直到補滿，失敗訊息只顯示
 #   統計（已檢查幾位、幾位已有班），不再逐位列出。
 # - 修正當天沒有檸檬人勾班卻被判成「已勾班」的誤判（見 shared/cleaner_shift.py）。
@@ -488,7 +490,7 @@ from shared.cleaner_shift import (
     _shift_code_to_value, _shift_code_to_group, _shift_codes_conflict,
     _parse_cleaner_shift_page, _get_cleaner_shift_form_info, _get_cleaner_shifts_on_date,
     _search_lemon_cleaners, _set_cleaner_shift_if_available, ensure_lemon_cleaner_shifts,
-    _get_schedule_edit_info,
+    _get_schedule_edit_info, lemon_shortfall,
 )
 
 from shared.backend_client import (
@@ -4292,10 +4294,13 @@ def _query_booking_slot_with_lemon_retry(session, base_url, payway, data, token,
     shortage = not found or (bool(cleaners) and len(cleaners) < need)
     if shortage and allow_auto_lemon_shift:
         service_date, period = slot.split("_", 1)
+        # v8.67：先查班表看當日當時段缺幾人，只補缺的檸檬人（與批次共用）。
+        add_count, basis = lemon_shortfall(session, base_url, service_date, period, need, len(cleaners))
         pre = ensure_lemon_cleaner_shifts(
             session=session, base_url=base_url, service_date=service_date,
-            period_s=period, person_count=str(max(1, need - len(cleaners))),
+            period_s=period, person_count=str(add_count),
         ) or {}
+        pre["message"] = f"{basis}；{pre.get('message', '')}"
         token = _get_booking_token_for_payway(session, base_url, payway)
         raw = orders.get_all_sections_raw(session, data, token)
         found = slot_exists_in_section_response(raw, slot)

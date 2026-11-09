@@ -348,7 +348,11 @@ def process_one_group_with_lemon_retry(session, rows_with_idx, token, gcal_servi
         mapped = orders.map_to_system_slot(row["開始時間"], row["結束時間"], row["服務人時"])
         period_s = mapped["system_slot"]
         people, _hours = orders.parse_service_human_hour(row.get("服務人時", ""), row.get("開始時間", ""), row.get("結束時間", ""))
-        pre = orders.ensure_lemon_cleaner_shifts(session=session, base_url=orders.BASE_URL, service_date=date_s, period_s=period_s, person_count=people) or {}
+        # v2026.11.09-2：先查班表看缺幾人，只補缺的檸檬人（與快速成單共用）。
+        from shared.cleaner_shift import lemon_shortfall
+        add_count, basis = lemon_shortfall(session, orders.BASE_URL, date_s, period_s, people)
+        logger(f"🍋 第 {row_no} 列 {date_s} {period_s}：{basis}")
+        pre = orders.ensure_lemon_cleaner_shifts(session=session, base_url=orders.BASE_URL, service_date=date_s, period_s=period_s, person_count=add_count) or {}
         assigned = pre.get("assigned", []) or []
         skipped = pre.get("skipped", []) or []
         # v2026.11.09-1：已勾班的檸檬人會自動換下一位，只記統計不逐位列出。
