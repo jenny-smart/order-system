@@ -7,9 +7,9 @@
 # - 查訂單備註預覽分成兩部份：①同電話＋同地址之前有訂單 → 自動複製最近一次
 #   已服務日期的客服備註；②之前無相同訂單 → 只列出訂單號碼／姓名／電話／
 #   地址／付款狀態（不勾選、不寫入）。
-# - 新增查詢方式「客人備註查詢」：購買日期區間＋全部付款狀態，排除代客預訂，
-#   列出客人備註非空白訂單（含客人備註、客服備註）。
-# - 預覽勾選框改用 session_state 預設值，不再傳 value=。
+# - 預覽改為列表（st.data_editor）：勾選＋可直接編輯客服備註，確認後再執行；
+#   另有「單筆執行」可選一筆、用多行文字框編輯備註後只執行該筆。
+#   有相同訂單但無可複製備註、或無相同訂單的訂單，填入備註後也可勾選執行。
 # 2026-09-08
 # - 服務異動的預設日期與加減時判斷改用台灣時區日期。
 # 2026-07-15（二）
@@ -277,7 +277,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
 
     DEFAULT_STATE = {
         "logs": [], "result": None, "is_running": False,
-        "is_logged_in": False, "preview_rows": [], "last_mode": "", "customer_memo_rows": None,
+        "is_logged_in": False, "preview_rows": [], "last_mode": "", "memo_query_ver": 0,
         "login_identity": "", "sheet_summary": None,
         "shift_import_rows": [], "shift_dry_run_result": None,
         "lemon_candidate": None, "lemon_assign_result": None,
@@ -440,11 +440,17 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
     # ============================================================
 
     def render_preview_blocks(rows):
-        step("4", "查詢結果預覽")
+        """
+        列表預覽：勾選＋可編輯客服備註。
+        回傳 (selected_ids, notices, single_id)：
+          selected_ids 勾選的訂單；notices 每筆畫面上的客服備註；single_id 按了「執行此筆」的訂單。
+        """
+        step("4", "查詢結果列表")
         if not rows:
             st.info("查無資料")
-            return []
+            return [], {}, None
 
+        ver = st.session_state.get("memo_query_ver", 0)
         history_rows = [r for r in rows if r.get("has_history", not r.get("is_new_order"))]
         new_rows     = [r for r in rows if not r.get("has_history", not r.get("is_new_order"))]
         can_rows     = [r for r in history_rows if r.get("can_autofill")]
@@ -455,91 +461,96 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         m3.metric("　可自動複製", len(can_rows))
         m4.metric("② 無相同訂單", len(new_rows))
 
+        notices = {}
         selected_ids = []
 
-        # ── 第一部份：同電話＋同地址之前有訂單 ──
-        st.markdown("### ① 之前有相同訂單（電話＋地址）")
-        st.caption("自動複製離現在最近一次已服務日期（≤ 今天）的客服備註；排除取消訂單／已退款。")
-        if not history_rows:
-            st.caption("沒有資料")
-        else:
-            c1, c2, c3 = st.columns([1, 1, 4])
-            with c1:
-                if st.button("本區全選", key="sel_history", use_container_width=True):
-                    for row in can_rows:
-                        st.session_state[f"pick_{row.get('order_id', '')}"] = True
-            with c2:
-                if st.button("本區全不選", key="unsel_history", use_container_width=True):
-                    for row in history_rows:
-                        st.session_state[f"pick_{row.get('order_id', '')}"] = False
-            with c3:
-                st.caption(f"本區共 {len(history_rows)} 筆，可自動複製 {len(can_rows)} 筆")
+        def _status_text(r):
+            if r.get("can_autofill"):
+                return "複製最近已服務備註"
+            if r.get("has_history", not r.get("is_new_order")):
+                return "前次備註空白，請填寫"
+            return "新客，請填寫"
 
-            for row in history_rows:
-                order_id = str(row.get("order_id", "")).strip()
-                if not order_id:
-                    continue
-                can_autofill = bool(row.get("can_autofill"))
-                pick_key = f"pick_{order_id}"
-                if pick_key not in st.session_state:
-                    st.session_state[pick_key] = can_autofill
-                checked = st.checkbox(f"選取 {order_id}", key=pick_key, label_visibility="collapsed")
+        def _editor(title, items, key, show_source):
+            st.markdown(f"### {title}")
+            if not items:
+                st.caption("沒有資料")
+                return
+            data = []
+            for r in items:
+                row = {
+                    "選取": bool(r.get("can_autofill")),
+                    "訂單號碼": r.get("order_id", ""),
+                    "客戶": r.get("customer_name", ""),
+                    "電話": r.get("phone", ""),
+                    "地址": r.get("address", ""),
+                    "服務日期": r.get("service_date", ""),
+                    "付款狀態": r.get("purchase_status_name", ""),
+                }
+                if show_source:
+                    ref_no = r.get("source_order_id") or r.get("latest_same_order_id", "")
+                    ref_dt = r.get("source_service_date") or r.get("latest_same_order_date", "")
+                    row["參照訂單"] = f"{ref_no} {ref_dt}".strip()
+                row["狀態"] = _status_text(r)
+                row["客服備註（將寫入）"] = str(r.get("source_notice_preview", "") or "") if r.get("can_autofill") else ""
+                data.append(row)
 
-                source_notice = str(row.get("source_notice_preview", "") or "")
-                notice_html = source_notice.replace("\n", "<br>") if source_notice else "無"
-                suggestion = "建議執行" if can_autofill else "有相同訂單，但沒有已服務且有客服備註的來源單，請人工確認"
-                card_cls = "preview-card preview-ok" if can_autofill else "preview-card preview-ng"
-
-                st.markdown(f"""
-                <div class="{card_cls}">
-                    <div class="preview-title">目前訂單：{order_id}</div>
-                    <div class="preview-sub">
-                        <b>客戶 / 電話：</b>{row.get("customer_name", "")} / {row.get("phone", "")}<br>
-                        <b>地址：</b>{row.get("address", "")}<br>
-                        <b>目前服務日期：</b>{row.get("service_date", "")}　
-                        <b>目前付款狀態：</b>{row.get("purchase_status_name", "") or "-"}
-                    </div>
-                    <hr style="margin:10px 0;">
-                    <div class="preview-sub">
-                        <b>來源訂單（最近一次已服務）：</b>{row.get("source_order_id", "") or "無"}<br>
-                        <b>來源服務日期：</b>{row.get("source_service_date", "") or "-"}　
-                        <b>來源付款狀態：</b>{row.get("source_purchase_status_name", "") or "-"}　
-                        <b>來源服務狀態：</b>{row.get("source_status_name", "") or "-"}<br>
-                        <b>客服備註：</b>{notice_html}
-                    </div>
-                    <div class="preview-sub" style="margin-top:8px;"><b>建議：</b>{suggestion}</div>
-                </div>
-                """, unsafe_allow_html=True)
-
-                if checked:
-                    selected_ids.append(order_id)
-
-        # ── 第二部份：同電話＋同地址之前無訂單（只列出，不寫入）──
-        st.markdown("### ② 之前無相同訂單（電話＋地址）")
-        if not new_rows:
-            st.caption("沒有資料")
-        else:
-            st.caption(f"共 {len(new_rows)} 筆，僅供查看，不會寫入備註。")
-            st.dataframe(
-                [
-                    {
-                        "訂單號碼": r.get("order_id", ""),
-                        "客人姓名": r.get("customer_name", ""),
-                        "電話": r.get("phone", ""),
-                        "地址": r.get("address", ""),
-                        "付款狀態": r.get("purchase_status_name", ""),
-                    }
-                    for r in new_rows
-                ],
-                use_container_width=True,
+            disabled = [c for c in data[0].keys() if c not in ("選取", "客服備註（將寫入）")]
+            edited = st.data_editor(
+                data,
+                key=f"{key}_{ver}",
                 hide_index=True,
+                use_container_width=True,
+                disabled=disabled,
+                column_config={
+                    "選取": st.column_config.CheckboxColumn("選取", width="small"),
+                    "客服備註（將寫入）": st.column_config.TextColumn("客服備註（將寫入）", width="large"),
+                },
             )
+            records = edited.to_dict("records") if hasattr(edited, "to_dict") else list(edited)
+            for rec in records:
+                oid = str(rec.get("訂單號碼", "")).strip()
+                if not oid:
+                    continue
+                notices[oid] = str(rec.get("客服備註（將寫入）") or "")
+                if rec.get("選取"):
+                    selected_ids.append(oid)
+
+        _editor("① 之前有相同訂單（電話＋地址）", history_rows, "memo_ed_history", True)
+        st.caption("自動帶入離現在最近一次已服務日期（≤ 今天）的客服備註；前次備註空白的，參照訂單欄列出最近一筆同電話＋同地址訂單，請自行填寫後勾選。")
+        _editor("② 之前無相同訂單（電話＋地址）", new_rows, "memo_ed_new", False)
+        st.caption("新客預設不勾選；需要寫入時請填寫客服備註後勾選。")
+
+        # 單筆執行：多行編輯備註後只執行這一筆
+        st.markdown("### 單筆執行")
+        row_map = {str(r.get("order_id", "")): r for r in rows if r.get("order_id")}
+        single_oid = st.selectbox(
+            "選擇訂單",
+            list(row_map.keys()),
+            format_func=lambda o: f"{o}｜{row_map[o].get('customer_name', '')}｜{row_map[o].get('address', '')}",
+            key=f"memo_single_pick_{ver}",
+        )
+        single_id = None
+        if single_oid:
+            single_note = st.text_area(
+                "客服備註（可多行編輯，只套用在這一筆）",
+                value=notices.get(single_oid, ""),
+                key=f"memo_single_note_{ver}_{single_oid}",
+                height=150,
+            )
+            if st.button("🚀 執行此筆", key=f"memo_single_run_{ver}", use_container_width=True,
+                         disabled=not st.session_state.credentials_ready):
+                notices[single_oid] = single_note
+                single_id = single_oid
 
         st.markdown("---")
         step("5", "執行確認")
-        st.metric("目前勾選", len(selected_ids))
-        st.caption("執行後會把來源客服備註寫入目標訂單（僅第一部份），並把目標訂單服務狀態改為已處理。")
-        return selected_ids
+        blank = [o for o in selected_ids if not notices.get(o, "").strip()]
+        c1, c2 = st.columns(2)
+        c1.metric("目前勾選", len(selected_ids))
+        c2.metric("勾選但備註空白（不會執行）", len(blank))
+        st.caption("按上方「🚀 執行勾選項目」會把列表中的客服備註寫入勾選訂單，並把服務狀態改為已處理。")
+        return selected_ids, notices, single_id
 
     # ============================================================
     # Hero
@@ -655,7 +666,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
     MAIN_SECTION_HELP = {
         "📋 客服作業": """
         <div class="info-strip"><b>用途</b><ul>
-        <li>舊客回購：複製最近一次已服務的客服備註</li><li>新客（無相同訂單）列表</li><li>客人備註查詢</li>
+        <li>舊客回購：複製最近一次已服務的客服備註</li><li>新客／前次備註空白：列表中直接填寫</li><li>可勾選批次執行或單筆執行</li>
         </ul><b>流程</b><ol>
         <li>選擇查詢方式</li><li>查詢並預覽</li><li>勾選訂單</li><li>執行回填</li>
         </ol></div>""",
@@ -725,7 +736,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
 
         mode = st.radio(
             "",
-            ["By Google Sheet", "By 電話", "By 搜尋條件", "客人備註查詢"],
+            ["By Google Sheet", "By 電話", "By 搜尋條件"],
             horizontal=True,
             label_visibility="collapsed",
             key="memo_mode",
@@ -736,7 +747,6 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         phone_text = ""; date_mode = "服務日期"; purchase_status_name = "全部"
         start_date = None; end_date = None
         sheet_summary_btn = False; search_btn = False; execute_btn = False
-        customer_memo_btn = False; cm_start = None; cm_end = None
 
         if mode == "By Google Sheet":
             sheet_run_mode = st.radio("處理方式", ["指定列號", "依剩餘筆數處理"], horizontal=True)
@@ -771,15 +781,6 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                 search_btn = st.button("🔍 查詢列表", use_container_width=True, disabled=not st.session_state.credentials_ready)
             with c2:
                 execute_btn = st.button("🚀 執行勾選項目", use_container_width=True, disabled=not st.session_state.credentials_ready)
-
-        elif mode == "客人備註查詢":
-            c1, c2 = st.columns(2)
-            with c1:
-                cm_start = st.date_input("購買日期（開始）", value=None, key="cm_start")
-            with c2:
-                cm_end = st.date_input("購買日期（結束）", value=None, key="cm_end")
-            st.caption("付款狀態：全部｜排除代客預訂（含代客保留／系統保留單）｜只列客人備註非空白的訂單。")
-            customer_memo_btn = st.button("🔍 查詢客人備註", use_container_width=True, disabled=not st.session_state.credentials_ready)
 
         else:
             c1, c2 = st.columns(2)
@@ -822,36 +823,6 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
             finally:
                 st.session_state.is_running = False
 
-        if customer_memo_btn:
-            try:
-                st.session_state.is_running = True
-                reset_before_action(clear_preview=True, clear_selection=True)
-                st.session_state.customer_memo_rows = None
-                if not cm_start or not cm_end:
-                    raise ValueError("請選擇完整的購買日期區間")
-                with st.spinner("查詢中，請稍候…"):
-                    session = get_session(ui_logger=ui_log)
-                    st.session_state.customer_memo_rows = memo.search_customer_memo_orders(
-                        date_start=cm_start.strftime("%Y/%m/%d"),
-                        date_end=cm_end.strftime("%Y/%m/%d"),
-                        ui_logger=ui_log, session=session,
-                    )
-            except Exception as e:
-                ui_log(f"❌ 查詢錯誤：{e}")
-                st.error(str(e))
-            finally:
-                st.session_state.is_running = False
-
-        if mode == "客人備註查詢" and st.session_state.customer_memo_rows is not None:
-            st.markdown("---")
-            step("4", "客人備註查詢結果")
-            cm_rows = st.session_state.customer_memo_rows
-            if not cm_rows:
-                st.info("查無客人備註非空白的訂單")
-            else:
-                st.metric("筆數", len(cm_rows))
-                st.dataframe(cm_rows, use_container_width=True, hide_index=True)
-
         if search_btn:
             try:
                 st.session_state.is_running = True
@@ -871,6 +842,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                             purchase_status_name=purchase_status_name, ui_logger=ui_log, session=session,
                         )
                 st.session_state.preview_rows = preview_rows or []
+                st.session_state.memo_query_ver = st.session_state.get("memo_query_ver", 0) + 1
                 ui_log(f"✅ 查詢完成，共 {len(st.session_state.preview_rows)} 筆")
                 st.rerun()
             except Exception as e:
@@ -879,9 +851,12 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
             finally:
                 st.session_state.is_running = False
 
+        selected_ids, edited_notices, single_id = [], {}, None
         if mode in ["By 電話", "By 搜尋條件"] and st.session_state.preview_rows:
             st.markdown("---")
-            render_preview_blocks(st.session_state.preview_rows)
+            selected_ids, edited_notices, single_id = render_preview_blocks(st.session_state.preview_rows)
+        if single_id:
+            execute_btn = True
 
         if execute_btn:
             try:
@@ -899,17 +874,27 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                 else:
                     if not st.session_state.preview_rows:
                         raise RuntimeError("請先查詢列表")
+                    source_notice_map = {
+                        str(r.get("order_id", "")): str(r.get("source_notice_preview", "") or "").strip()
+                        for r in st.session_state.preview_rows
+                    }
+                    run_ids = [single_id] if single_id else list(selected_ids)
                     current_selected_ids = []
                     custom_notices = {}
-                    for row in st.session_state.preview_rows:
-                        if row.get("is_new_order"):
-                            continue  # 第二部份（無相同訂單）只列出，不寫入
-                        oid = str(safe_get(row, "order_id", default="")).strip()
-                        if oid and st.session_state.get(f"pick_{oid}", False):
-                            current_selected_ids.append(oid)
+                    skipped_blank = []
+                    for oid in run_ids:
+                        note = str(edited_notices.get(oid, "") or "").strip()
+                        if not note:
+                            skipped_blank.append(oid)
+                            continue
+                        current_selected_ids.append(oid)
+                        if note != source_notice_map.get(oid, ""):
+                            custom_notices[oid] = note  # 畫面上改過／人工填寫
+                    if skipped_blank:
+                        ui_log(f"⚠️ 客服備註空白，略過：{'、'.join(skipped_blank)}")
                     if not current_selected_ids:
-                        raise RuntimeError("請先勾選要執行的資料")
-                    ui_log("===== 開始執行勾選項目 =====")
+                        raise RuntimeError("沒有可執行的訂單（請勾選，且客服備註不可空白）")
+                    ui_log("===== 開始執行單筆 =====" if single_id else "===== 開始執行勾選項目 =====")
                     ui_log(f"勾選筆數：{len(current_selected_ids)}")
                     with st.spinner("執行中，請稍候…"):
                         session = get_session(ui_logger=ui_log)
