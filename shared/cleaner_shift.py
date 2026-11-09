@@ -17,7 +17,8 @@ v2026.11.09-1
   BeautifulSoup 只讀真正有 checked 屬性的 shift_ 欄位，日期由欄位名稱判斷；
   POST 也只帶回真正已勾的班，不會誤寫假欄位。
 - 新增：開排班頁時核對專員名稱，ID 對不到該檸檬人就跳過，避免勾到別人。
-- 新增 lemon_shortfall：先查班表當日當時段未配班人數，只補缺的人數；
+- 新增 count_section_available／lemon_shortfall：先用查詢班表（依客人地址）
+  看該時段可派幾人，只補缺的人數；
   快速成單與批次（批次、批次優化、批次優化＋雲端成單）共用。
 - 檸檬人已勾班／衝突時自動換下一位直到補滿；清單用完就擴大搜尋，
   失敗時只顯示統計，不再逐位列出。
@@ -390,60 +391,36 @@ def ensure_lemon_cleaner_shifts(session, base_url, service_date, period_s, perso
     }
 
 
-def count_schedule_unassigned(session, base_url, service_date, period_s):
-    """讀 /schedule 當日該時段灰底「未配班 N 人」。讀不到回傳 None（呼叫端改用原本人數）。"""
+def count_section_available(session, payload, token, slot):
+    """用「查詢班表」（後台 get_section，依客人地址／區域）算該時段可派幾人。
+
+    以 1 人查詢：時段有出現就數 cleaner 名單。回傳 0＝這個地址該時段沒人；
+    None＝查不到人數（呼叫端改用原本人數）。
+    """
+    from shared.staff_section import extract_cleaners_from_section_response, slot_exists_in_section_response
     try:
-        from bs4 import BeautifulSoup
-        resp = session.get(f"{base_url}/schedule", params={"date": str(service_date), "staffId": ""},
-                           headers=orders.HEADERS, allow_redirects=True)
-        if getattr(resp, "status_code", None) != 200:
-            return None
-        html = resp.text or ""
-        if not isinstance(html, str) or re.search(r'type=["\']password["\']', html, re.I):
-            return None
-        target = str(period_s or "").replace(" ", "")
-        mmdd = str(service_date)[5:]
-        soup = BeautifulSoup(html, "html.parser")
-        for table in soup.find_all("table"):
-            rows = table.find_all("tr")
-            if not rows:
-                continue
-            heads = [re.sub(r"\s+", "", c.get_text(" ", strip=True)) for c in rows[0].find_all(["th", "td"], recursive=False)]
-            cols = [i for i, h in enumerate(heads) if target in h]
-            if not cols:
-                continue
-            col = cols[0]
-            for row in rows[1:]:
-                cells = row.find_all(["th", "td"], recursive=False)
-                if not cells or mmdd not in cells[0].get_text(" ", strip=True):
-                    continue
-                if col >= len(cells):
-                    return None
-                m = re.search(r"未配班\s*(\d+)\s*人", cells[col].get_text(" ", strip=True))
-                return int(m.group(1)) if m else 0
-        return None
+        data = dict(payload or {})
+        data["person"] = "1"
+        raw = orders.get_all_sections_raw(session, data, token)
+        if not slot_exists_in_section_response(raw, slot):
+            return 0
+        cleaners = extract_cleaners_from_section_response(raw, slot)
+        return len(cleaners) if cleaners else None
     except Exception:
         return None
 
 
-def lemon_shortfall(session, base_url, service_date, period_s, need, api_available=0):
-    """v2026.11.09-2：先查班表，算出當日當時段缺幾人，只補缺的檸檬人。
+def lemon_shortfall(need, available=None, api_available=0):
+    """v2026.11.09-2：依查詢班表（客人地址可派的人）算缺幾人，只補缺的檸檬人。
 
-    回傳 (要補幾位, 說明)。
-    - 班表讀得到且未配班不足：補「需要 − 未配班」。
-    - 班表讀不到，或班表顯示人數夠但成單查詢仍沒有這個時段（例如未配班的人
-      不在此地址服務範圍）：沿用原本做法，補「需要 − 成單查詢已列出人數」。
+    回傳 (要補幾位, 說明)。查不到可派人數時沿用原本做法：需要 − 成單查詢已列出人數。
     """
     need = max(int(need or 0), 1)
-    api_available = max(int(api_available or 0), 0)
-    fallback = max(1, need - api_available)
-    available = count_schedule_unassigned(session, base_url, service_date, period_s)
+    fallback = max(1, need - max(int(api_available or 0), 0))
     if available is None:
-        return fallback, f"班表未配班人數讀取不到，補 {fallback} 位"
-    if need - available > 0:
-        n = need - available
-        return n, f"班表未配班 {available} 人，需要 {need} 人，補 {n} 位"
-    return fallback, f"班表未配班 {available} 人但成單查無此時段（可能不在服務範圍），補 {fallback} 位"
+        return fallback, f"查詢班表讀不到可派人數，補 {fallback} 位"
+    n = max(1, need - int(available))
+    return n, f"查詢班表此地址可派 {available} 人，需要 {need} 人，補 {n} 位"
 
 
 def _get_schedule_edit_info(session, base_url, date_str, purchase_id):
