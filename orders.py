@@ -1,10 +1,13 @@
 # ============================================================
 # 檔名：orders.py
-# 版本：v2026.10.17-1
+# 版本：v2026.11.09-1
 # 模組：批次建單核心引擎（Google Sheet → 後台訂單，供 ordersapp.py 呼叫）
 # 最後更新：2026-10-17
 #
 # Change Log
+# v2026.11.09-1
+# - 無班表的列以 1 人查詢班表，記下此地址該時段可派人數（_查詢班表可派人數，
+#   不寫入工作表），批次補檸檬人時只補缺額。
 # v2026.10.17-1（移植 orders-system）
 # - 批次建單防呆（第五批，取代 orders-system 的 monkeypatch）：should_process_row／
 #   should_create_order 狀態正規化（已有訂單編號仍做後續同步，空白訂單只建「未安排」）；
@@ -2091,6 +2094,9 @@ def process_one_group(session, rows_with_idx, token, gcal_service, region, backe
             valid_details.append(detail)
         else:
             no_slot_dates.append(detail["date"])
+            # v2026.11.09-1：以 1 人查詢班表，記下此地址該時段可派幾人，補檸檬人時只補缺額。
+            from shared.cleaner_shift import count_section_available
+            detail["section_available"] = count_section_available(session, detail["payload"], token, detail["slot"])
 
     def format_slots(details):
         return "、".join(f"{item['date']} {item['display_period']}" for item in details) or "無"
@@ -2115,6 +2121,7 @@ def process_one_group(session, rows_with_idx, token, gcal_service, region, backe
                 service_status="未處理",
                 fare="0",
             )
+            row_results[detail["row_num"]]["_查詢班表可派人數"] = detail.get("section_available")
         return row_results
 
     # 不再預設檢查「儲值金餘額是否足夠訂單金額」。
@@ -2139,6 +2146,7 @@ def process_one_group(session, rows_with_idx, token, gcal_service, region, backe
                 service_status="未處理",
                 fare="0",
             )
+            row_results[detail["row_num"]]["_查詢班表可派人數"] = detail.get("section_available")
         elif detail["date"] in insufficient_dates:
             row_results[detail["row_num"]] = build_row_result(
                 result="未送",

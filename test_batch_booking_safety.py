@@ -117,6 +117,16 @@ class LemonRetryTest(unittest.TestCase):
         self.assertTrue(all(c.kwargs['allow_auto_lemon_shift'] is False for c in core.call_args_list))
         lemon.assert_called_once()
 
+    def test_batch_adds_only_missing_by_section_query(self):
+        row = pd.Series(_row(2))
+        first = {2: {'結果': '失敗', '原因': '無班表', '_查詢班表可派人數': 1}}
+        with patch.object(orders, 'process_one_group', side_effect=[first, {}]), \
+             patch.object(orders, 'ensure_lemon_cleaner_shifts', return_value={'success': True}) as lemon, \
+             patch.object(orders, 'get_csrf_token', return_value='t2'):
+            guard.process_one_group_with_lemon_retry(object(), [(2, row)], 't', None, '台北', allow_auto_lemon_shift=True, logger=lambda m: None)
+        people, _ = orders.parse_service_human_hour(row.get('服務人時', ''), row.get('開始時間', ''), row.get('結束時間', ''))
+        self.assertEqual(int(lemon.call_args.kwargs['person_count']), max(1, int(people) - 1))
+
     def test_no_lemon_when_disabled_or_schedule_exists(self):
         row = pd.Series(_row(2))
         with patch.object(orders, 'process_one_group', return_value={2: {'結果': '失敗', '原因': '無班表'}}) as core, \

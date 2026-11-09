@@ -11,7 +11,8 @@ class LemonRetryTest(unittest.TestCase):
     def run_query(self, replies, enabled=True, pre=None):
         with patch.object(q.orders, 'get_all_sections_raw', side_effect=replies) as query, \
              patch.object(q, 'ensure_lemon_cleaner_shifts', return_value=pre or {'success': True, 'assigned': ['檸檬人1', '檸檬人2']}) as shift, \
-             patch.object(q, '_get_booking_token_for_payway', return_value='new-token'):
+             patch.object(q, '_get_booking_token_for_payway', return_value='new-token'), \
+             patch.object(q, 'count_section_available', return_value=None):
             result = q._query_booking_slot_with_lemon_retry(object(), 'https://example.invalid', '信用卡', {'person': '2'}, 'old-token', SLOT, enabled)
             return result, query, shift
 
@@ -32,6 +33,14 @@ class LemonRetryTest(unittest.TestCase):
         _, _, shift = self.run_query([initial, AVAILABLE])
         self.assertEqual(shift.call_args.kwargs['person_count'], '1')
 
+    def test_adds_only_missing_by_section_query(self):
+        with patch.object(q.orders, 'get_all_sections_raw', side_effect=['[]', AVAILABLE]), \
+             patch.object(q, 'count_section_available', return_value=1), \
+             patch.object(q, 'ensure_lemon_cleaner_shifts', return_value={'success': True}) as shift, \
+             patch.object(q, '_get_booking_token_for_payway', return_value='t2'):
+            q._query_booking_slot_with_lemon_retry(object(), 'b', '信用卡', {'person': '3'}, 't', SLOT, True)
+        self.assertEqual(shift.call_args.kwargs['person_count'], '2')
+
     def test_disabled_never_adds_shifts(self):
         with patch.object(q.orders, 'get_all_sections_raw', return_value='[]'), \
              patch.object(q, 'ensure_lemon_cleaner_shifts') as shift:
@@ -39,9 +48,11 @@ class LemonRetryTest(unittest.TestCase):
                 q._query_booking_slot_with_lemon_retry(object(), '', 'ATM', {'person': '2'}, '', SLOT, False)
             shift.assert_not_called()
 
-    def test_failed_retry_shows_actual_skip_reason(self):
-        with self.assertRaisesRegex(Exception, '檸檬人1：上4衝突'):
-            self.run_query(['[]', '[]'], pre={'success': False, 'message': '可用檸檬人不足', 'skipped': [{'name': '檸檬人1', 'reason': '上4衝突'}]})
+    def test_failed_retry_shows_summary_not_each_cleaner(self):
+        with self.assertRaises(Exception) as ctx:
+            self.run_query(['[]', '[]'], pre={'success': False, 'message': '可用檸檬人不足：需要 2 位，只補到 0 位', 'skipped': [{'name': '檸檬人1', 'reason': '上4衝突'}]})
+        self.assertIn('可用檸檬人不足', str(ctx.exception))
+        self.assertNotIn('檸檬人1：上4衝突', str(ctx.exception))
 
     def test_quick_uses_batch_shift_implementation(self):
         import shared.cleaner_shift as shifts
@@ -53,7 +64,8 @@ class LemonRetryTest(unittest.TestCase):
             with self.subTest(payway=payway), \
                  patch.object(q.orders, 'get_all_sections_raw', side_effect=['[]', AVAILABLE]), \
                  patch.object(q, 'ensure_lemon_cleaner_shifts', return_value={'success': True}), \
-                 patch.object(q, '_get_booking_token_for_payway', return_value='fresh') as refresh:
+                 patch.object(q, '_get_booking_token_for_payway', return_value='fresh') as refresh, \
+                 patch.object(q, 'count_section_available', return_value=None):
                 q._query_booking_slot_with_lemon_retry('s', 'base', payway, {'person': '2'}, 'old', SLOT, True)
                 refresh.assert_called_once_with('s', 'base', payway)
 

@@ -22,8 +22,9 @@ class LemonShiftConflictTest(unittest.TestCase):
         result, session = self.run_set({'上3'}, after={'上3', '下3'})
         self.assertTrue(result['success'])
         fields = session.post.call_args.kwargs['data']
-        self.assertIn(('shift_2026-09-26_1', 'v1'), fields)
-        self.assertIn(('shift_2026-09-26_2', shifts._shift_code_to_value('下3')), fields)
+        self.assertEqual(fields['shift_2026-09-26_1'], 'v1')
+        self.assertEqual(fields['shift_2026-09-26_2'], shifts._shift_code_to_value('下3'))
+        self.assertIn('Referer', session.post.call_args.kwargs['headers'])
 
     def test_conflicting_shift_is_excluded(self):
         result, session = self.run_set({'下2'})

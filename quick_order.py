@@ -1,9 +1,15 @@
 # ============================================================
 # 檔名：quick_order.py
-# 版本：v8.66
-# 最後更新：2026-10-16
+# 版本：v8.67
+# 最後更新：2026-11-09
 #
 # Change Log
+# v8.67
+# - 自動補檸檬人：先用查詢班表（依客人地址）看該時段可派幾人，只補缺的人數
+#   （與批次共用 shared/cleaner_shift.lemon_shortfall）。
+# - 自動補檸檬人：已勾班／衝突時自動換下一位直到補滿，失敗訊息只顯示
+#   統計（已檢查幾位、幾位已有班），不再逐位列出。
+# - 修正當天沒有檸檬人勾班卻被判成「已勾班」的誤判（見 shared/cleaner_shift.py）。
 # v8.66
 # - 修正新客、建了會員但沒成單的客人、舊客新地址全部無法成單
 #   （後台班表回覆：[]）：v8.65 起地址流程完全不查服務區域，會員地址
@@ -484,7 +490,7 @@ from shared.cleaner_shift import (
     _shift_code_to_value, _shift_code_to_group, _shift_codes_conflict,
     _parse_cleaner_shift_page, _get_cleaner_shift_form_info, _get_cleaner_shifts_on_date,
     _search_lemon_cleaners, _set_cleaner_shift_if_available, ensure_lemon_cleaner_shifts,
-    _get_schedule_edit_info,
+    _get_schedule_edit_info, lemon_shortfall, count_section_available,
 )
 
 from shared.backend_client import (
@@ -4288,20 +4294,21 @@ def _query_booking_slot_with_lemon_retry(session, base_url, payway, data, token,
     shortage = not found or (bool(cleaners) and len(cleaners) < need)
     if shortage and allow_auto_lemon_shift:
         service_date, period = slot.split("_", 1)
+        # v8.67：先用查詢班表（依客人地址）看該時段缺幾人，只補缺的檸檬人（與批次共用）。
+        available = len(cleaners) if cleaners else count_section_available(session, data, token, slot)
+        add_count, basis = lemon_shortfall(need, available, len(cleaners))
         pre = ensure_lemon_cleaner_shifts(
             session=session, base_url=base_url, service_date=service_date,
-            period_s=period, person_count=str(max(1, need - len(cleaners))),
+            period_s=period, person_count=str(add_count),
         ) or {}
+        pre["message"] = f"{basis}；{pre.get('message', '')}"
         token = _get_booking_token_for_payway(session, base_url, payway)
         raw = orders.get_all_sections_raw(session, data, token)
         found = slot_exists_in_section_response(raw, slot)
     if not found:
         service_date_of_slot = slot.split("_", 1)[0]
-        details = [str(pre.get("message") or "")]
-        for item in pre.get("skipped", []) or []:
-            if isinstance(item, dict):
-                details.append(f"{item.get('name', '')}：{item.get('reason') or item.get('message') or ''}")
-        shift_message = "；".join(x for x in details if x)
+        # v8.67：只顯示補班統計，不逐位列出檸檬人（逐位原因留在 pre["skipped"]）。
+        shift_message = str(pre.get("message") or "")
         period_of_slot = slot.split("_", 1)[1] if "_" in slot else ""
         others = _sections_on_date(raw, service_date_of_slot)
         raise Exception(
