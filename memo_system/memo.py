@@ -9,6 +9,10 @@
 #      取最近一筆有客服備註的訂單；不再要求來源單已付款＋已處理）。
 #   2. 同電話＋同地址之前無訂單 → 只列出訂單號碼／姓名／電話／地址／付款狀態。
 #   preview row 新增 has_history 欄位，來源備註預覽改為完整內容。
+# - 勾選執行／單筆執行可帶入畫面上編輯過的客服備註（override_notice），
+#   有相同訂單但無可複製備註、或無相同訂單的訂單，填入備註後也可執行。
+# - preview row 新增 latest_same_order_id／latest_same_order_date（最近一筆
+#   同電話＋同地址訂單，供人工參考）。
 # - 新增 search_customer_memo_orders()：依購買日期區間＋全部付款狀態，
 #   排除代客預訂（列表含「代客預訂／代客預約」或客人備註含「代客保留／
 #   系統保留單」），列出客人備註非空白的訂單（含客人備註、客服備註）。
@@ -1002,9 +1006,25 @@ def find_best_source_order(current_item: Dict, history_items: List[Dict]) -> Opt
     return candidates[0]
 
 
+def find_latest_same_order(current_item: Dict, history_items: List[Dict]) -> Optional[Dict]:
+    """最近一筆同電話＋同地址的其他訂單（不限狀態、不限備註），供人工參考。"""
+    same = [
+        x for x in history_items
+        if x.get("order_no") != current_item.get("order_no")
+        and same_phone(x.get("phone", ""), current_item.get("phone", ""))
+        and same_address(x.get("address", ""), current_item.get("address", ""))
+        and item_service_date_obj(x)
+    ]
+    if not same:
+        return None
+    same.sort(key=lambda k: item_service_date_obj(k), reverse=True)
+    return same[0]
+
+
 def build_preview_row(target: Dict, history_items: List[Dict]) -> Dict:
     has_history = has_any_same_address_history(target, history_items)
     source = find_best_source_order(target, history_items) if has_history else None
+    latest = find_latest_same_order(target, history_items) if has_history and not source else None
 
     return {
         "order_id": target.get("order_no", ""),
@@ -1020,6 +1040,8 @@ def build_preview_row(target: Dict, history_items: List[Dict]) -> Dict:
         "source_status_name": source.get("status", "") if source else "",
         "source_notice_exists": bool(source),
         "source_notice_preview": str(source.get("notice", "")).strip() if source else "",
+        "latest_same_order_id": latest.get("order_no", "") if latest else "",
+        "latest_same_order_date": display_service_date(latest) if latest else "",
         "has_history": has_history,
         "can_autofill": bool(source),
         "is_new_order": not has_history,
@@ -1091,7 +1113,7 @@ def verify_update(session, edit_url, phone, expected_notice, order_no=None):
     return notice_ok and progress_ok, form
 
 
-def get_target_and_source_for_order(session, target: Dict, log) -> Dict:
+def get_target_and_source_for_order(session, target: Dict, log, override_notice: Optional[str] = None) -> Dict:
     target_order_no = target.get("order_no", "")
     target_form = parse_edit_page(session, target["edit_url"], target.get("phone", ""))
 
@@ -1137,6 +1159,25 @@ def get_target_and_source_for_order(session, target: Dict, log) -> Dict:
         }
 
     source = find_best_source_order(target_item, items)
+    manual_notice = str(override_notice or "").strip()
+
+    if manual_notice:
+        # 畫面上有填／改過客服備註 → 以畫面內容為準（有來源單時仍保留來源單資訊供 log）
+        log(f"[人工備註] {target_order_no}：使用畫面填入的客服備註")
+        return {
+            "target_form": target_form,
+            "target_phone": target_phone,
+            "target_name": target_name,
+            "target_addr": target_addr,
+            "target_service_date": target_service_date,
+            "source": source or {
+                "order_no": "（人工填寫）",
+                "purchase_status_name": "",
+                "status": "",
+                "service_date": "",
+            },
+            "source_notice": manual_notice,
+        }
 
     if not source:
         if not has_any_same_address_history(target_item, items):
@@ -1176,7 +1217,7 @@ def execute_target_order(session, target: Dict, source_type: str, source_value: 
     CURRENT_ROW_LOGS.clear()
 
     target_order_no = target.get("order_no", "")
-    meta = get_target_and_source_for_order(session, target, log)
+    meta = get_target_and_source_for_order(session, target, log, override_notice=override_notice)
 
     target_form = meta["target_form"]
     target_phone = meta["target_phone"]
@@ -1185,11 +1226,6 @@ def execute_target_order(session, target: Dict, source_type: str, source_value: 
     target_service_date = meta["target_service_date"]
     source = meta["source"]
     source_notice = meta["source_notice"]
-
-    # 新成單（找不到歷史來源訂單）時，如果使用者有自己編輯過提醒文字，優先採用使用者輸入的內容，
-    # 不強制使用寫死的 DEFAULT_NEW_ORDER_NOTICE。
-    if source.get("order_no") == "（新成單）" and override_notice is not None and override_notice.strip():
-        source_notice = override_notice.strip()
 
     log(f"\n===== 處理訂單 {target_order_no} =====")
     log(f"目前訂單: {target_order_no}")
