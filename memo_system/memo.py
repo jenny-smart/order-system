@@ -2,6 +2,11 @@
 # -*- coding: utf-8 -*-
 # ============================================================
 # 更新記錄：
+# 2026-11-10
+# - 修正勾選執行／單筆執行出現 APIError「Page Not Found」：order-system 的
+#   env.py 沒有 SHEET_ID、Streamlit secrets 也沒設，memo_log 用空白 ID 開
+#   Google Sheet 失敗，整個執行中斷。memo_log 改為輔助紀錄：開不了或寫入
+#   失敗只在畫面 LOG 提示，不再擋住後台回寫（get_log_ws_safe）。
 # 2026-11-09
 # - 查訂單備註改成兩部份：
 #   1. 同電話＋同地址之前有訂單 → 自動複製「離現在最近一次已服務日期」
@@ -361,6 +366,23 @@ def get_log_ws():
         return ws
 
 
+def get_log_ws_safe(log=None):
+    """
+    memo_log 只是輔助紀錄：SHEET_ID 未設定或試算表開不了時回傳 None，
+    不中斷後台回寫（執行 Log 另由 memo_router 記錄）。
+    """
+    if not SHEET_ID:
+        if log:
+            log("⚠️ 未設定 SHEET_ID，本次不寫入 memo_log 工作表（後台回寫照常執行）")
+        return None
+    try:
+        return get_log_ws()
+    except Exception as e:
+        if log:
+            log(f"⚠️ memo_log 工作表無法開啟，本次不寫入（後台回寫照常執行）：{type(e).__name__}")
+        return None
+
+
 def append_log_row(
     log_ws,
     source_type: str,
@@ -378,6 +400,21 @@ def append_log_row(
     error_msg: str,
     full_log: str,
 ):
+    if log_ws is None:
+        return
+    try:
+        _append_log_row_raw(log_ws, source_type, source_value, phone, name, address,
+                            current_order, current_service_date, prev_order,
+                            prev_service_date, prev_notice, updated_orders,
+                            status, error_msg, full_log)
+    except Exception:
+        pass  # memo_log 寫入失敗不影響後台回寫結果
+
+
+def _append_log_row_raw(log_ws, source_type, source_value, phone, name, address,
+                        current_order, current_service_date, prev_order,
+                        prev_service_date, prev_notice, updated_orders,
+                        status, error_msg, full_log):
     with_retry(
         log_ws.append_row,
         [
@@ -1648,7 +1685,7 @@ def main(row_spec="2", force=False, ui_logger=None, session=None):
 def main_by_selected_order_ids(order_ids, ui_logger=None, session=None, custom_notices: Optional[Dict[str, str]] = None):
     CURRENT_ROW_LOGS.clear()
     log = make_logger(ui_logger)
-    log_ws = get_log_ws()
+    log_ws = get_log_ws_safe(log)
     result = blank_result()
     custom_notices = custom_notices or {}
 
