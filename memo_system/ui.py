@@ -10,8 +10,6 @@
 # - 預覽改為列表（st.data_editor）：勾選＋可直接編輯客服備註，確認後再執行；
 #   另有「單筆執行」可選一筆、用多行文字框編輯備註後只執行該筆。
 #   有相同訂單但無可複製備註、或無相同訂單的訂單，填入備註後也可勾選執行。
-# - 「客人備註查詢」改為獨立功能（main_section「📝 客人備註查詢」），
-#   購買日期區間＋全部付款狀態，排除代客預訂，列出客人備註非空白訂單。
 # 2026-09-08
 # - 服務異動的預設日期與加減時判斷改用台灣時區日期。
 # 2026-07-15（二）
@@ -279,7 +277,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
 
     DEFAULT_STATE = {
         "logs": [], "result": None, "is_running": False,
-        "is_logged_in": False, "preview_rows": [], "last_mode": "", "customer_memo_rows": None, "memo_query_ver": 0,
+        "is_logged_in": False, "preview_rows": [], "last_mode": "", "memo_query_ver": 0,
         "login_identity": "", "sheet_summary": None,
         "shift_import_rows": [], "shift_dry_run_result": None,
         "lemon_candidate": None, "lemon_assign_result": None,
@@ -655,7 +653,6 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
             "功能",
             [
                 "📋 客服作業",
-                "📝 客人備註查詢",
                 "📅 排班管理",
                 "💰 財務對帳",
                 "💳 付款後5碼及星和診所比對",
@@ -673,12 +670,6 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         </ul><b>流程</b><ol>
         <li>選擇查詢方式</li><li>查詢並預覽</li><li>勾選訂單</li><li>執行回填</li>
         </ol></div>""",
-        "📝 客人備註查詢": """
-        <div class="info-strip"><b>用途</b><ul>
-        <li>依購買日期區間查詢客人備註非空白的訂單</li>
-        <li>付款狀態全部，排除代客預訂</li>
-        <li>列出訂單號碼、姓名、電話、地址、付款狀態、客人備註、客服備註</li>
-        </ul><b>只查詢，不會修改後台</b></div>""",
         "📅 排班管理": """
         <div class="info-strip"><b>可執行項目</b><ul>
         <li>排班匯入</li><li>檸檬人勾班</li><li>清空排班</li>
@@ -921,55 +912,6 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                 render_result(st.session_state.result)
             finally:
                 st.session_state.is_running = False
-
-    # ============================================================
-    # 功能：客人備註查詢（獨立功能）
-    # ============================================================
-
-    def render_customer_memo_section():
-        step("3", "設定查詢條件")
-        c1, c2 = st.columns(2)
-        with c1:
-            cm_start = st.date_input("購買日期（開始）", value=None, key="cm_start")
-        with c2:
-            cm_end = st.date_input("購買日期（結束）", value=None, key="cm_end")
-        st.caption("付款狀態：全部｜排除代客預訂（含代客保留／系統保留單）｜只列客人備註非空白的訂單。")
-        customer_memo_btn = st.button("🔍 查詢客人備註", use_container_width=True, disabled=not st.session_state.credentials_ready)
-
-        global log_box
-        with st.expander("執行 LOG", expanded=True):
-            log_box = st.empty()
-            log_box.text("\n".join(st.session_state.logs[-3000:]) if st.session_state.logs else "尚未執行")
-
-        if customer_memo_btn:
-            try:
-                st.session_state.is_running = True
-                st.session_state.logs = []
-                st.session_state.customer_memo_rows = None
-                if not cm_start or not cm_end:
-                    raise ValueError("請選擇完整的購買日期區間")
-                with st.spinner("查詢中，請稍候…"):
-                    session = get_session(ui_logger=ui_log)
-                    st.session_state.customer_memo_rows = memo.search_customer_memo_orders(
-                        date_start=cm_start.strftime("%Y/%m/%d"),
-                        date_end=cm_end.strftime("%Y/%m/%d"),
-                        ui_logger=ui_log, session=session,
-                    )
-            except Exception as e:
-                ui_log(f"❌ 查詢錯誤：{e}")
-                st.error(str(e))
-            finally:
-                st.session_state.is_running = False
-
-        if st.session_state.customer_memo_rows is not None:
-            st.markdown("---")
-            step("4", "查詢結果")
-            cm_rows = st.session_state.customer_memo_rows
-            if not cm_rows:
-                st.info("查無客人備註非空白的訂單")
-            else:
-                st.metric("筆數", len(cm_rows))
-                st.dataframe(cm_rows, use_container_width=True, hide_index=True)
 
     # ============================================================
     # 功能二：排班匯入
@@ -2022,9 +1964,6 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
 
     if main_section == "📋 客服作業":
         render_memo_section()
-
-    elif main_section == "📝 客人備註查詢":
-        render_customer_memo_section()
 
     elif main_section == "📅 排班管理":
         if shift_sub_section == "📥 排班匯入":

@@ -2,8 +2,11 @@
 # 檔名：ordersapp.py
 # 版本：v8.80
 # 模組：服務訂單系統主畫面／統一功能選單
-# 最後更新：2026-10-24
+# 最後更新：2026-11-09
 #
+# v8.82
+# - 新增獨立功能「客人備註查詢」（function/customer_memo_query.py），放在
+#   C. 稽核比對工具，不併在訂單客服備註內。
 # v8.81（同步 orders-system #103～#141）
 # - 新增「檸檬保留刪除地址」「颱風假訂單移轉」。
 # - 三種批次成單共用「本次預約對象」（預約條件階段）、O 欄內容篩選、dev 測試副本；
@@ -92,6 +95,7 @@ from function import calendar_check as _calendar_check_page
 from function import cleaner_next_day_reminder as _cleaner_next_day_page
 from function import weekend_reminder_page as _weekend_reminder_page
 from function import no_line_link_search as _no_line_link_page
+from function import customer_memo_query as _customer_memo_page
 from function import bonus_note as _bonus_note_page
 from function import order_creation as _order_creation_page
 from function import line_notice_generator as _line_notice_page
@@ -193,7 +197,6 @@ FUNCTION_OPTIONS = [
     ("颱風假訂單移轉／比對：颱風假（可連放多天）訂單依時段逐筆用「修改日期」移到指定日期區間，時段不變；並可比對移轉後訂單目前日期，找出又被改過的訂單。", "orders", "颱風假訂單移轉"),
     ("訂單班表記錄與返回：先記錄執行日期區間的訂單班表（日期／時段／專員），人員或日期被調整後可返回記錄的班表，執行前後都可複製名單。", "orders", "訂單班表記錄與返回"),
     ("訂單客服備註：舊客回購備註回填、新成單提醒建立、客服備忘錄整理。", "memo", "訂單客服備註"),
-    ("客人備註查詢：依購買日期區間列出客人備註非空白的訂單（排除代客預訂）。", "memo", "客人備註查詢"),
     ("儲值獎金備註：搜尋儲值金訂單，依姓名把獎金專員名字加進客服備註。", "orders", "儲值獎金備註"),
     ("排班管理：排班匯入、檸檬人空檔查詢、清空排班。", "memo", "排班管理"),
     ("評估文字工具：貼入評估內容，自動產生含時數／移除時數兩種版本文字。", "memo", "評估文字工具"),
@@ -201,6 +204,7 @@ FUNCTION_OPTIONS = [
     ("雙向訂單檢查：Google Sheet vs. 後台，針對已有訂單編號的工作表跟後台做雙向比對。", "orders", "雙向訂單檢查"),
     ("後台／Google 日曆雙向比對：後台 vs. Google 日曆，以事件時間與顏色做雙向比對。", "orders", "後台／Google 日曆雙向比對"),
     ("查詢無LINE連結訂單：搜尋訂購資訊裡沒有LINE連結的訂單。", "orders", "查詢無LINE連結訂單"),
+    ("客人備註查詢：依購買日期區間列出客人備註非空白的訂單（全部付款狀態，排除代客預訂）。", "orders", "客人備註查詢"),
     # ---------- D. LINE 通知／提醒 ----------
     ("已成單預約完成通知：讀取成單工作表，只對日曆有行程的訂單產生合併日期／時段 LINE 通知。", "orders", "已成單預約完成通知"),
     ("LINE 通知產生器：輸入訂單編號（含儲值金購買單）補產生通知訊息，支援多筆同時產生；可選擇標記日曆有無行程。", "orders", "LINE 通知產生器"),
@@ -229,7 +233,6 @@ FUNCTION_OPTIONS = _unique_options
 
 _MEMO_SECTION_MAP = {
     "訂單客服備註": "📋 客服作業",
-    "客人備註查詢": "📝 客人備註查詢",
     "排班管理": "📅 排班管理",
     "評估文字工具": "📐 評估文字工具",
     "台北/台中區對帳": "💰 財務對帳",
@@ -396,6 +399,8 @@ elif mode == "週末服務 LINE 提醒":
     _weekend_reminder_page.render(backend_email, backend_password, env)
 elif mode == "查詢無LINE連結訂單":
     _no_line_link_page.render(backend_email, backend_password, env)
+elif mode == "客人備註查詢":
+    _customer_memo_page.render(backend_email, backend_password, env)
 elif mode == "儲值獎金備註":
     _bonus_note_page.render(backend_email, backend_password, env)
 elif mode == "LINE 通知產生器":
