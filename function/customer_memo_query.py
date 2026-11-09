@@ -7,6 +7,8 @@
 #   付款狀態／客人備註／客服備註。只查詢，不修改後台。
 # 更新記錄：
 # 2026-11-10
+# - 頁面：電話改為後台訂單管理電話搜尋連結；查詢結果分兩區，與每日 10:00 排程相同：
+#   ① 客人備註非空白　② 客服備註需註記（標示 VIP 但非儲值金付款、**N- 但已非首次服務）。
 # - 新增 created_from／created_to：依訂購時間（列表卡片的 YYYY-MM-DD HH:MM:SS）
 #   篩選時間區間，給每日 10:00 排程（shared/customer_memo_schedule.py）使用。
 # - 結果新增「服務日期」欄。
@@ -191,13 +193,34 @@ def search_customer_memo_orders(date_start: str, date_end: str, ui_logger=None, 
     return result
 
 
+def phone_search_url(phone: str) -> str:
+    """後台訂單管理用電話搜尋的結果頁（依目前環境）。"""
+    from urllib.parse import urlencode
+
+    digits = re.sub(r"\D", "", str(phone or ""))
+    if not digits:
+        return ""
+    params = _memo.blank_list_params()
+    params["phone"] = digits
+    return f"{_memo.PURCHASE_URL}?{urlencode(params)}"
+
+
+def _show_table(rows: List[Dict]):
+    data = [{**r, "電話": phone_search_url(r.get("電話", ""))} for r in rows]
+    st.dataframe(
+        data, use_container_width=True, hide_index=True,
+        column_config={"電話": st.column_config.LinkColumn("電話", display_text=r"phone=(\d+)")},
+    )
+
+
 def render(backend_email, backend_password, env):
     step("3", "客人備註查詢")
     info_panel("功能說明", [
-        "依購買日期區間查詢，付款狀態為全部（含取消／退款）。",
-        "排除代客預訂（含代客保留、系統保留單）。",
-        "只列客人備註非空白的訂單，並顯示客服備註。",
-        "只查詢，不會修改後台。",
+        "依購買日期區間查詢，付款狀態為全部（含取消／退款），排除代客預訂（含代客保留、系統保留單）。",
+        "① 客人備註非空白的訂單，並顯示客服備註。",
+        "② 客服備註需註記：客服備註標示 **VIP** 但付款方式不是儲值金，或有 **N-** 但已非首次服務。",
+        "電話可直接點開後台訂單管理的電話搜尋結果。只查詢，不會修改後台。",
+        "每日 10:00 排程（上班日）會用相同規則貼到台北／台中內勤工作表單的「客人備註」「客服備註」分頁。",
     ])
 
     c1, c2 = st.columns(2)
@@ -207,7 +230,7 @@ def render(backend_email, backend_password, env):
         end = st.date_input("購買日期（結束）", value=None, key="cmq_end")
 
     ready = bool(str(backend_email or "").strip()) and bool(str(backend_password or "").strip())
-    run = st.button("🔍 查詢客人備註", use_container_width=True, disabled=not ready, key="cmq_run")
+    run = st.button("🔍 查詢", use_container_width=True, disabled=not ready, key="cmq_run")
 
     if "cmq_logs" not in st.session_state:
         st.session_state.cmq_logs = []
@@ -222,24 +245,37 @@ def render(backend_email, backend_password, env):
     if run:
         st.session_state.cmq_logs = []
         st.session_state.cmq_rows = None
+        st.session_state.cmq_notice_rows = None
         try:
             if not start or not end:
                 raise ValueError("請選擇完整的購買日期區間")
             _memo.set_env(env)
             _memo.set_runtime_credentials(backend_email, backend_password)
             with st.spinner("查詢中，請稍候…"):
-                st.session_state.cmq_rows = search_customer_memo_orders(
-                    start.strftime("%Y/%m/%d"), end.strftime("%Y/%m/%d"), ui_logger=ui_log,
-                )
+                ui_log("===== 客人備註／客服備註查詢 =====")
+                ui_log(f"購買日期區間: {start:%Y/%m/%d} ~ {end:%Y/%m/%d}｜付款狀態全部｜排除代客預訂")
+                session = _memo.login(ui_logger=ui_log)
+                candidates = fetch_window_orders(start.strftime("%Y/%m/%d"), end.strftime("%Y/%m/%d"), ui_log, session)
+                st.session_state.cmq_rows = customer_memo_rows(candidates)
+                ui_log(f"✅ 客人備註非空白共 {len(st.session_state.cmq_rows)} 筆")
+                ui_log("[客服備註] 檢查 VIP 非儲值金、N- 已非首次服務")
+                st.session_state.cmq_notice_rows = find_notice_flag_orders(candidates, session, log=ui_log)
         except Exception as e:
             ui_log(f"❌ 查詢錯誤：{e}")
             st.error(str(e))
 
     rows = st.session_state.get("cmq_rows")
+    notice_rows = st.session_state.get("cmq_notice_rows")
     if rows is not None:
         step("4", "查詢結果")
-        if not rows:
-            st.info("查無客人備註非空白的訂單")
+        st.markdown(f"### ① 客人備註非空白（{len(rows)} 筆）")
+        if rows:
+            _show_table(rows)
         else:
-            st.metric("筆數", len(rows))
-            st.dataframe(rows, use_container_width=True, hide_index=True)
+            st.info("查無客人備註非空白的訂單")
+        if notice_rows is not None:
+            st.markdown(f"### ② 客服備註需註記（{len(notice_rows)} 筆）")
+            if notice_rows:
+                _show_table(notice_rows)
+            else:
+                st.info("查無需要註記的客服備註")
