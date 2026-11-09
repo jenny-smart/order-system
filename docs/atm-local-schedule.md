@@ -8,6 +8,6 @@
 
 安裝或修改時段後重新載入：`bash scripts/install_atm_local_schedule.sh`。只檢查登入／工作表權限：`python3 -m memo_system.atm_schedule --check`。
 
-安裝程式會將排程所需程式及設定部署至 `~/Library/Application Support/LemonClean/atm-runtime`，避免 macOS 阻擋背景程式存取 Documents。帳密仍讀取原本的本機 accounts 檔案；不在程式內新增工作表連結。修改排程程式或設定後需重新執行安裝，以更新執行副本。可用 `ATM_RUNTIME_DIR` 指定其他背景可存取的目錄。
+安裝程式會將排程所需程式及設定部署至 `~/Library/Application Support/LemonClean/atm-runtime`，避免 macOS 阻擋背景程式存取 Documents。帳密仍讀取原本的本機 accounts 檔案；不在程式內新增工作表連結。排程每輪執行前會先從 GitHub `main` 下載最新排程程式（`memo_system/atm.py` 等，全部下載成功且可編譯才替換，失敗沿用現有副本），有變更就以新版重新執行，所以合併 PR 後不用重新安裝。修改時段（`config/atm_schedule.json`）或帳密／secrets 仍需重新執行安裝。2026-11-09 前安裝的排程沒有自動更新，需重新安裝一次。可用 `ATM_RUNTIME_DIR` 指定其他背景可存取的目錄。
 
 此排程使用 macOS LaunchAgent，不呼叫 AI。Mac 必須開機、使用者登入並保持喚醒及網路連線。關機或睡眠期間錯過的輪次直接略過，不補跑；程式只在排程指定的分鐘內執行，其他分鐘的延遲喚醒觸發也略過。執行紀錄位於 `~/Library/Logs/lemonclean-atm-unpaid.log`，同時執行以檔案鎖阻擋。
