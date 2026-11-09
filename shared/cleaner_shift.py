@@ -17,6 +17,8 @@ v2026.11.09-1
   BeautifulSoup 只讀真正有 checked 屬性的 shift_ 欄位，日期由欄位名稱判斷；
   POST 也只帶回真正已勾的班，不會誤寫假欄位。
 - 新增：開排班頁時核對專員名稱，ID 對不到該檸檬人就跳過，避免勾到別人。
+- 新增 release_unused_lemon_shifts：本次補勾的檸檬人當次用完，成單後仍在
+  班表「未配班」的（或訂單失敗時）立即取消勾班，不留到下次。
 - 新增 count_section_available／lemon_shortfall：先用查詢班表（依客人地址）
   看該時段可派幾人，只補缺的人數；
   快速成單與批次（批次、批次優化、批次優化＋雲端成單）共用。
@@ -421,6 +423,97 @@ def lemon_shortfall(need, available=None, api_available=0):
         return fallback, f"查詢班表讀不到可派人數，補 {fallback} 位"
     n = max(1, need - int(available))
     return n, f"查詢班表此地址可派 {available} 人，需要 {need} 人，補 {n} 位"
+
+
+# =============================================================================
+# v2026.11.09-3：本次勾的檸檬人當次用完——沒被訂單用到的立即取消勾班
+# =============================================================================
+def schedule_unassigned_lemons(session, base_url, service_date, period_s):
+    """讀 /schedule 當日該時段灰底「未配班」名單中的檸檬人名稱。讀不到回傳 None。"""
+    try:
+        from bs4 import BeautifulSoup
+        resp = session.get(f"{base_url}/schedule", params={"date": str(service_date), "staffId": ""},
+                           headers=orders.HEADERS, allow_redirects=True)
+        if getattr(resp, "status_code", None) != 200 or not isinstance(resp.text, str):
+            return None
+        target = str(period_s or "").replace(" ", "")
+        mmdd = str(service_date)[5:]
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for table in soup.find_all("table"):
+            rows = table.find_all("tr")
+            if not rows:
+                continue
+            heads = [re.sub(r"\s+", "", c.get_text(" ", strip=True)) for c in rows[0].find_all(["th", "td"], recursive=False)]
+            cols = [i for i, h in enumerate(heads) if h == target] or [i for i, h in enumerate(heads) if target in h]
+            if not cols:
+                continue
+            for row in rows[1:]:
+                cells = row.find_all(["th", "td"], recursive=False)
+                if not cells or mmdd not in cells[0].get_text(" ", strip=True):
+                    continue
+                if cols[0] >= len(cells):
+                    return None
+                text = cells[cols[0]].get_text(" ", strip=True)
+                idx = text.find("未配班")
+                if idx < 0:
+                    return set()
+                return set(re.findall(r"檸檬人\d+", text[idx:]))
+        return None
+    except Exception:
+        return None
+
+
+def _remove_cleaner_shift(session, base_url, cleaner_id, cleaner_name, date_str, target_shift_code):
+    """取消本次替檸檬人新增的那一個時段（其他已勾班保留）。"""
+    month = str(date_str)[:7]
+    token, existing, hidden_fields, err = _read_shift_state(session, base_url, cleaner_id, month, expected_name=cleaner_name)
+    if err:
+        return False, err
+    key = f"{date_str}_{_shift_code_to_group(target_shift_code)}"
+    if key not in existing:
+        return True, "已無此班"
+    merged = {k: v for k, v in existing.items() if k != key}
+    url = _shift_url(base_url, cleaner_id)
+    headers = dict(orders.HEADERS)
+    headers["Referer"] = f"{url}?month={month}"
+    resp = session.post(url, params={"month": month}, data=build_shift_payload(token, merged, hidden_fields),
+                        headers=headers, allow_redirects=True)
+    if resp.status_code not in (200, 302):
+        return False, f"HTTP {resp.status_code}"
+    _, after, _, _ = _read_shift_state(session, base_url, cleaner_id, month)
+    return (key not in after), ("" if key not in after else "取消後仍有勾班")
+
+
+def release_unused_lemon_shifts(session, base_url, service_date, period_s, added, order_failed=False):
+    """本次補勾、但沒有被訂單用到的檸檬人，取消勾班，不留到下次。
+
+    added：[(cleaner_id, cleaner_name), ...]，只會處理本次新增的檸檬人。
+    以班表該時段「未配班」名單判斷沒被用到；班表讀不到時，只有訂單失敗才全部取消。
+    """
+    added = [(str(i), str(n)) for i, n in (added or []) if i]
+    if not added:
+        return {"released": [], "failed": [], "message": ""}
+    code = _period_to_shift_code(period_s)
+    unused = schedule_unassigned_lemons(session, base_url, service_date, period_s)
+    if unused is None:
+        targets = added if order_failed else []
+    else:
+        targets = [(i, n) for i, n in added if n in unused]
+    released, failed = [], []
+    for cid, name in targets:
+        try:
+            ok, why = _remove_cleaner_shift(session, base_url, cid, name, service_date, code)
+        except Exception as exc:
+            ok, why = False, str(exc)
+        (released if ok else failed).append(name if ok else f"{name}（{why}）")
+    parts = []
+    if released:
+        parts.append(f"未用到的檸檬人已取消勾班：{'、'.join(released)}")
+    if failed:
+        parts.append(f"⚠️ 取消勾班失敗，請手動取消：{'、'.join(failed)}")
+    if unused is None and not order_failed:
+        parts.append("⚠️ 讀不到班表未配班名單，請確認本次補勾的檸檬人是否都有用到")
+    return {"released": released, "failed": failed, "message": "；".join(parts)}
 
 
 def _get_schedule_edit_info(session, base_url, date_str, purchase_id):

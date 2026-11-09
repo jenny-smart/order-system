@@ -11,6 +11,13 @@ order-system 改為：
 - 讀表去重、候選列、自動篩選、補檸檬人重試由本模組提供明確函式，
   由 shared/hybrid_batch_runner.py 與各批次頁面直接呼叫；
 - 檸檬人補班衝突判斷已在 shared/cleaner_shift.py（第一批移植），不再 monkeypatch。
+
+Change Log
+v2026.11.09-3
+- 本次補勾的檸檬人當次用完：重試成單後仍在班表「未配班」的（或該列失敗時）
+  立即取消勾班，不留到下次。
+v2026.11.09-2
+- 依查詢班表（客人地址可派人數）算缺幾人，只補缺的檸檬人。
 """
 from __future__ import annotations
 
@@ -341,6 +348,10 @@ def process_one_group_with_lemon_retry(session, rows_with_idx, token, gcal_servi
     if not no_slot_rows:
         return mark_lemon_staff(result)
     any_shift_added = False
+    added_by_row = {}  # v2026.11.09-3
+# - 本次補勾的檸檬人當次用完：重試成單後仍在班表「未配班」的（或該列失敗時）
+#   立即取消勾班，不留到下次。
+# v2026.11.09-3：本次補勾的檸檬人，重試後沒用到就取消勾班
     for row_no in no_slot_rows:
         row = row_map.get(row_no)
         if row is None: continue
@@ -357,8 +368,25 @@ def process_one_group_with_lemon_retry(session, rows_with_idx, token, gcal_servi
         skipped = pre.get("skipped", []) or []
         # v2026.11.09-1：已勾班的檸檬人會自動換下一位，只記統計不逐位列出。
         logger(f"🍋 第 {row_no} 列補檸檬人：成功 {len(assigned)} 人；略過 {len(skipped)} 人；{pre.get('message', '')}")
+        ids = list(pre.get("assigned_ids") or [])
+        if ids:
+            added_by_row[row_no] = (date_s, period_s, list(zip(ids, assigned)))
         if pre.get("success"): any_shift_added = True
+
+    def _release(final_result):
+        from shared.cleaner_shift import release_unused_lemon_shifts
+        for r_no, (d, p, added) in added_by_row.items():
+            info = (final_result or {}).get(r_no) or (final_result or {}).get(str(r_no)) or {}
+            failed = str(info.get("結果", "") or "") != "成功"
+            try:
+                rel = release_unused_lemon_shifts(session, orders.BASE_URL, d, p, added, order_failed=failed)
+            except Exception as exc:
+                rel = {"message": f"⚠️ 取消未用檸檬人勾班失敗：{exc}"}
+            if rel.get("message"):
+                logger(f"🍋 第 {r_no} 列 {d} {p}：{rel['message']}")
+
     if not any_shift_added:
+        _release(result)
         return mark_lemon_staff(result)
     retry_token = orders.get_csrf_token(session)
     logger("🍋 已補檸檬人，重新查班表並再次嘗試無班表的列：" + "、".join(map(str, no_slot_rows)))
@@ -370,4 +398,5 @@ def process_one_group_with_lemon_retry(session, rows_with_idx, token, gcal_servi
     )
     merged = dict(result or {})
     merged.update(retried or {})
+    _release(merged)
     return mark_lemon_staff(merged)

@@ -1,9 +1,13 @@
 # ============================================================
 # 檔名：quick_order.py
-# 版本：v8.67
+# 版本：v8.68
 # 最後更新：2026-11-09
 #
 # Change Log
+# v8.68
+# - 本次補勾的檸檬人當次用完：成單後仍在班表「未配班」的檸檬人（或訂單失敗時
+#   全部）立即取消勾班，不留到下次（shared/cleaner_shift.release_unused_lemon_shifts）。
+# - 依查詢班表缺額補檸檬人後仍查無時段，才一次多補 1 位，最多補到需要人數。
 # v8.67
 # - 自動補檸檬人：先用查詢班表（依客人地址）看該時段可派幾人，只補缺的人數
 #   （與批次共用 shared/cleaner_shift.lemon_shortfall）。
@@ -431,6 +435,7 @@ __version__ = "8.66"
 
 import time
 import re
+import contextvars
 import json
 from datetime import date, datetime, timedelta
 
@@ -490,7 +495,7 @@ from shared.cleaner_shift import (
     _shift_code_to_value, _shift_code_to_group, _shift_codes_conflict,
     _parse_cleaner_shift_page, _get_cleaner_shift_form_info, _get_cleaner_shifts_on_date,
     _search_lemon_cleaners, _set_cleaner_shift_if_available, ensure_lemon_cleaner_shifts,
-    _get_schedule_edit_info, lemon_shortfall, count_section_available,
+    _get_schedule_edit_info, lemon_shortfall, count_section_available, release_unused_lemon_shifts,
 )
 
 from shared.backend_client import (
@@ -1025,7 +1030,48 @@ def _sections_on_date(raw, service_date):
     return "；".join(sections)
 
 
-def quick_create_order(
+_LEMON_TRACKER = contextvars.ContextVar("lemon_tracker", default=None)
+
+
+def _release_tracked_lemons(tracker, order_failed):
+    msgs = []
+    for item in tracker or []:
+        try:
+            res = release_unused_lemon_shifts(item["session"], item["base_url"], item["date"], item["period"],
+                                              item["added"], order_failed=order_failed)
+            if res.get("message"):
+                msgs.append(res["message"])
+        except Exception as exc:
+            msgs.append(f"⚠️ 取消未用檸檬人勾班失敗：{exc}")
+    return "；".join(msgs)
+
+
+def quick_create_order(*args, **kwargs):
+    """v8.68：包住實際成單；本次補勾的檸檬人成單後沒用到（或訂單失敗）就取消勾班。"""
+    tracker = []
+    reset = _LEMON_TRACKER.set(tracker)
+    try:
+        result = _quick_create_order_impl(*args, **kwargs)
+    except Exception as exc:
+        _LEMON_TRACKER.reset(reset)
+        note = _release_tracked_lemons(tracker, order_failed=True)
+        if note:
+            raise Exception(f"{exc}（{note}）") from exc
+        raise
+    _LEMON_TRACKER.reset(reset)
+    note = _release_tracked_lemons(tracker, order_failed=False)
+    if note:
+        if isinstance(result, dict):
+            result["lemon_release"] = note
+        try:
+            import streamlit as _st
+            (_st.warning if "⚠️" in note else _st.info)(f"🍋 訂單 {(result or {}).get('order_no', '')}：{note}")
+        except Exception:
+            pass
+    return result
+
+
+def _quick_create_order_impl(
     env_name, payway, region, lookup_result, address, clean_type_id,
     date_s, period_s, hour, person="2", fallback_fare="0", discount_code="",
     payment_type="", carrier_info="", company_no="", company_title="",
@@ -4294,17 +4340,36 @@ def _query_booking_slot_with_lemon_retry(session, base_url, payway, data, token,
     shortage = not found or (bool(cleaners) and len(cleaners) < need)
     if shortage and allow_auto_lemon_shift:
         service_date, period = slot.split("_", 1)
-        # v8.67：先用查詢班表（依客人地址）看該時段缺幾人，只補缺的檸檬人（與批次共用）。
+        # v8.68：先用查詢班表（依客人地址）看缺幾人，只補缺額；仍查不到時段才一次多補 1 位，
+        # 最多補到需要人數。本次補勾的檸檬人記錄下來，成單後沒用到的取消勾班。
         available = len(cleaners) if cleaners else count_section_available(session, data, token, slot)
         add_count, basis = lemon_shortfall(need, available, len(cleaners))
-        pre = ensure_lemon_cleaner_shifts(
-            session=session, base_url=base_url, service_date=service_date,
-            period_s=period, person_count=str(add_count),
-        ) or {}
-        pre["message"] = f"{basis}；{pre.get('message', '')}"
-        token = _get_booking_token_for_payway(session, base_url, payway)
-        raw = orders.get_all_sections_raw(session, data, token)
-        found = slot_exists_in_section_response(raw, slot)
+        tracker = _LEMON_TRACKER.get()
+        total_added = 0
+        msgs = []
+        while True:
+            step = ensure_lemon_cleaner_shifts(
+                session=session, base_url=base_url, service_date=service_date,
+                period_s=period, person_count=str(add_count),
+            ) or {}
+            ids = list(step.get("assigned_ids") or [])
+            names = list(step.get("assigned") or [])
+            if tracker is not None and ids:
+                tracker.append({"session": session, "base_url": base_url, "date": service_date,
+                                "period": period, "added": list(zip(ids, names))})
+            total_added += len(names)
+            pre.setdefault("assigned", []).extend(names)
+            pre.setdefault("skipped", []).extend(step.get("skipped") or [])
+            pre["success"] = bool(step.get("success"))
+            msgs.append(str(step.get("message") or ""))
+            token = _get_booking_token_for_payway(session, base_url, payway)
+            raw = orders.get_all_sections_raw(session, data, token)
+            found = slot_exists_in_section_response(raw, slot)
+            if found or not step.get("success") or total_added >= need:
+                break
+            add_count = 1
+            msgs.append("仍查無此時段，再補 1 位")
+        pre["message"] = f"{basis}；" + "；".join(m for m in msgs if m)
     if not found:
         service_date_of_slot = slot.split("_", 1)[0]
         # v8.67：只顯示補班統計，不逐位列出檸檬人（逐位原因留在 pre["skipped"]）。
