@@ -1,15 +1,64 @@
-"""ATM 本機排程；設定與辦公日曆皆由檔案讀取，不使用 AI。"""
+"""ATM 本機排程；設定與辦公日曆皆由檔案讀取，不使用 AI。
+
+2026-11-09：執行副本（atm-runtime）每輪先從 GitHub main 更新程式，有變更就以新版重新執行；
+原本只在重新安裝時才更新，11/07 起 ① 待對帳填 G:O（N/O）的修改沒有進到排程。
+"""
 import argparse
 import fcntl
 import json
 import os
+import sys
 import tempfile
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 
 DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "config" / "atm_schedule.json"
+RUNTIME_ROOT = Path(__file__).resolve().parents[1]
+UPDATE_BASE_URL = os.getenv(
+    "ATM_UPDATE_URL", "https://raw.githubusercontent.com/jenny-smart/order-system/main"
+)
+# 與 scripts/install_atm_local_schedule.sh 複製到執行副本的程式一致（accounts.py／secrets 不更新）
+RUNTIME_FILES = (
+    "memo_system/__init__.py",
+    "memo_system/atm.py",
+    "memo_system/atm_schedule.py",
+    "memo_system/memo.py",
+    "shared/__init__.py",
+    "shared/lemon_backend_login.py",
+    "year_roots.py",
+    "config/taiwan_work_calendar.json",
+)
+
+
+def _fetch(path, timeout=20):
+    with urllib.request.urlopen(f"{UPDATE_BASE_URL}/{path}", timeout=timeout) as resp:
+        return resp.read()
+
+
+def self_update(root=RUNTIME_ROOT, fetch=_fetch):
+    """全部下載成功且 .py 可編譯才寫入（全有或全無）；回傳有變更的檔案。失敗保留原副本。"""
+    downloaded = {}
+    for path in RUNTIME_FILES:
+        data = fetch(path)
+        if path.endswith(".py"):
+            compile(data, path, "exec")
+        elif path.endswith(".json"):
+            json.loads(data.decode("utf-8"))
+        downloaded[path] = data
+    changed = []
+    for path, data in downloaded.items():
+        target = Path(root) / path
+        if target.is_file() and target.read_bytes() == data:
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_name(target.name + ".tmp")
+        tmp.write_bytes(data)
+        os.replace(tmp, target)
+        changed.append(path)
+    return changed
 
 
 def load_config():
@@ -69,9 +118,20 @@ def main():
         print(f"日曆日期數：{len(calendar['days'])}；每日輪數：{len(scheduled_slots(config))}")
         return
     reason = skip_reason(now, config, calendar)
-    if reason:
+    updated = os.getenv("ATM_UPDATED") == "1"
+    if reason and not (updated and reason.startswith("非排程分鐘")):
         print(f"{now.isoformat()} 略過：{reason}")
         return
+    if os.getenv("ATM_AUTO_UPDATE") == "1" and not updated:
+        try:
+            changed = self_update()
+        except Exception as exc:
+            changed = []
+            print(f"{now.isoformat()} 程式更新失敗，沿用現有副本：{exc}")
+        if changed:
+            print(f"{now.isoformat()} 已更新：{', '.join(changed)}，以新版重新執行")
+            os.environ["ATM_UPDATED"] = "1"
+            os.execv(sys.executable, [sys.executable, "-m", "memo_system.atm", *sys.argv[1:]])
     # 避免手動補跑與排程同時插入相同訂單。
     lock_path = Path(tempfile.gettempdir()) / "lemonclean-atm-unpaid.lock"
     with lock_path.open("a") as lock:

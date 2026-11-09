@@ -86,6 +86,8 @@ if secrets.is_file():
 payload["WorkingDirectory"] = str(runtime_dir)
 payload["EnvironmentVariables"]["PYTHONPATH"] = str(runtime_dir)
 payload["EnvironmentVariables"]["ATM_SCHEDULE_CONFIG"] = str(runtime_dir / "config" / "atm_schedule.json")
+# 每輪先從 GitHub main 更新執行副本程式，之後改程式不用再重新安裝
+payload["EnvironmentVariables"]["ATM_AUTO_UPDATE"] = "1"
 payload["StartCalendarInterval"] = [
     {"Hour": slot // 60, "Minute": slot % 60}
     for slot in scheduled_slots(config)
