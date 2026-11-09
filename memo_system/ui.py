@@ -3,6 +3,9 @@
 # 說明：整併進 tool-system，包成 render_memo_system() 供
 #       pages/訂單系統.py 呼叫。
 # 更新記錄：
+# 2026-11-10
+# - 訂單客服備註（By 電話／By 搜尋條件）：拿掉上方「🚀 執行勾選項目」，
+#   改在①、②列表下方各放一顆批次執行按鈕，只執行該區勾選的訂單。
 # 2026-11-09
 # - 查訂單備註預覽分成兩部份：①同電話＋同地址之前有訂單 → 自動複製最近一次
 #   已服務日期的客服備註；②之前無相同訂單 → 只列出訂單號碼／姓名／電話／
@@ -442,13 +445,14 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
     def render_preview_blocks(rows):
         """
         列表預覽：勾選＋可編輯客服備註。
-        回傳 (selected_ids, notices, single_id)：
-          selected_ids 勾選的訂單；notices 每筆畫面上的客服備註；single_id 按了「執行此筆」的訂單。
+        回傳 (run_ids, notices, run_label)：
+          run_ids 這次按鈕要執行的訂單（①／②批次或單筆）；notices 每筆畫面上的客服備註；
+          run_label 給 LOG 用的執行名稱。沒按任何執行按鈕時 run_ids 為空。
         """
         step("4", "查詢結果列表")
         if not rows:
             st.info("查無資料")
-            return [], {}, None
+            return [], {}, ""
 
         ver = st.session_state.get("memo_query_ver", 0)
         history_rows = [r for r in rows if r.get("has_history", not r.get("is_new_order"))]
@@ -475,7 +479,8 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
             st.markdown(f"### {title}")
             if not items:
                 st.caption("沒有資料")
-                return
+                return []
+            section_selected = []
             data = []
             for r in items:
                 row = {
@@ -515,11 +520,36 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                 notices[oid] = str(rec.get("客服備註（將寫入）") or "")
                 if rec.get("選取"):
                     selected_ids.append(oid)
+                    section_selected.append(oid)
+            return section_selected
 
-        _editor("① 之前有相同訂單（電話＋地址）", history_rows, "memo_ed_history", True)
-        st.caption("自動帶入離現在最近一次已服務日期（≤ 今天）的客服備註；前次備註空白的，參照訂單欄列出最近一筆同電話＋同地址訂單，請自行填寫後勾選。")
-        _editor("② 之前無相同訂單（電話＋地址）", new_rows, "memo_ed_new", False)
-        st.caption("新客預設不勾選；需要寫入時請填寫客服備註後勾選。")
+        def _batch_button(label, section_ids, key):
+            blank = [o for o in section_ids if not notices.get(o, "").strip()]
+            c1, c2 = st.columns([3, 2])
+            with c1:
+                clicked = st.button(
+                    f"🚀 {label}（勾選 {len(section_ids)} 筆）",
+                    key=f"{key}_{ver}",
+                    use_container_width=True,
+                    disabled=not (st.session_state.credentials_ready and section_ids),
+                )
+            with c2:
+                st.caption(f"備註空白不會執行：{len(blank)} 筆" if blank else "勾選的訂單都有客服備註")
+            return clicked
+
+        run_ids, run_label = [], ""
+
+        hist_sel = _editor("① 之前有相同訂單（電話＋地址）", history_rows, "memo_ed_history", True)
+        if history_rows:
+            st.caption("自動帶入離現在最近一次已服務日期（≤ 今天）的客服備註；前次備註空白的，參照訂單欄列出最近一筆同電話＋同地址訂單，請自行填寫後勾選。")
+            if _batch_button("批次執行①", hist_sel, "memo_run_history"):
+                run_ids, run_label = list(hist_sel), "批次執行①"
+
+        new_sel = _editor("② 之前無相同訂單（電話＋地址）", new_rows, "memo_ed_new", False)
+        if new_rows:
+            st.caption("新客預設不勾選；需要寫入時請填寫客服備註後勾選。")
+            if _batch_button("批次執行②", new_sel, "memo_run_new"):
+                run_ids, run_label = list(new_sel), "批次執行②"
 
         # 單筆執行：多行編輯備註後只執行這一筆
         st.markdown("### 單筆執行")
@@ -530,7 +560,6 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
             format_func=lambda o: f"{o}｜{row_map[o].get('customer_name', '')}｜{row_map[o].get('address', '')}",
             key=f"memo_single_pick_{ver}",
         )
-        single_id = None
         if single_oid:
             single_note = st.text_area(
                 "客服備註（可多行編輯，只套用在這一筆）",
@@ -541,16 +570,10 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
             if st.button("🚀 執行此筆", key=f"memo_single_run_{ver}", use_container_width=True,
                          disabled=not st.session_state.credentials_ready):
                 notices[single_oid] = single_note
-                single_id = single_oid
+                run_ids, run_label = [single_oid], "單筆執行"
 
-        st.markdown("---")
-        step("5", "執行確認")
-        blank = [o for o in selected_ids if not notices.get(o, "").strip()]
-        c1, c2 = st.columns(2)
-        c1.metric("目前勾選", len(selected_ids))
-        c2.metric("勾選但備註空白（不會執行）", len(blank))
-        st.caption("按上方「🚀 執行勾選項目」會把列表中的客服備註寫入勾選訂單，並把服務狀態改為已處理。")
-        return selected_ids, notices, single_id
+        st.caption("執行會把客服備註寫入訂單，並把服務狀態改為已處理；結果與 LOG 顯示在上方「執行 LOG」。")
+        return run_ids, notices, run_label
 
     # ============================================================
     # Hero
@@ -776,11 +799,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         elif mode == "By 電話":
             phone_text = st.text_area("電話號碼", placeholder="可輸入多支，以逗號或換行分隔，例：0912345678,0922345678")
             st.caption("會先找出「目標訂單」，再比對最近一筆可參照的來源訂單。")
-            c1, c2 = st.columns(2)
-            with c1:
-                search_btn = st.button("🔍 查詢列表", use_container_width=True, disabled=not st.session_state.credentials_ready)
-            with c2:
-                execute_btn = st.button("🚀 執行勾選項目", use_container_width=True, disabled=not st.session_state.credentials_ready)
+            search_btn = st.button("🔍 查詢列表", use_container_width=True, disabled=not st.session_state.credentials_ready)
 
         else:
             c1, c2 = st.columns(2)
@@ -794,11 +813,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
             with c4:
                 end_date = st.date_input("結束日期", value=None)
             st.caption("搜尋條件固定只撈服務狀態＝未處理的目標訂單，再比對最近的可參照來源。")
-            c5, c6 = st.columns(2)
-            with c5:
-                search_btn = st.button("🔍 查詢列表", use_container_width=True, disabled=not st.session_state.credentials_ready)
-            with c6:
-                execute_btn = st.button("🚀 執行勾選項目", use_container_width=True, disabled=not st.session_state.credentials_ready)
+            search_btn = st.button("🔍 查詢列表", use_container_width=True, disabled=not st.session_state.credentials_ready)
 
         global log_box, result_container
         with st.expander("執行 LOG", expanded=True):
@@ -851,11 +866,11 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
             finally:
                 st.session_state.is_running = False
 
-        selected_ids, edited_notices, single_id = [], {}, None
+        run_ids, edited_notices, run_label = [], {}, ""
         if mode in ["By 電話", "By 搜尋條件"] and st.session_state.preview_rows:
             st.markdown("---")
-            selected_ids, edited_notices, single_id = render_preview_blocks(st.session_state.preview_rows)
-        if single_id:
+            run_ids, edited_notices, run_label = render_preview_blocks(st.session_state.preview_rows)
+        if run_ids:
             execute_btn = True
 
         if execute_btn:
@@ -878,7 +893,6 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                         str(r.get("order_id", "")): str(r.get("source_notice_preview", "") or "").strip()
                         for r in st.session_state.preview_rows
                     }
-                    run_ids = [single_id] if single_id else list(selected_ids)
                     current_selected_ids = []
                     custom_notices = {}
                     skipped_blank = []
@@ -894,7 +908,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                         ui_log(f"⚠️ 客服備註空白，略過：{'、'.join(skipped_blank)}")
                     if not current_selected_ids:
                         raise RuntimeError("沒有可執行的訂單（請勾選，且客服備註不可空白）")
-                    ui_log("===== 開始執行單筆 =====" if single_id else "===== 開始執行勾選項目 =====")
+                    ui_log(f"===== 開始{run_label or '執行'} =====")
                     ui_log(f"勾選筆數：{len(current_selected_ids)}")
                     with st.spinner("執行中，請稍候…"):
                         session = get_session(ui_logger=ui_log)
