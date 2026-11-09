@@ -1,8 +1,26 @@
 # memo.py
 # -*- coding: utf-8 -*-
+# ============================================================
+# 更新記錄：
+# 2026-11-09
+# - 查訂單備註改成兩部份：
+#   1. 同電話＋同地址之前有訂單 → 自動複製「離現在最近一次已服務日期」
+#      的客服備註（服務日期 ≤ 今天且早於目標單，排除取消訂單／已退款，
+#      取最近一筆有客服備註的訂單；不再要求來源單已付款＋已處理）。
+#   2. 同電話＋同地址之前無訂單 → 只列出訂單號碼／姓名／電話／地址／付款狀態。
+#   preview row 新增 has_history 欄位，來源備註預覽改為完整內容。
+# - 新增 search_customer_memo_orders()：依購買日期區間＋全部付款狀態，
+#   排除代客預訂（列表含「代客預訂／代客預約」或客人備註含「代客保留／
+#   系統保留單」），列出客人備註非空白的訂單（含客人備註、客服備註）。
+# - 列表查詢改為自動翻頁（fetch_purchase_list_all_pages），避免同電話
+#   超過 20 筆時漏抓最近一次訂單。
+# - parse_edit_page 新增 customer_memo（從頁面 Vue purchase JSON 讀取）。
+# ============================================================
 import re
+import json
 import time
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from typing import Optional, List, Dict, Callable
 
 import streamlit as st  # 僅用於讀取 st.secrets，不做任何畫面輸出
@@ -268,6 +286,25 @@ def item_service_date_obj(item: Dict):
     return item.get("service_date_obj") or item.get("raw_date_obj")
 
 
+def today_tw() -> datetime:
+    """台灣時區今天 00:00（naive datetime，方便跟 parse_date 結果比較）。"""
+    now = datetime.now(ZoneInfo("Asia/Taipei"))
+    return datetime(now.year, now.month, now.day)
+
+
+# 代客預訂判斷：列表卡片會出現「代客預訂：專員名」；客人備註為代客保留／系統保留單也視為代客單
+PROXY_ROW_KEYWORDS = ("代客預訂", "代客預約")
+PROXY_MEMO_KEYWORDS = ("代客保留", "系統保留單")
+
+
+def is_proxy_order(item: Dict, customer_memo: str = "") -> bool:
+    row_text = str(item.get("row_text", "") or "")
+    if any(k in row_text for k in PROXY_ROW_KEYWORDS):
+        return True
+    memo = str(customer_memo or "")
+    return any(k in memo for k in PROXY_MEMO_KEYWORDS)
+
+
 def get_spreadsheet():
     """
     v2026.07.11：修正憑證讀取邏輯——原本只檢查 st.secrets["GOOGLE_SERVICE_
@@ -495,6 +532,7 @@ def parse_purchase_row_text(txt: str) -> Dict:
         "service_date": "",
         "service_date_obj": None,
         "notice": "",
+        "row_text": txt,
         "_detail": {},
     }
 
@@ -525,41 +563,56 @@ def parse_purchase_list_page(html: str) -> List[Dict]:
     return list(dedup.values())
 
 
+LIST_MAX_PAGES = 100
+PHONE_HISTORY_MAX_PAGES = 15
+
+
+def fetch_purchase_list_all_pages(session, params: Dict, max_pages: int = LIST_MAX_PAGES, log=None, debug_first_page: bool = False) -> List[Dict]:
+    """
+    依同一組條件自動翻頁抓列表（後台每頁 20 筆）。
+    沒有資料或整頁都是已抓過的訂單時停止，避免後台忽略 page 參數造成無窮迴圈。
+    """
+    merged: Dict[str, Dict] = {}
+    for page in range(1, max_pages + 1):
+        page_params = dict(params)
+        page_params["page"] = str(page)
+        r = session_get(session, PURCHASE_URL, params=page_params)
+        r.raise_for_status()
+
+        if log and debug_first_page and page == 1:
+            debug_dump_list_rows(r.text, log, max_rows=20)
+
+        items = parse_purchase_list_page(r.text)
+        new_items = [x for x in items if x.get("order_no") and x["order_no"] not in merged]
+        if not new_items:
+            break
+        for x in new_items:
+            merged[x["order_no"]] = x
+        if log and page > 1:
+            log(f"[翻頁] 第 {page} 頁，累計 {len(merged)} 筆")
+    else:
+        if log:
+            log(f"⚠️ 已達翻頁上限 {max_pages} 頁，結果可能不完整")
+    return list(merged.values())
+
+
+def blank_list_params() -> Dict:
+    return {
+        "keyword": "", "name": "", "phone": "", "orderNo": "",
+        "date_s": "", "date_e": "", "clean_date_s": "", "clean_date_e": "",
+        "paid_at_s": "", "paid_at_e": "", "refundDateS": "", "refundDateE": "",
+        "buy": "", "area_id": "", "isCharge": "", "isRefund": "", "payway": "",
+        "purchase_status": "", "progress_status": "", "invoiceStatus": "",
+        "otherFee": "", "orderBy": "",
+    }
+
+
 def search_all_orders_by_phone(session, phone, log=None) -> List[Dict]:
-    r = session_get(
-        session,
-        PURCHASE_URL,
-        params={
-            "keyword": "",
-            "name": "",
-            "phone": phone,
-            "orderNo": "",
-            "date_s": "",
-            "date_e": "",
-            "clean_date_s": "",
-            "clean_date_e": "",
-            "paid_at_s": "",
-            "paid_at_e": "",
-            "refundDateS": "",
-            "refundDateE": "",
-            "buy": "",
-            "area_id": "",
-            "isCharge": "",
-            "isRefund": "",
-            "payway": "",
-            "purchase_status": "",
-            "progress_status": "",
-            "invoiceStatus": "",
-            "otherFee": "",
-            "orderBy": "",
-        },
+    params = blank_list_params()
+    params["phone"] = phone
+    return fetch_purchase_list_all_pages(
+        session, params, max_pages=PHONE_HISTORY_MAX_PAGES, log=log, debug_first_page=bool(log)
     )
-    r.raise_for_status()
-
-    if log:
-        debug_dump_list_rows(r.text, log, max_rows=20)
-
-    return parse_purchase_list_page(r.text)
 
 
 def debug_dump_list_rows(html: str, log, max_rows: int = 20):
@@ -664,10 +717,7 @@ def search_by_conditions_once(session, date_mode: str, date_start: str, date_end
         params["date_s"] = (date_start or "").replace("/", "-")
         params["date_e"] = (date_end or "").replace("/", "-")
 
-    r = session_get(session, PURCHASE_URL, params=params)
-    r.raise_for_status()
-
-    items = parse_purchase_list_page(r.text)
+    items = fetch_purchase_list_all_pages(session, params)
     filtered = [
         x for x in items
         if x.get("status_code") == "0" and (not purchase_status or x.get("purchase_status") == purchase_status)
@@ -705,6 +755,17 @@ def parse_select_value(select_el):
 
     # 找不到 selected 屬性時，不要用全文字比對猜測（不可靠），直接回傳空字串。
     return ""
+
+
+def parse_purchase_json(page_html: str) -> Dict:
+    """讀取訂單修改頁內嵌的 Vue purchase 物件（同 cancel_order._parse_purchase_json）。"""
+    m = re.search(r"purchase:\s*(\{.*?\})\s*\n?\s*\}\s*\n?\s*\}", page_html or "", re.S)
+    if not m:
+        return {}
+    try:
+        return json.loads(m.group(1))
+    except Exception:
+        return {}
 
 
 def parse_edit_page(session, edit_url, phone=""):
@@ -761,6 +822,10 @@ def parse_edit_page(session, edit_url, phone=""):
     notice_el = soup.select_one('textarea[name="notice"]')
     notice = notice_el.text.strip() if notice_el else str(fields.get("notice", "")).strip()
 
+    # 客人備註是 Vue 渲染欄位，真正的值在頁面內嵌的 purchase JSON
+    purchase_json = parse_purchase_json(r.text)
+    customer_memo = str(purchase_json.get("memo") or fields.get("memo", "") or "").strip()
+
     order_no = ""
     m = re.search(r"(LC\d+)", page_text)
     if m:
@@ -798,6 +863,7 @@ def parse_edit_page(session, edit_url, phone=""):
         "action": action,
         "fields": fields,
         "notice": notice,
+        "customer_memo": customer_memo,
         "progress": progress,
         "status_name": status_name,
         "purchase_status": purchase_status,
@@ -841,6 +907,7 @@ def enrich_item_from_detail(session, item: Dict, phone="") -> Dict:
         item["status"] = detail.get("status_name", "")
 
     item["notice"] = detail.get("notice", "") or item.get("notice", "")
+    item["customer_memo"] = detail.get("customer_memo", "") or item.get("customer_memo", "")
     item["_detail"] = detail
     return item
 
@@ -866,16 +933,24 @@ def enrich_items_from_detail(session, items: List[Dict], phone="", log=None, con
     return result
 
 
+def same_phone(a: str, b: str) -> bool:
+    pa, pb = normalize_phone(a), normalize_phone(b)
+    return not pa or not pb or pa == pb
+
+
 def has_any_same_address_history(current_item: Dict, history_items: List[Dict]) -> bool:
     """
-    判斷這個地址是不是完全沒有出現過任何歷史訂單（不論付款/處理狀態、不論備註是否為空）。
-    用來分辨「真的是新成單」跟「有歷史單但條件不符合自動回填」這兩種情況。
+    判斷「同電話＋同地址」之前有沒有任何其他訂單（不論付款／處理狀態、不論備註是否為空）。
+    有 → 第一部份（複製客服備註）；沒有 → 第二部份（只列出基本資料）。
     """
     current_order_no = current_item.get("order_no", "")
+    current_phone = current_item.get("phone", "")
     current_addr = current_item.get("address", "")
 
     for x in history_items:
         if x.get("order_no") == current_order_no:
+            continue
+        if not same_phone(x.get("phone", ""), current_phone):
             continue
         if same_address(x.get("address", ""), current_addr):
             return True
@@ -883,33 +958,35 @@ def has_any_same_address_history(current_item: Dict, history_items: List[Dict]) 
 
 
 def find_best_source_order(current_item: Dict, history_items: List[Dict]) -> Optional[Dict]:
+    """
+    找「同電話＋同地址」離現在最近一次已服務的訂單（有客服備註）。
+    已服務：服務日期 ≤ 今天（台灣時區），且早於目標單服務日期；排除取消訂單／已退款。
+    """
     candidates = []
 
     current_order_no = current_item.get("order_no", "")
-    current_phone = normalize_phone(current_item.get("phone", ""))
+    current_phone = current_item.get("phone", "")
     current_addr = current_item.get("address", "")
     current_dt = item_service_date_obj(current_item)
+    today = today_tw()
 
     for x in history_items:
         if x.get("order_no") == current_order_no:
             continue
-
-        if current_phone and x.get("phone") and normalize_phone(x.get("phone")) != current_phone:
+        if not same_phone(x.get("phone", ""), current_phone):
             continue
-
         if not same_address(x.get("address", ""), current_addr):
             continue
 
         dt = item_service_date_obj(x)
         if not dt:
             continue
+        if dt > today:
+            continue
         if current_dt and dt >= current_dt:
             continue
 
-        if x.get("purchase_status") != "1":
-            continue
-
-        if x.get("status_code") not in ("1", "2"):
+        if x.get("purchase_status") in ("2", "3"):
             continue
 
         notice = str(x.get("notice", "")).strip()
@@ -926,27 +1003,8 @@ def find_best_source_order(current_item: Dict, history_items: List[Dict]) -> Opt
 
 
 def build_preview_row(target: Dict, history_items: List[Dict]) -> Dict:
-    source = find_best_source_order(target, history_items)
-
-    if not source and not has_any_same_address_history(target, history_items):
-        # 這個地址完全沒有歷史訂單 → 視為新成單，自動帶入固定提醒文字
-        return {
-            "order_id": target.get("order_no", ""),
-            "customer_name": target.get("name", ""),
-            "phone": target.get("phone", ""),
-            "address": target.get("address", ""),
-            "service_date": display_service_date(target),
-            "purchase_status_name": target.get("purchase_status_name", ""),
-            "status_name": target.get("status", ""),
-            "source_order_id": "",
-            "source_service_date": "",
-            "source_purchase_status_name": "",
-            "source_status_name": "",
-            "source_notice_exists": True,
-            "source_notice_preview": DEFAULT_NEW_ORDER_NOTICE,
-            "can_autofill": True,
-            "is_new_order": True,
-        }
+    has_history = has_any_same_address_history(target, history_items)
+    source = find_best_source_order(target, history_items) if has_history else None
 
     return {
         "order_id": target.get("order_no", ""),
@@ -960,10 +1018,11 @@ def build_preview_row(target: Dict, history_items: List[Dict]) -> Dict:
         "source_service_date": display_service_date(source) if source else "",
         "source_purchase_status_name": source.get("purchase_status_name", "") if source else "",
         "source_status_name": source.get("status", "") if source else "",
-        "source_notice_exists": bool(str(source.get("notice", "")).strip()) if source else False,
-        "source_notice_preview": str(source.get("notice", "")).strip()[:80] if source else "",
+        "source_notice_exists": bool(source),
+        "source_notice_preview": str(source.get("notice", "")).strip() if source else "",
+        "has_history": has_history,
         "can_autofill": bool(source),
-        "is_new_order": False,
+        "is_new_order": not has_history,
     }
 
 
@@ -1096,7 +1155,7 @@ def get_target_and_source_for_order(session, target: Dict, log) -> Dict:
                 },
                 "source_notice": DEFAULT_NEW_ORDER_NOTICE,
             }
-        raise RuntimeError(f"❌ 處理失敗 {target_order_no}：找不到同地址＋已付款＋已處理＋有備註的最近來源單")
+        raise RuntimeError(f"❌ 處理失敗 {target_order_no}：同電話＋同地址有歷史訂單，但找不到已服務且有客服備註的來源單")
 
     source_notice = str(source.get("notice", "")).strip()
     if not source_notice:
@@ -1370,6 +1429,70 @@ def preview_by_conditions(date_mode, date_start, date_end, purchase_status_name,
             str(x.get("order_id", "")),
         )
     )
+    return result
+
+
+def search_customer_memo_orders(date_start: str, date_end: str, ui_logger=None, session=None) -> List[Dict]:
+    """
+    客人備註查詢：購買日期區間＋全部付款狀態，排除代客預訂，只留客人備註非空白的訂單。
+    回傳欄位：訂單號碼／客人姓名／電話／地址／付款狀態／客人備註／客服備註。
+    """
+    CURRENT_ROW_LOGS.clear()
+    log = make_logger(ui_logger)
+
+    if not date_start or not date_end:
+        raise RuntimeError("請選擇完整的購買日期區間")
+    start_dt, end_dt = parse_date(date_start), parse_date(date_end)
+    if start_dt and end_dt and start_dt > end_dt:
+        raise RuntimeError("開始日期不可晚於結束日期")
+
+    log("\n===== 客人備註查詢 =====")
+    log(f"購買日期區間: {date_start} ~ {date_end}")
+    log("付款狀態: 全部｜排除代客預訂｜只列客人備註非空白")
+
+    session = session or login(ui_logger=ui_logger)
+
+    params = blank_list_params()
+    params["date_s"] = date_start.replace("/", "-")
+    params["date_e"] = date_end.replace("/", "-")
+
+    log("[查詢列表] 開始抓購買日期區間內全部訂單（自動翻頁）")
+    items = fetch_purchase_list_all_pages(session, params, log=log)
+    log(f"[查詢列表] 主列表共 {len(items)} 筆")
+
+    candidates = []
+    proxy_count = 0
+    for x in items:
+        if is_proxy_order(x):
+            proxy_count += 1
+            continue
+        dt = x.get("raw_date_obj")
+        if dt and start_dt and end_dt and not (start_dt <= dt <= end_dt):
+            continue
+        candidates.append(x)
+    log(f"[篩選] 排除代客預訂 {proxy_count} 筆，需讀取明細 {len(candidates)} 筆")
+
+    candidates = enrich_items_from_detail(session, candidates, log=log, context_label="讀取客人備註")
+
+    result = []
+    for x in candidates:
+        memo_text = str(x.get("customer_memo", "") or "").strip()
+        if not memo_text:
+            continue
+        if is_proxy_order(x, memo_text):
+            continue
+        result.append({
+            "訂單號碼": x.get("order_no", ""),
+            "客人姓名": x.get("name", ""),
+            "電話": x.get("phone", ""),
+            "地址": x.get("address", ""),
+            "付款狀態": x.get("purchase_status_name", ""),
+            "客人備註": memo_text,
+            "客服備註": str(x.get("notice", "") or "").strip(),
+        })
+
+    result.sort(key=lambda r: r["訂單號碼"])
+    log(f"✅ 客人備註非空白共 {len(result)} 筆")
     return result
 
 
