@@ -4,6 +4,8 @@
 #       pages/訂單系統.py 呼叫。
 # 更新記錄：
 # 2026-11-10
+# - 新增③「已處理但客服備註需註記」：同條件內已處理、客服備註本來就有內容的訂單，標示 VIP
+#   但非儲值金付款或 **N- 已非首次服務，可勾選批次執行（保留原備註＋註記）。
 # - 查詢結果統計下方顯示「客服備註檢查」：原本有客服備註幾筆、標示 VIP 非儲值金幾筆、
 #   **N- 已非首次服務幾筆；②列表也加「異動」欄，新客的 VIP 非儲值金也看得到。
 # - 用途說明補上【服務異動】註記規則（VIP 非儲值金、**N- 已非首次服務）。
@@ -465,15 +467,18 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
             return [], {}, ""
 
         ver = st.session_state.get("memo_query_ver", 0)
-        history_rows = [r for r in rows if r.get("has_history", not r.get("is_new_order"))]
-        new_rows     = [r for r in rows if not r.get("has_history", not r.get("is_new_order"))]
+        processed_rows = [r for r in rows if r.get("section") == "processed"]
+        pending_rows = [r for r in rows if r.get("section") != "processed"]
+        history_rows = [r for r in pending_rows if r.get("has_history", not r.get("is_new_order"))]
+        new_rows     = [r for r in pending_rows if not r.get("has_history", not r.get("is_new_order"))]
         can_rows     = [r for r in history_rows if r.get("can_autofill")]
 
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("查詢總筆數", len(rows))
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("未處理筆數", len(pending_rows))
         m2.metric("① 有相同訂單", len(history_rows))
         m3.metric("　可自動複製", len(can_rows))
         m4.metric("② 無相同訂單", len(new_rows))
+        m5.metric("③ 已處理需註記", len(processed_rows))
 
         def _has(r, key):
             return key in str(r.get("service_change", "") or "")
@@ -487,7 +492,8 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
             return "、".join(str(r.get("order_id", "")) for r in items) if items else "無"
 
         st.info(
-            f"**客服備註檢查**　原本有客服備註 {len(own_rows)} 筆\n\n"
+            f"**客服備註檢查**　未處理訂單原本有客服備註 {len([r for r in own_rows if r.get('section') != 'processed'])} 筆；"
+            f"另檢查同條件已處理、客服備註本來就有內容的訂單（服務日期 ≥ 今天），需註記 {len(processed_rows)} 筆（列在③）\n\n"
             f"- 標示 VIP 但非儲值金付款：{len(vip_rows)} 筆（{_ids(vip_rows)}）\n"
             f"- \\*\\*N- 已非首次服務（改 \\*\\*O-）：{len(n_rows)} 筆（{_ids(n_rows)}）\n"
             + (f"- 新客首次服務的 \\*\\*N-（不需改）：{len(n_first)} 筆（{_ids(n_first)}）" if n_first else "")
@@ -596,6 +602,12 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
             st.caption("新客預設不勾選；需要寫入時請填寫客服備註後勾選。")
             if _batch_button("批次執行②", new_sel, "memo_run_new"):
                 run_ids, run_label = list(new_sel), "批次執行②"
+
+        proc_sel = _editor("③ 已處理，但客服備註需註記（VIP 非儲值金／\\*\\*N- 已非首次）", processed_rows, "memo_ed_processed", True)
+        if processed_rows:
+            st.caption("同查詢條件內已處理、服務日期 ≥ 今天、客服備註本來就有內容的訂單。執行時保留原備註，最上方加【服務異動】，已非首次服務的 **N- 改 **O-。")
+            if _batch_button("批次執行③", proc_sel, "memo_run_processed"):
+                run_ids, run_label = list(proc_sel), "批次執行③"
 
         # 單筆執行：多行編輯備註後只執行這一筆
         st.markdown("### 單筆執行")
