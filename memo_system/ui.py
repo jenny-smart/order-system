@@ -4,6 +4,8 @@
 #       pages/訂單系統.py 呼叫。
 # 更新記錄：
 # 2026-11-10
+# - 查詢結果統計下方顯示「客服備註檢查」：原本有客服備註幾筆、標示 VIP 非儲值金幾筆、
+#   **N- 已非首次服務幾筆；②列表也加「異動」欄，新客的 VIP 非儲值金也看得到。
 # - 用途說明補上【服務異動】註記規則（VIP 非儲值金、**N- 已非首次服務）。
 # - ①②列表的「電話」改為連結，點了直接開後台訂單管理的電話搜尋結果頁。
 # - ①列表「異動」欄移到最前面（選取之後），列出異動類別（項目／時間／付款／N→O）。
@@ -473,6 +475,24 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         m3.metric("　可自動複製", len(can_rows))
         m4.metric("② 無相同訂單", len(new_rows))
 
+        def _has(r, key):
+            return key in str(r.get("service_change", "") or "")
+
+        own_rows = [r for r in rows if r.get("own_notice")]
+        vip_rows = [r for r in rows if _has(r, "付款方式：")]
+        n_rows = [r for r in rows if _has(r, "新客標記：")]
+        n_first = [r for r in new_rows if memo.N_TAG_RE.search(str(r.get("own_notice", "") or ""))]
+
+        def _ids(items):
+            return "、".join(str(r.get("order_id", "")) for r in items) if items else "無"
+
+        st.info(
+            f"**客服備註檢查**　原本有客服備註 {len(own_rows)} 筆\n\n"
+            f"- 標示 VIP 但非儲值金付款：{len(vip_rows)} 筆（{_ids(vip_rows)}）\n"
+            f"- \\*\\*N- 已非首次服務（改 \\*\\*O-）：{len(n_rows)} 筆（{_ids(n_rows)}）\n"
+            + (f"- 新客首次服務的 \\*\\*N-（不需改）：{len(n_first)} 筆（{_ids(n_first)}）" if n_first else "")
+        )
+
         notices = {}
         selected_ids = []
 
@@ -504,10 +524,9 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
             data = []
             for r in items:
                 row = {"選取": bool(r.get("can_autofill"))}
-                if show_source:
-                    change = str(r.get("service_change", "") or "")
-                    kinds = [label for key, label in (("服務項目：", "項目"), ("服務時間：", "時間"), ("付款方式：", "付款"), ("新客標記：", "N→O")) if key in change]
-                    row["異動"] = ("⚠️ " + "／".join(kinds)) if kinds else ""
+                change = str(r.get("service_change", "") or "")  # ①②都顯示異動
+                kinds = [label for key, label in (("服務項目：", "項目"), ("服務時間：", "時間"), ("付款方式：", "付款"), ("新客標記：", "N→O")) if key in change]
+                row["異動"] = ("⚠️ " + "／".join(kinds)) if kinds else ""
                 row.update({
                     "訂單號碼": r.get("order_id", ""),
                     "客戶": r.get("customer_name", ""),
