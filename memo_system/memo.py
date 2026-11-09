@@ -7,11 +7,15 @@
 #   會員管理頁內嵌 memberAddressList 找出同地址的地址 ID → 讀地址備註頁內嵌的
 #   list；最上方那則（以上方為主）空白才填入本次寫入的客服備註（去掉【服務異動】
 #   行），已有內容不動，其他備註原樣保留一起送出。失敗只記 LOG，不影響訂單結果。
-# - 複製前次客服備註時比對服務項目與服務時數，任一不同就在備註最前面加一行
-#   「【服務異動】服務項目：前次 A／本次 B；時數：前次 X 小時／本次 Y 小時」
-#   （compose_copied_notice，只列有差異的項目）；預覽列表與實際寫入用同一個
-#   函式，重複複製時舊的異動行會先移除。服務項目、時數讀列表卡片文字，
-#   時數另以訂單修改頁 purchase JSON 的 hour 為優先。
+# - 同電話＋同地址，與前次的服務項目或服務時間（時數）不同時，在備註最前面註記：
+#   【服務異動】
+#   服務項目：前次 居家清潔（清掃坪數21~40、房間2…）
+#   　　　　　本次 居家清潔（清掃坪數21~40、窗戶清潔2…）
+#   服務時間：前次 14:00-18:00（4小時）／本次 09:00-11:00（2小時）
+#   服務項目＝列表「訂購資訊」欄的服務類型＋細項清單；服務時間＝「服務日期」欄
+#   的時段（7 小時以上扣 1 小時休息）。compose_copied_notice 預覽與寫入共用，
+#   重複複製時舊的異動段落會先移除。前次客服備註空白的訂單，也用最近一筆同電話
+#   ＋同地址訂單比對，把異動段落預填到備註欄。
 # - 修正勾選執行／單筆執行出現 APIError「Page Not Found」：order-system 的
 #   env.py 沒有 SHEET_ID、Streamlit secrets 也沒設，memo_log 用空白 ID 開
 #   Google Sheet 失敗，整個執行中斷。memo_log 改為輔助紀錄：開不了或寫入
@@ -580,7 +584,9 @@ def parse_purchase_row_text(txt: str) -> Dict:
         "service_date_obj": None,
         "notice": "",
         "clean_type": _extract_clean_type_line(txt),
-        "hour": normalize_hour(_extract_person_hour_line(txt)[1]),
+        "period": extract_period(txt),
+        "hour": period_hours(extract_period(txt)) or normalize_hour(_extract_person_hour_line(txt)[1]),
+        "service_items": [],
         "row_text": txt,
         "_detail": {},
     }
@@ -599,6 +605,10 @@ def parse_purchase_list_page(html: str) -> List[Dict]:
         row_data = parse_purchase_row_text(txt)
         if not row_data["order_no"]:
             continue
+
+        tds = tr.find_all("td", recursive=False)
+        info_td = tds[1] if len(tds) > 1 else tr
+        row_data["service_items"] = [li.get_text(" ", strip=True) for li in info_td.find_all("li")]
 
         edit_link = tr.select_one('a[href*="/purchase/edit/"]')
         edit_url = f"{BASE_URL}{edit_link['href']}" if edit_link and edit_link.get("href", "").startswith("/") else (edit_link["href"] if edit_link else "")
@@ -823,30 +833,87 @@ def normalize_hour(value) -> str:
     return str(int(num)) if num.is_integer() else str(num)
 
 
-def service_change_text(prev_type, cur_type, prev_hour, cur_hour) -> str:
-    """前次與本次服務項目／時數的差異說明；兩邊都有值且不同才列出，沒有差異回傳空字串。"""
-    parts = []
-    pt, ct = str(prev_type or "").strip(), str(cur_type or "").strip()
-    if pt and ct and pt != ct:
-        parts.append(f"服務項目：前次 {pt}／本次 {ct}")
-    ph, ch = normalize_hour(prev_hour), normalize_hour(cur_hour)
+def extract_period(text: str) -> str:
+    """列表卡片的服務時段，例：09:00 - 11:00 → 09:00-11:00。"""
+    m = re.search(r"(\d{1,2}:\d{2})\s*[-~～]\s*(\d{1,2}:\d{2})", str(text or ""))
+    return f"{m.group(1).zfill(5)}-{m.group(2).zfill(5)}" if m else ""
+
+
+def period_hours(period: str) -> str:
+    """時段換算服務時數；7 小時以上扣 1 小時休息（09:00-18:00 → 8）。"""
+    m = re.match(r"(\d{2}):(\d{2})-(\d{2}):(\d{2})$", str(period or ""))
+    if not m:
+        return ""
+    h1, m1, h2, m2 = (int(x) for x in m.groups())
+    hours = ((h2 * 60 + m2) - (h1 * 60 + m1)) / 60
+    if hours <= 0:
+        return ""
+    if hours >= 7:
+        hours -= 1
+    return normalize_hour(hours)
+
+
+def service_items_text(item: Dict) -> str:
+    """服務項目：服務類型＋細項，例：居家清潔（清掃坪數21~40、房間2）。"""
+    clean_type = str(item.get("clean_type", "") or "").strip()
+    items = [str(x).strip() for x in (item.get("service_items") or []) if str(x).strip()]
+    if items:
+        return f"{clean_type}（{'、'.join(items)}）" if clean_type else "、".join(items)
+    return clean_type
+
+
+def service_time_text(item: Dict) -> str:
+    period = str(item.get("period", "") or "")
+    hour = normalize_hour(item.get("hour"))
+    if period and hour:
+        return f"{period}（{hour}小時）"
+    return period or (f"{hour}小時" if hour else "")
+
+
+def service_change_text(prev: Dict, cur: Dict) -> str:
+    """
+    前次與本次的服務項目／服務時數差異；兩邊都有值且不同才列出，沒有差異回傳空字串。
+    服務項目比對類型＋細項（細項不分順序）；服務時間以時數比對。
+    """
+    if not prev or not cur:
+        return ""
+    lines = []
+    prev_items = (str(prev.get("clean_type", "")).strip(), sorted(str(x).strip() for x in (prev.get("service_items") or [])))
+    cur_items = (str(cur.get("clean_type", "")).strip(), sorted(str(x).strip() for x in (cur.get("service_items") or [])))
+    if (prev_items[0] or prev_items[1]) and (cur_items[0] or cur_items[1]) and prev_items != cur_items:
+        lines.append(f"服務項目：前次 {service_items_text(prev)}")
+        lines.append(f"　　　　　本次 {service_items_text(cur)}")
+    ph, ch = normalize_hour(prev.get("hour")), normalize_hour(cur.get("hour"))
     if ph and ch and ph != ch:
-        parts.append(f"時數：前次 {ph} 小時／本次 {ch} 小時")
-    return "；".join(parts)
+        lines.append(f"服務時間：前次 {service_time_text(prev)}／本次 {service_time_text(cur)}")
+    return "\n".join(lines)
 
 
-def compose_copied_notice(source_notice: str, prev_hour, current_hour, prev_type="", current_type="") -> str:
+def strip_change_block(notice: str) -> str:
+    """移除舊的【服務異動】段落（標題行＋緊接的服務項目／服務時間行）。"""
+    out, skipping = [], False
+    for ln in str(notice or "").strip().splitlines():
+        t = ln.strip()
+        if t.startswith(CHANGE_PREFIXES):
+            skipping = True
+            continue
+        if skipping and (t.startswith(("服務項目：", "服務時間：", "時數：")) or ln.startswith("　　　　　")):
+            continue
+        skipping = False
+        out.append(ln)
+    return "\n".join(out).strip()
+
+
+def compose_copied_notice(source_notice: str, prev: Optional[Dict], cur: Optional[Dict]) -> str:
     """
-    複製前次客服備註；服務項目或服務時數與前次不同時，在最前面註記差異。
-    來源備註裡舊的異動行先移除，避免一直累加。
+    複製前次客服備註；服務項目或服務時數與前次不同時，在最前面加【服務異動】段落。
+    來源備註裡舊的異動段落先移除，避免一直累加。
     """
-    lines = [ln for ln in str(source_notice or "").strip().splitlines()
-             if not ln.strip().startswith(CHANGE_PREFIXES)]
-    body = "\n".join(lines).strip()
-    change = service_change_text(prev_type, current_type, prev_hour, current_hour)
+    body = strip_change_block(source_notice)
+    change = service_change_text(prev or {}, cur or {})
     if change:
-        note = f"{CHANGE_PREFIXES[0]}{change}"
-        return f"{note}\n{body}" if body else note
+        block = f"{CHANGE_PREFIXES[0]}\n{change}"
+        return f"{block}\n\n{body}" if body else block
     return body
 
 
@@ -1004,7 +1071,7 @@ def enrich_item_from_detail(session, item: Dict, phone="") -> Dict:
         item["status"] = detail.get("status_name", "")
 
     item["notice"] = detail.get("notice", "") or item.get("notice", "")
-    item["hour"] = detail.get("hour", "") or item.get("hour", "")
+    item["hour"] = item.get("hour", "") or detail.get("hour", "")
     item["person"] = detail.get("person", "") or item.get("person", "")
     item["customer_memo"] = detail.get("customer_memo", "") or item.get("customer_memo", "")
     item["_detail"] = detail
@@ -1134,14 +1201,16 @@ def build_preview_row(target: Dict, history_items: List[Dict]) -> Dict:
         "source_purchase_status_name": source.get("purchase_status_name", "") if source else "",
         "source_status_name": source.get("status", "") if source else "",
         "source_notice_exists": bool(source),
-        "source_notice_preview": compose_copied_notice(
-            source.get("notice", ""), source.get("hour"), target.get("hour"),
-            source.get("clean_type", ""), target.get("clean_type", ""),
-        ) if source else "",
+        # 有來源：複製來源備註＋異動段落；前次備註空白：用最近一筆同地址訂單比對，只預填異動段落
+        "source_notice_preview": compose_copied_notice(source.get("notice", ""), source, target) if source
+        else (compose_copied_notice("", latest, target) if latest else ""),
         "hour": normalize_hour(target.get("hour")),
-        "source_hour": normalize_hour(source.get("hour")) if source else "",
-        "clean_type": target.get("clean_type", ""),
-        "source_clean_type": source.get("clean_type", "") if source else "",
+        "source_hour": normalize_hour((source or latest or {}).get("hour")),
+        "service_items_text": service_items_text(target),
+        "source_service_items_text": service_items_text(source or latest) if (source or latest) else "",
+        "service_time_text": service_time_text(target),
+        "source_service_time_text": service_time_text(source or latest) if (source or latest) else "",
+        "service_change": service_change_text(source or latest or {}, target),
         "latest_same_order_id": latest.get("order_no", "") if latest else "",
         "latest_same_order_date": display_service_date(latest) if latest else "",
         "has_history": has_history,
@@ -1302,15 +1371,13 @@ def get_target_and_source_for_order(session, target: Dict, log, override_notice:
 
     if not str(source.get("notice", "")).strip():
         raise RuntimeError(f"❌ 處理失敗 {target_order_no}：來源單沒有客服備註")
-    current_hour = target_item.get("hour") or target_form.get("hour", "")
-    current_type = target_item.get("clean_type", "")
-    source_notice = compose_copied_notice(
-        source.get("notice", ""), source.get("hour"), current_hour,
-        source.get("clean_type", ""), current_type,
-    )
-    change = service_change_text(source.get("clean_type", ""), current_type, source.get("hour"), current_hour)
+    current = dict(target_item)
+    if not current.get("hour"):
+        current["hour"] = target_form.get("hour", "")
+    source_notice = compose_copied_notice(source.get("notice", ""), source, current)
+    change = service_change_text(source, current)
     if change:
-        log(f"[服務異動] {change}，已註記於備註")
+        log(f"[服務異動] {change.replace(chr(10), '；')}，已註記於備註")
 
     return {
         "target_form": target_form,
@@ -1374,8 +1441,7 @@ def read_address_memos(session, address_id, phone: str):
 
 def address_memo_text(notice: str) -> str:
     """寫入地址備註用：去掉只屬於單次訂單的【服務異動】行。"""
-    lines = [ln for ln in str(notice or "").strip().splitlines() if not ln.strip().startswith(CHANGE_PREFIXES)]
-    return "\n".join(lines).strip()
+    return strip_change_block(notice)
 
 
 def sync_address_memo(session, phone: str, address: str, notice: str, log) -> str:

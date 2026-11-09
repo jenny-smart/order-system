@@ -4,8 +4,9 @@
 #       pages/訂單系統.py 呼叫。
 # 更新記錄：
 # 2026-11-10
-# - ①列表新增「服務項目（前次→本次）」「時數（前次→本次）」欄；任一不同時
-#   備註最前面會自動加【服務異動】。
+# - ①列表新增「服務項目／服務時間（前次→本次）」「異動」欄；服務項目或時數不同
+#   時備註最前面會自動加【服務異動】段落。前次備註空白的列也會預填異動段落，
+#   執行時以畫面上的備註為準。
 # - 訂單客服備註（By 電話／By 搜尋條件）：拿掉上方「🚀 執行勾選項目」，
 #   改在①、②列表下方各放一顆批次執行按鈕，只執行該區勾選的訂單。
 # 2026-11-09
@@ -498,12 +499,11 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                     ref_no = r.get("source_order_id") or r.get("latest_same_order_id", "")
                     ref_dt = r.get("source_service_date") or r.get("latest_same_order_date", "")
                     row["參照訂單"] = f"{ref_no} {ref_dt}".strip()
-                    prev_t, cur_t = r.get("source_clean_type", ""), r.get("clean_type", "")
-                    row["服務項目（前次→本次）"] = (f"{prev_t}→{cur_t}" + ("　⚠️" if prev_t != cur_t else "")) if prev_t and cur_t else (cur_t or "")
-                    prev_h, cur_h = r.get("source_hour", ""), r.get("hour", "")
-                    row["時數（前次→本次）"] = (f"{prev_h}→{cur_h}" + ("　⚠️" if prev_h != cur_h else "")) if prev_h and cur_h else (cur_h or "")
+                    row["異動"] = "⚠️ 項目／時間不同" if r.get("service_change") else ""
+                    row["服務項目（前次→本次）"] = f"{r.get('source_service_items_text', '') or '-'} → {r.get('service_items_text', '') or '-'}"
+                    row["服務時間（前次→本次）"] = f"{r.get('source_service_time_text', '') or '-'} → {r.get('service_time_text', '') or '-'}"
                 row["狀態"] = _status_text(r)
-                row["客服備註（將寫入）"] = str(r.get("source_notice_preview", "") or "") if r.get("can_autofill") else ""
+                row["客服備註（將寫入）"] = str(r.get("source_notice_preview", "") or "")
                 data.append(row)
 
             disabled = [c for c in data[0].keys() if c not in ("選取", "客服備註（將寫入）")]
@@ -899,6 +899,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                         str(r.get("order_id", "")): str(r.get("source_notice_preview", "") or "").strip()
                         for r in st.session_state.preview_rows
                     }
+                    autofill_ids = {str(r.get("order_id", "")) for r in st.session_state.preview_rows if r.get("can_autofill")}
                     current_selected_ids = []
                     custom_notices = {}
                     skipped_blank = []
@@ -908,8 +909,8 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                             skipped_blank.append(oid)
                             continue
                         current_selected_ids.append(oid)
-                        if note != source_notice_map.get(oid, ""):
-                            custom_notices[oid] = note  # 畫面上改過／人工填寫
+                        if note != source_notice_map.get(oid, "") or oid not in autofill_ids:
+                            custom_notices[oid] = note  # 畫面上改過／人工填寫／前次備註空白的預填內容
                     if skipped_blank:
                         ui_log(f"⚠️ 客服備註空白，略過：{'、'.join(skipped_blank)}")
                     if not current_selected_ids:
