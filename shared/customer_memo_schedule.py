@@ -13,6 +13,9 @@
   訂單編號／客人姓名／客人電話／服務日期／客人備註／客服備註；
   客人電話是 HYPERLINK，點了開後台訂單管理用電話搜尋的結果頁。
   訂單編號已在分頁上的不重複貼；沒有「客人備註」分頁時自動建立並寫標題列。
+- 同一批訂單另外檢查客服備註：標示 **VIP** 但付款方式不是儲值金、或有 **N-XXX** 但已非首次
+  服務（同電話＋同地址有更早的訂單）→ 貼到同一個內勤工作表單的「客服備註」分頁：
+  訂單編號／客人姓名／客人電話／服務日期／付款方式／註記／客服備註（電話一樣是搜尋連結）。
 - 貼完在 jenny@hers.com.tw 行事曆記一則「【客人備註】台北 N 筆、台中 M 筆」（寫不進去改寫
   jenny@lemonclean.com.tw；可用 CUSTOMER_MEMO_CALENDAR_ID 指定），內容列出逐筆訂單與工作表連結。
 
@@ -36,6 +39,8 @@ REGIONS = ("台北", "台中")
 SHEET_CATEGORY = "內勤工作表單"
 TAB_TITLE = "客人備註"
 HEADER = ["訂單編號", "客人姓名", "客人電話", "服務日期", "客人備註", "客服備註"]
+NOTICE_TAB_TITLE = "客服備註"
+NOTICE_HEADER = ["訂單編號", "客人姓名", "客人電話", "服務日期", "付款方式", "註記", "客服備註"]
 CALENDAR_IDS = ("jenny@hers.com.tw", "jenny@lemonclean.com.tw")
 CALENDAR_PREFIX = "【客人備註】"
 
@@ -74,21 +79,35 @@ def _formula_text(value: str) -> str:
     return str(value or "").replace('"', '""')
 
 
+def phone_cell(base_url: str, phone: str) -> str:
+    phone = str(phone or "")
+    return (f'=HYPERLINK("{_formula_text(phone_search_url(base_url, phone))}","{_formula_text(phone)}")'
+            if phone else "")
+
+
 def build_sheet_rows(rows: list[dict], base_url: str) -> list[list[str]]:
-    out = []
-    for r in rows:
-        phone = str(r.get("電話", "") or "")
-        phone_cell = (f'=HYPERLINK("{_formula_text(phone_search_url(base_url, phone))}","{_formula_text(phone)}")'
-                      if phone else "")
-        out.append([
-            str(r.get("訂單號碼", "") or ""),
-            str(r.get("客人姓名", "") or ""),
-            phone_cell,
-            str(r.get("服務日期", "") or ""),
-            str(r.get("客人備註", "") or ""),
-            str(r.get("客服備註", "") or ""),
-        ])
-    return out
+    """「客人備註」分頁的列。"""
+    return [[
+        str(r.get("訂單號碼", "") or ""),
+        str(r.get("客人姓名", "") or ""),
+        phone_cell(base_url, r.get("電話", "")),
+        str(r.get("服務日期", "") or ""),
+        str(r.get("客人備註", "") or ""),
+        str(r.get("客服備註", "") or ""),
+    ] for r in rows]
+
+
+def build_notice_sheet_rows(rows: list[dict], base_url: str) -> list[list[str]]:
+    """「客服備註」分頁的列。"""
+    return [[
+        str(r.get("訂單號碼", "") or ""),
+        str(r.get("客人姓名", "") or ""),
+        phone_cell(base_url, r.get("電話", "")),
+        str(r.get("服務日期", "") or ""),
+        str(r.get("付款方式", "") or ""),
+        str(r.get("註記", "") or ""),
+        str(r.get("客服備註", "") or ""),
+    ] for r in rows]
 
 
 def last_data_row(col_a: list[str]) -> int:
@@ -99,22 +118,31 @@ def last_data_row(col_a: list[str]) -> int:
     return n
 
 
-def get_tab(region: str):
-    """該區當年度「內勤工作表單」的「客人備註」分頁；沒有就建立並寫標題列。"""
-    from memo_system.memo import with_retry
+def _col_letter(n: int) -> str:
+    return chr(ord("A") + n - 1)
+
+
+def open_spreadsheet(region: str):
     from shared.gsheet import build_gsheet_client
     from year_roots import root_file_id
 
-    spreadsheet = build_gsheet_client().open_by_key(root_file_id(SHEET_CATEGORY, region))
+    return build_gsheet_client().open_by_key(root_file_id(SHEET_CATEGORY, region))
+
+
+def get_tab(region: str, title: str = TAB_TITLE, header: list[str] = HEADER, spreadsheet=None):
+    """該區當年度「內勤工作表單」的指定分頁；沒有就建立並寫標題列。"""
+    from memo_system.memo import with_retry
+
+    spreadsheet = spreadsheet or open_spreadsheet(region)
     for ws in with_retry(spreadsheet.worksheets):
-        if ws.title == TAB_TITLE:
+        if ws.title == title:
             return spreadsheet, ws
-    ws = with_retry(spreadsheet.add_worksheet, title=TAB_TITLE, rows=1000, cols=len(HEADER))
-    with_retry(ws.update, values=[HEADER], range_name="A1:F1")
+    ws = with_retry(spreadsheet.add_worksheet, title=title, rows=1000, cols=len(header))
+    with_retry(ws.update, values=[header], range_name=f"A1:{_col_letter(len(header))}1")
     return spreadsheet, ws
 
 
-def append_rows(ws, sheet_rows: list[list[str]]) -> int:
+def append_rows(ws, sheet_rows: list[list[str]], width: int = len(HEADER)) -> int:
     """貼到最下方；訂單編號已在 A 欄的不重複貼。回傳實際貼入筆數。"""
     from memo_system.memo import with_retry
 
@@ -127,7 +155,7 @@ def append_rows(ws, sheet_rows: list[list[str]]) -> int:
     end = start + len(new_rows) - 1
     if end > ws.row_count:
         with_retry(ws.add_rows, end - ws.row_count + 100)
-    with_retry(ws.update, values=new_rows, range_name=f"A{start}:F{end}", value_input_option="USER_ENTERED")
+    with_retry(ws.update, values=new_rows, range_name=f"A{start}:{_col_letter(width)}{end}", value_input_option="USER_ENTERED")
     return len(new_rows)
 
 
@@ -136,6 +164,9 @@ def append_rows(ws, sheet_rows: list[list[str]]) -> int:
 # ------------------------------------------------------------
 def build_calendar_event(result: dict, window: tuple[datetime, datetime], now: datetime) -> dict:
     counts = "、".join(f"{region} {item.get('saved', 0)} 筆" for region, item in result.items())
+    notice_total = sum(int(item.get("notice_saved", 0) or 0) for item in result.values())
+    if notice_total:
+        counts += f"；客服備註需註記 {notice_total} 筆"
     lines = [f"區間：{window[0]:%m/%d %H:%M} ～ {window[1]:%m/%d %H:%M}（訂購時間）", ""]
     for region, item in result.items():
         lines.append(f"■ {region}：貼入 {item.get('saved', 0)} 筆" + (f"（{item['error']}）" if item.get("error") else ""))
@@ -144,6 +175,12 @@ def build_calendar_event(result: dict, window: tuple[datetime, datetime], now: d
         for r in item.get("rows") or []:
             memo_text = str(r.get("客人備註", "")).replace("\n", " ")
             lines.append(f"{r.get('訂單號碼', '')} {r.get('客人姓名', '')} {r.get('服務日期', '')}：{memo_text[:60]}")
+        if item.get("notice_rows"):
+            lines.append(f"□ 客服備註需註記：貼入 {item.get('notice_saved', 0)} 筆")
+            if item.get("notice_sheet_url"):
+                lines.append(item["notice_sheet_url"])
+            for r in item["notice_rows"]:
+                lines.append(f"{r.get('訂單號碼', '')} {r.get('客人姓名', '')}：{r.get('註記', '')}")
         lines.append("")
     return dict(
         summary=f"{CALENDAR_PREFIX}{counts}（{now:%m/%d}）",
@@ -190,7 +227,7 @@ def _log(status: str, message: str, traceback_text: str = "") -> None:
 def run(env: str = "prod", today: date | None = None, regions=REGIONS, dry_run: bool = False,
         calendar: dict | None = None, now: datetime | None = None) -> dict:
     from accounts import ACCOUNTS
-    from function.customer_memo_query import search_customer_memo_orders
+    from function.customer_memo_query import customer_memo_rows, fetch_window_orders, find_notice_flag_orders
     from memo_system import memo
     from shared.weekend_reminder_schedule import is_off_day, load_work_calendar
 
@@ -207,7 +244,8 @@ def run(env: str = "prod", today: date | None = None, regions=REGIONS, dry_run: 
 
     result: dict = {}
     for region in regions:
-        item = {"rows": [], "saved": 0, "sheet_url": "", "error": ""}
+        item = {"rows": [], "saved": 0, "sheet_url": "", "error": "",
+                "notice_rows": [], "notice_saved": 0, "notice_sheet_url": ""}
         result[region] = item
         try:
             account = ACCOUNTS.get(region) or {}
@@ -217,18 +255,26 @@ def run(env: str = "prod", today: date | None = None, regions=REGIONS, dry_run: 
             memo.set_runtime_credentials(email, password)
             with contextlib.redirect_stdout(io.StringIO()):  # 明細不印進 Actions 紀錄
                 session = memo.login()
-                rows = search_customer_memo_orders(
-                    window[0].strftime("%Y/%m/%d"), window[1].strftime("%Y/%m/%d"),
-                    session=session, created_from=window[0], created_to=window[1],
+                candidates = fetch_window_orders(
+                    window[0].strftime("%Y/%m/%d"), window[1].strftime("%Y/%m/%d"), lambda m: None,
+                    session, created_from=window[0], created_to=window[1],
                 )
-            item["rows"] = rows
-            print(f"QUERY {region} 客人備註非空白 {len(rows)} 筆", flush=True)
+                rows = customer_memo_rows(candidates)
+                notice_rows = find_notice_flag_orders(candidates, session)
+            item["rows"], item["notice_rows"] = rows, notice_rows
+            print(f"QUERY {region} 客人備註非空白 {len(rows)} 筆、客服備註需註記 {len(notice_rows)} 筆", flush=True)
             if dry_run:
                 continue
             spreadsheet, ws = get_tab(region)
             item["sheet_url"] = f"https://docs.google.com/spreadsheets/d/{spreadsheet.id}/edit#gid={ws.id}"
             item["saved"] = append_rows(ws, build_sheet_rows(rows, memo.BASE_URL))
-            print(f"SAVE {region} 貼入 {item['saved']} 筆（重複略過 {len(rows) - item['saved']} 筆）", flush=True)
+            print(f"SAVE {region} 客人備註貼入 {item['saved']} 筆（重複略過 {len(rows) - item['saved']} 筆）", flush=True)
+            if notice_rows:
+                _, nws = get_tab(region, NOTICE_TAB_TITLE, NOTICE_HEADER, spreadsheet=spreadsheet)
+                item["notice_sheet_url"] = f"https://docs.google.com/spreadsheets/d/{spreadsheet.id}/edit#gid={nws.id}"
+                item["notice_saved"] = append_rows(nws, build_notice_sheet_rows(notice_rows, memo.BASE_URL),
+                                                   width=len(NOTICE_HEADER))
+                print(f"SAVE {region} 客服備註貼入 {item['notice_saved']} 筆", flush=True)
         except Exception as exc:
             item["error"] = f"{type(exc).__name__}: {exc}"
             print(f"ERROR {region} {item['error']}", flush=True)
@@ -238,7 +284,8 @@ def run(env: str = "prod", today: date | None = None, regions=REGIONS, dry_run: 
         print(line, flush=True)
 
     errors = [f"{r}：{i['error']}" for r, i in result.items() if i["error"]]
-    summary = "；".join(f"{r} 查到 {len(i['rows'])} 筆、貼入 {i['saved']} 筆" for r, i in result.items())
+    summary = "；".join(f"{r} 客人備註 {len(i['rows'])} 筆貼入 {i['saved']} 筆、客服備註需註記 {len(i['notice_rows'])} 筆貼入 {i['notice_saved']} 筆"
+                        for r, i in result.items())
     message = f"{window[0]:%m/%d %H:%M}～{window[1]:%m/%d %H:%M}：{summary}" + ("（試跑，未寫入）" if dry_run else "")
     if errors:
         message += "；錯誤 " + "；".join(errors)

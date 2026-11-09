@@ -66,7 +66,54 @@ class QueryTest(unittest.TestCase):
         self.assertIn("服務日期", out[0])
 
 
+class NoticeFlagTest(unittest.TestCase):
+    A = "台北市士林區至誠路一段152巷6弄4號"
+
+    def item(self, no, notice, payway="信用卡"):
+        return {"order_no": no, "name": "魏", "phone": "0987652932", "address": self.A,
+                "notice": notice, "payway": payway, "purchase_status": "1"}
+
+    def test_vip_not_stored_value_and_returning_n_tag(self):
+        history = [self.item("LC00217726", ""), self.item("LC00220070", "")]
+        cands = [
+            self.item("LC00220070", "**N-B**\n10/22 減時"),          # 有更早訂單 → 註記
+            self.item("LC00220071", "**VIP**二女", payway="ATM"),     # VIP 非儲值金 → 註記
+            self.item("LC00220072", "**VIP**二女", payway="儲值金"),  # 不註記
+            self.item("LC00220073", "一般備註"),                       # 不註記
+        ]
+        with patch.object(cmq._memo, "search_all_orders_by_phone", return_value=history):
+            out = cmq.find_notice_flag_orders(cands, session=object())
+        self.assertEqual([r["訂單號碼"] for r in out], ["LC00220070", "LC00220071"])
+        self.assertIn("**N-B** 已非首次服務／本次改為 **O-B**", out[0]["註記"])
+        self.assertIn("付款方式：備註標示 VIP／本次 ATM", out[1]["註記"])
+
+    def test_first_service_n_tag_not_flagged(self):
+        with patch.object(cmq._memo, "search_all_orders_by_phone", return_value=[self.item("LC5", "")]):
+            out = cmq.find_notice_flag_orders([self.item("LC5", "**N-A**首次")], session=object())
+        self.assertEqual(out, [])
+
+    def test_notice_sheet_row(self):
+        rows = cms.build_notice_sheet_rows([{"訂單號碼": "LC1", "客人姓名": "王", "電話": "0912", "服務日期": "11/15",
+                                             "付款方式": "ATM", "註記": "x", "客服備註": "**VIP**"}], "https://b")
+        self.assertEqual(len(rows[0]), len(cms.NOTICE_HEADER))
+        self.assertTrue(rows[0][2].startswith('=HYPERLINK("https://b/purchase?'))
+
+    def test_append_width_for_notice_tab(self):
+        ws = MagicMock(row_count=1000)
+        ws.col_values.return_value = ["訂單編號"]
+        cms.append_rows(ws, [["LC1"] + [""] * 6], width=7)
+        self.assertEqual(ws.update.call_args.kwargs["range_name"], "A2:G2")
+
+
 class CalendarTest(unittest.TestCase):
+    def test_event_summary_includes_notice_count(self):
+        result = {"台北": {"saved": 1, "rows": [], "notice_saved": 2,
+                           "notice_rows": [{"訂單號碼": "LC1", "客人姓名": "王", "註記": "付款方式：…"}]}}
+        ev = cms.build_calendar_event(result, (datetime(2026, 11, 9, 10), datetime(2026, 11, 10, 10)),
+                                      datetime(2026, 11, 10, 10, 5))
+        self.assertIn("客服備註需註記 2 筆", ev["summary"])
+        self.assertIn("LC1 王：付款方式", ev["description"])
+
     def test_event_summary_and_reminder(self):
         result = {"台北": {"saved": 2, "rows": [{"訂單號碼": "LC1", "客人姓名": "王", "服務日期": "11/15", "客人備註": "a"}],
                            "sheet_url": "https://x"}, "台中": {"saved": 0, "rows": []}}
