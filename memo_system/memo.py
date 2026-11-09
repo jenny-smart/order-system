@@ -16,6 +16,12 @@
 #   的時段（7 小時以上扣 1 小時休息）。compose_copied_notice 預覽與寫入共用，
 #   重複複製時舊的異動段落會先移除。前次客服備註空白的訂單，也用最近一筆同電話
 #   ＋同地址訂單比對，把異動段落預填到備註欄。
+# - 【服務異動】另外註記：
+#   付款方式：前次為 VIP（前次客服備註有 **VIP** 或前次用儲值金付款），本次付款
+#   方式不是儲值金（信用卡／ATM…）→「付款方式：前次 VIP（儲值金）／本次 信用卡」
+#   新客標記：**N-XXX** 代表新客，第二次起不是新客 → 複製的備註裡 **N-B** 改成
+#   **O-B**，並註記「新客標記：前次 **N-B**／本次改為 **O-B**」。地址備註補填時
+#   也是寫入改好的 **O-** 版本。
 # - 修正勾選執行／單筆執行出現 APIError「Page Not Found」：order-system 的
 #   env.py 沒有 SHEET_ID、Streamlit secrets 也沒設，memo_log 用空白 ID 開
 #   Google Sheet 失敗，整個執行中斷。memo_log 改為輔助紀錄：開不了或寫入
@@ -585,6 +591,7 @@ def parse_purchase_row_text(txt: str) -> Dict:
         "notice": "",
         "clean_type": _extract_clean_type_line(txt),
         "period": extract_period(txt),
+        "payway": extract_payway(txt),
         "hour": period_hours(extract_period(txt)) or normalize_hour(_extract_person_hour_line(txt)[1]),
         "service_items": [],
         "row_text": txt,
@@ -833,6 +840,17 @@ def normalize_hour(value) -> str:
     return str(int(num)) if num.is_integer() else str(num)
 
 
+VIP_TAG = "**VIP**"
+STORED_VALUE_PAYWAY = "儲值金"
+N_TAG_RE = re.compile(r"\*\*N-[^*\s]+\*\*")
+
+
+def extract_payway(text: str) -> str:
+    """列表卡片付款資訊的「付款方式：信用卡」。"""
+    m = re.search(r"付款方式\s*[：:]\s*([^\s\n]+)", str(text or ""))
+    return m.group(1).strip() if m else ""
+
+
 def extract_period(text: str) -> str:
     """列表卡片的服務時段，例：09:00 - 11:00 → 09:00-11:00。"""
     m = re.search(r"(\d{1,2}:\d{2})\s*[-~～]\s*(\d{1,2}:\d{2})", str(text or ""))
@@ -886,7 +904,30 @@ def service_change_text(prev: Dict, cur: Dict) -> str:
     ph, ch = normalize_hour(prev.get("hour")), normalize_hour(cur.get("hour"))
     if ph and ch and ph != ch:
         lines.append(f"服務時間：前次 {service_time_text(prev)}／本次 {service_time_text(cur)}")
+
+    prev_notice = strip_change_block(prev.get("notice", ""))  # 只看備註本文，不看舊的異動段落
+    cur_payway = str(cur.get("payway", "") or "").strip()
+    prev_is_vip = VIP_TAG in prev_notice or str(prev.get("payway", "")).strip() == STORED_VALUE_PAYWAY
+    if prev_is_vip and cur_payway and cur_payway != STORED_VALUE_PAYWAY:
+        lines.append(f"付款方式：前次 VIP（{STORED_VALUE_PAYWAY}）／本次 {cur_payway}")
+
+    n_tags = []
+    for tag in N_TAG_RE.findall(prev_notice):
+        if tag not in n_tags:
+            n_tags.append(tag)
+    if n_tags:
+        lines.append(f"新客標記：前次 {'、'.join(n_tags)}／本次改為 {'、'.join(to_returning_tag(t) for t in n_tags)}")
     return "\n".join(lines)
+
+
+def to_returning_tag(tag: str) -> str:
+    """新客標記改舊客：**N-B** → **O-B**。"""
+    return re.sub(r"^\*\*N-", "**O-", tag)
+
+
+def convert_new_customer_tags(notice: str) -> str:
+    """備註裡所有 **N-XXX** 改成 **O-XXX**（第二次起不是新客）。"""
+    return N_TAG_RE.sub(lambda m: to_returning_tag(m.group(0)), str(notice or ""))
 
 
 def strip_change_block(notice: str) -> str:
@@ -897,7 +938,7 @@ def strip_change_block(notice: str) -> str:
         if t.startswith(CHANGE_PREFIXES):
             skipping = True
             continue
-        if skipping and (t.startswith(("服務項目：", "服務時間：", "時數：")) or ln.startswith("　　　　　")):
+        if skipping and (t.startswith(("服務項目：", "服務時間：", "時數：", "付款方式：", "前次標記：", "新客標記：")) or ln.startswith("　　　　　")):
             continue
         skipping = False
         out.append(ln)
@@ -909,8 +950,8 @@ def compose_copied_notice(source_notice: str, prev: Optional[Dict], cur: Optiona
     複製前次客服備註；服務項目或服務時數與前次不同時，在最前面加【服務異動】段落。
     來源備註裡舊的異動段落先移除，避免一直累加。
     """
-    body = strip_change_block(source_notice)
     change = service_change_text(prev or {}, cur or {})
+    body = convert_new_customer_tags(strip_change_block(source_notice))
     if change:
         block = f"{CHANGE_PREFIXES[0]}\n{change}"
         return f"{block}\n\n{body}" if body else block

@@ -5,7 +5,7 @@
 # 更新記錄：
 # 2026-11-10
 # - ①②列表的「電話」改為連結，點了直接開後台訂單管理的電話搜尋結果頁。
-# - ①列表「異動」欄移到最前面（選取之後）。
+# - ①列表「異動」欄移到最前面（選取之後），列出異動類別（項目／時間／付款／N→O）。
 # - ①列表新增「服務項目／服務時間（前次→本次）」「異動」欄；服務項目或時數不同
 #   時備註最前面會自動加【服務異動】段落。前次備註空白的列也會預填異動段落，
 #   執行時以畫面上的備註為準。
@@ -500,7 +500,9 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
             for r in items:
                 row = {"選取": bool(r.get("can_autofill"))}
                 if show_source:
-                    row["異動"] = "⚠️ 項目／時間不同" if r.get("service_change") else ""
+                    change = str(r.get("service_change", "") or "")
+                    kinds = [label for key, label in (("服務項目：", "項目"), ("服務時間：", "時間"), ("付款方式：", "付款"), ("新客標記：", "N→O")) if key in change]
+                    row["異動"] = ("⚠️ " + "／".join(kinds)) if kinds else ""
                 row.update({
                     "訂單號碼": r.get("order_id", ""),
                     "客戶": r.get("customer_name", ""),
