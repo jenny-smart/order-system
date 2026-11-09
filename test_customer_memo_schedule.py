@@ -96,13 +96,19 @@ class NoticeFlagTest(unittest.TestCase):
         rows = cms.build_notice_sheet_rows([{"訂單號碼": "LC1", "客人姓名": "王", "電話": "0912", "服務日期": "11/15",
                                              "付款方式": "ATM", "註記": "x", "客服備註": "**VIP**"}], "https://b")
         self.assertEqual(len(rows[0]), len(cms.NOTICE_HEADER))
-        self.assertTrue(rows[0][2].startswith('=HYPERLINK("https://b/purchase?'))
+        self.assertEqual(cms.NOTICE_HEADER[0], "註記")
+        self.assertEqual(rows[0][0], "x")       # 註記在最前方
+        self.assertEqual(rows[0][1], "LC1")
+        self.assertTrue(rows[0][3].startswith('=HYPERLINK("https://b/purchase?'))
 
-    def test_append_width_for_notice_tab(self):
+    def test_append_notice_tab_dedupes_by_order_column_b(self):
         ws = MagicMock(row_count=1000)
-        ws.col_values.return_value = ["訂單編號"]
-        cms.append_rows(ws, [["LC1"] + [""] * 6], width=7)
-        self.assertEqual(ws.update.call_args.kwargs["range_name"], "A2:G2")
+        ws.col_values.side_effect = lambda col: {1: ["註記", "x"], 2: ["訂單編號", "LC1"]}[col]
+        saved = cms.append_rows(ws, [["x", "LC1"] + [""] * 5, ["y", "LC2"] + [""] * 5],
+                                width=7, key_col=cms.NOTICE_KEY_COL)
+        self.assertEqual(saved, 1)
+        self.assertEqual(ws.update.call_args.kwargs["range_name"], "A3:G3")
+        self.assertEqual(ws.update.call_args.kwargs["values"][0][1], "LC2")
 
 
 class CalendarTest(unittest.TestCase):
