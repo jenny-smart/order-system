@@ -16,6 +16,15 @@
 #   的時段（7 小時以上扣 1 小時休息）。compose_copied_notice 預覽與寫入共用，
 #   重複複製時舊的異動段落會先移除。前次客服備註空白的訂單，也用最近一筆同電話
 #   ＋同地址訂單比對，把異動段落預填到備註欄。
+# - 【服務異動】另外註記：
+#   付款方式：前次為 VIP（前次客服備註有 **VIP** 或前次用儲值金付款），本次付款
+#   方式不是儲值金（信用卡／ATM…）→「付款方式：前次 VIP（儲值金）／本次 信用卡」
+#   目前訂單本來就有客服備註：保留原備註不覆蓋，一樣檢查——標示 **VIP** 但本次付款
+#   不是儲值金、或有 **N-XXX** 但已不是首次服務（同電話＋同地址有歷史訂單）→ 註記，
+#   **N-** 改 **O-**，【服務異動】加在原備註最上方（compose_notice_for）。
+#   新客標記：**N-XXX** 代表新客，第二次起不是新客 → 複製的備註裡 **N-B** 改成
+#   **O-B**，並註記「新客標記：前次 **N-B**／本次改為 **O-B**」。地址備註補填時
+#   也是寫入改好的 **O-** 版本。
 # - 修正勾選執行／單筆執行出現 APIError「Page Not Found」：order-system 的
 #   env.py 沒有 SHEET_ID、Streamlit secrets 也沒設，memo_log 用空白 ID 開
 #   Google Sheet 失敗，整個執行中斷。memo_log 改為輔助紀錄：開不了或寫入
@@ -585,6 +594,7 @@ def parse_purchase_row_text(txt: str) -> Dict:
         "notice": "",
         "clean_type": _extract_clean_type_line(txt),
         "period": extract_period(txt),
+        "payway": extract_payway(txt),
         "hour": period_hours(extract_period(txt)) or normalize_hour(_extract_person_hour_line(txt)[1]),
         "service_items": [],
         "row_text": txt,
@@ -833,6 +843,17 @@ def normalize_hour(value) -> str:
     return str(int(num)) if num.is_integer() else str(num)
 
 
+VIP_TAG = "**VIP**"
+STORED_VALUE_PAYWAY = "儲值金"
+N_TAG_RE = re.compile(r"\*\*N-[^*\s]+\*\*")
+
+
+def extract_payway(text: str) -> str:
+    """列表卡片付款資訊的「付款方式：信用卡」。"""
+    m = re.search(r"付款方式\s*[：:]\s*([^\s\n]+)", str(text or ""))
+    return m.group(1).strip() if m else ""
+
+
 def extract_period(text: str) -> str:
     """列表卡片的服務時段，例：09:00 - 11:00 → 09:00-11:00。"""
     m = re.search(r"(\d{1,2}:\d{2})\s*[-~～]\s*(\d{1,2}:\d{2})", str(text or ""))
@@ -870,23 +891,55 @@ def service_time_text(item: Dict) -> str:
     return period or (f"{hour}小時" if hour else "")
 
 
-def service_change_text(prev: Dict, cur: Dict) -> str:
+def service_change_text(prev: Dict, cur: Dict, has_history: bool = True) -> str:
     """
-    前次與本次的服務項目／服務時數差異；兩邊都有值且不同才列出，沒有差異回傳空字串。
-    服務項目比對類型＋細項（細項不分順序）；服務時間以時數比對。
+    要註記的異動；沒有異動回傳空字串。
+    - 服務項目／服務時間：和前次（prev）比，兩邊都有值且不同才列出
+    - 付款方式：前次是 VIP（前次備註有 **VIP** 或前次用儲值金），或本次訂單原備註標示 **VIP**，
+      但本次付款方式不是儲值金
+    - 新客標記：前次備註或本次原備註有 **N-XXX**，且已不是首次服務（has_history）
     """
-    if not prev or not cur:
-        return ""
+    prev = prev or {}
+    cur = cur or {}
     lines = []
-    prev_items = (str(prev.get("clean_type", "")).strip(), sorted(str(x).strip() for x in (prev.get("service_items") or [])))
-    cur_items = (str(cur.get("clean_type", "")).strip(), sorted(str(x).strip() for x in (cur.get("service_items") or [])))
-    if (prev_items[0] or prev_items[1]) and (cur_items[0] or cur_items[1]) and prev_items != cur_items:
-        lines.append(f"服務項目：前次 {service_items_text(prev)}")
-        lines.append(f"　　　　　本次 {service_items_text(cur)}")
-    ph, ch = normalize_hour(prev.get("hour")), normalize_hour(cur.get("hour"))
-    if ph and ch and ph != ch:
-        lines.append(f"服務時間：前次 {service_time_text(prev)}／本次 {service_time_text(cur)}")
+    if prev and cur:
+        prev_items = (str(prev.get("clean_type", "")).strip(), sorted(str(x).strip() for x in (prev.get("service_items") or [])))
+        cur_items = (str(cur.get("clean_type", "")).strip(), sorted(str(x).strip() for x in (cur.get("service_items") or [])))
+        if (prev_items[0] or prev_items[1]) and (cur_items[0] or cur_items[1]) and prev_items != cur_items:
+            lines.append(f"服務項目：前次 {service_items_text(prev)}")
+            lines.append(f"　　　　　本次 {service_items_text(cur)}")
+        ph, ch = normalize_hour(prev.get("hour")), normalize_hour(cur.get("hour"))
+        if ph and ch and ph != ch:
+            lines.append(f"服務時間：前次 {service_time_text(prev)}／本次 {service_time_text(cur)}")
+
+    prev_notice = strip_change_block(prev.get("notice", ""))  # 只看備註本文，不看舊的異動段落
+    own_notice = strip_change_block(cur.get("notice", ""))
+    cur_payway = str(cur.get("payway", "") or "").strip()
+    prev_is_vip = bool(prev) and (VIP_TAG in prev_notice or str(prev.get("payway", "")).strip() == STORED_VALUE_PAYWAY)
+    if cur_payway and cur_payway != STORED_VALUE_PAYWAY:
+        if prev_is_vip:
+            lines.append(f"付款方式：前次 VIP（{STORED_VALUE_PAYWAY}）／本次 {cur_payway}")
+        elif VIP_TAG in own_notice:
+            lines.append(f"付款方式：備註標示 VIP／本次 {cur_payway}（非{STORED_VALUE_PAYWAY}）")
+
+    if has_history:
+        n_tags = []
+        for tag in N_TAG_RE.findall(prev_notice) + N_TAG_RE.findall(own_notice):
+            if tag not in n_tags:
+                n_tags.append(tag)
+        if n_tags:
+            lines.append(f"新客標記：{'、'.join(n_tags)} 已非首次服務／本次改為 {'、'.join(to_returning_tag(t) for t in n_tags)}")
     return "\n".join(lines)
+
+
+def to_returning_tag(tag: str) -> str:
+    """新客標記改舊客：**N-B** → **O-B**。"""
+    return re.sub(r"^\*\*N-", "**O-", tag)
+
+
+def convert_new_customer_tags(notice: str) -> str:
+    """備註裡所有 **N-XXX** 改成 **O-XXX**（第二次起不是新客）。"""
+    return N_TAG_RE.sub(lambda m: to_returning_tag(m.group(0)), str(notice or ""))
 
 
 def strip_change_block(notice: str) -> str:
@@ -897,11 +950,28 @@ def strip_change_block(notice: str) -> str:
         if t.startswith(CHANGE_PREFIXES):
             skipping = True
             continue
-        if skipping and (t.startswith(("服務項目：", "服務時間：", "時數：")) or ln.startswith("　　　　　")):
+        if skipping and (t.startswith(("服務項目：", "服務時間：", "時數：", "付款方式：", "前次標記：", "新客標記：")) or ln.startswith("　　　　　")):
             continue
         skipping = False
         out.append(ln)
     return "\n".join(out).strip()
+
+
+def compose_notice_for(target: Dict, prev: Optional[Dict], source: Optional[Dict], has_history: bool) -> str:
+    """
+    要寫入目前訂單的客服備註：
+    - 目前訂單本來就有客服備註 → 保留原備註（不覆蓋）
+    - 沒有 → 複製來源單（最近一次已服務）的客服備註
+    已非首次服務時 **N-** 改 **O-**；有異動時在最上方加【服務異動】段落。
+    """
+    own = strip_change_block((target or {}).get("notice", ""))
+    base = own or (strip_change_block(source.get("notice", "")) if source else "")
+    body = convert_new_customer_tags(base) if has_history else base
+    change = service_change_text(prev or {}, target or {}, has_history)
+    if change:
+        block = f"{CHANGE_PREFIXES[0]}\n{change}"
+        return f"{block}\n\n{body}" if body else block
+    return body
 
 
 def compose_copied_notice(source_notice: str, prev: Optional[Dict], cur: Optional[Dict]) -> str:
@@ -909,8 +979,8 @@ def compose_copied_notice(source_notice: str, prev: Optional[Dict], cur: Optiona
     複製前次客服備註；服務項目或服務時數與前次不同時，在最前面加【服務異動】段落。
     來源備註裡舊的異動段落先移除，避免一直累加。
     """
-    body = strip_change_block(source_notice)
     change = service_change_text(prev or {}, cur or {})
+    body = convert_new_customer_tags(strip_change_block(source_notice))
     if change:
         block = f"{CHANGE_PREFIXES[0]}\n{change}"
         return f"{block}\n\n{body}" if body else block
@@ -1187,6 +1257,7 @@ def build_preview_row(target: Dict, history_items: List[Dict]) -> Dict:
     has_history = has_any_same_address_history(target, history_items)
     source = find_best_source_order(target, history_items) if has_history else None
     latest = find_latest_same_order(target, history_items) if has_history and not source else None
+    own_notice = strip_change_block(target.get("notice", ""))
 
     return {
         "order_id": target.get("order_no", ""),
@@ -1201,20 +1272,20 @@ def build_preview_row(target: Dict, history_items: List[Dict]) -> Dict:
         "source_purchase_status_name": source.get("purchase_status_name", "") if source else "",
         "source_status_name": source.get("status", "") if source else "",
         "source_notice_exists": bool(source),
-        # 有來源：複製來源備註＋異動段落；前次備註空白：用最近一筆同地址訂單比對，只預填異動段落
-        "source_notice_preview": compose_copied_notice(source.get("notice", ""), source, target) if source
-        else (compose_copied_notice("", latest, target) if latest else ""),
+        # 原本有客服備註：保留＋註記；沒有：複製來源備註＋異動段落；都沒有：只預填異動段落
+        "source_notice_preview": compose_notice_for(target, source or latest, source, has_history),
+        "own_notice": own_notice,
         "hour": normalize_hour(target.get("hour")),
         "source_hour": normalize_hour((source or latest or {}).get("hour")),
         "service_items_text": service_items_text(target),
         "source_service_items_text": service_items_text(source or latest) if (source or latest) else "",
         "service_time_text": service_time_text(target),
         "source_service_time_text": service_time_text(source or latest) if (source or latest) else "",
-        "service_change": service_change_text(source or latest or {}, target),
+        "service_change": service_change_text(source or latest or {}, target, has_history),
         "latest_same_order_id": latest.get("order_no", "") if latest else "",
         "latest_same_order_date": display_service_date(latest) if latest else "",
         "has_history": has_history,
-        "can_autofill": bool(source),
+        "can_autofill": bool(source) or (bool(own_notice) and has_history),
         "is_new_order": not has_history,
     }
 
@@ -1350,8 +1421,32 @@ def get_target_and_source_for_order(session, target: Dict, log, override_notice:
             "source_notice": manual_notice,
         }
 
+    has_history = has_any_same_address_history(target_item, items)
+    current = dict(target_item)
+    if not current.get("hour"):
+        current["hour"] = target_form.get("hour", "")
+    if not str(current.get("notice", "") or "").strip():
+        current["notice"] = str(target_form.get("notice", "") or "")
+    own_notice = strip_change_block(current.get("notice", ""))
+
+    if own_notice and has_history:
+        # 目前訂單本來就有客服備註：保留原備註，只加註記（N- 改 O-）
+        prev = source or find_latest_same_order(target_item, items)
+        new_notice = compose_notice_for(current, prev, source, has_history)
+        change = service_change_text(prev or {}, current, has_history)
+        log(f"[保留原備註] {target_order_no}" + (f"：{change.replace(chr(10), '；')}" if change else "：無異動"))
+        return {
+            "target_form": target_form,
+            "target_phone": target_phone,
+            "target_name": target_name,
+            "target_addr": target_addr,
+            "target_service_date": target_service_date,
+            "source": source or {"order_no": "（保留原備註）", "purchase_status_name": "", "status": "", "service_date": ""},
+            "source_notice": new_notice,
+        }
+
     if not source:
-        if not has_any_same_address_history(target_item, items):
+        if not has_history:
             log(f"[新成單] {target_order_no}：此地址無歷史訂單，使用固定提醒文字")
             return {
                 "target_form": target_form,
@@ -1371,11 +1466,8 @@ def get_target_and_source_for_order(session, target: Dict, log, override_notice:
 
     if not str(source.get("notice", "")).strip():
         raise RuntimeError(f"❌ 處理失敗 {target_order_no}：來源單沒有客服備註")
-    current = dict(target_item)
-    if not current.get("hour"):
-        current["hour"] = target_form.get("hour", "")
-    source_notice = compose_copied_notice(source.get("notice", ""), source, current)
-    change = service_change_text(source, current)
+    source_notice = compose_notice_for(current, source, source, has_history)
+    change = service_change_text(source, current, has_history)
     if change:
         log(f"[服務異動] {change.replace(chr(10), '；')}，已註記於備註")
 

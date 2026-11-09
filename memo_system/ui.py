@@ -4,6 +4,9 @@
 #       pages/訂單系統.py 呼叫。
 # 更新記錄：
 # 2026-11-10
+# - ①②列表的「電話」改為連結，點了直接開後台訂單管理的電話搜尋結果頁。
+# - ①列表「異動」欄移到最前面（選取之後），列出異動類別（項目／時間／付款／N→O）。
+# - 訂單本來就有客服備註時改為保留原備註＋註記（狀態欄顯示「保留原備註」）。
 # - ①列表新增「服務項目／服務時間（前次→本次）」「異動」欄；服務項目或時數不同
 #   時備註最前面會自動加【服務異動】段落。前次備註空白的列也會預填異動段落，
 #   執行時以畫面上的備註為準。
@@ -38,6 +41,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
     # -*- coding: utf-8 -*-
     import streamlit as st
     import re
+    from urllib.parse import urlencode
     import importlib
     from datetime import date, timedelta
     from . import memo
@@ -471,10 +475,22 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         notices = {}
         selected_ids = []
 
+        def phone_search_url(phone):
+            """後台訂單管理用電話搜尋的結果頁（依目前環境）。"""
+            digits = re.sub(r"\D", "", str(phone or ""))
+            if not digits:
+                return ""
+            params = memo.blank_list_params()
+            params["phone"] = digits
+            return f"{memo.PURCHASE_URL}?{urlencode(params)}"
+
         def _status_text(r):
+            has_hist = r.get("has_history", not r.get("is_new_order"))
+            if r.get("own_notice"):
+                return "保留原備註＋註記" if r.get("service_change") else "保留原備註"
             if r.get("can_autofill"):
                 return "複製最近已服務備註"
-            if r.get("has_history", not r.get("is_new_order")):
+            if has_hist:
                 return "前次備註空白，請填寫"
             return "新客，請填寫"
 
@@ -486,20 +502,23 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
             section_selected = []
             data = []
             for r in items:
-                row = {
-                    "選取": bool(r.get("can_autofill")),
+                row = {"選取": bool(r.get("can_autofill"))}
+                if show_source:
+                    change = str(r.get("service_change", "") or "")
+                    kinds = [label for key, label in (("服務項目：", "項目"), ("服務時間：", "時間"), ("付款方式：", "付款"), ("新客標記：", "N→O")) if key in change]
+                    row["異動"] = ("⚠️ " + "／".join(kinds)) if kinds else ""
+                row.update({
                     "訂單號碼": r.get("order_id", ""),
                     "客戶": r.get("customer_name", ""),
-                    "電話": r.get("phone", ""),
+                    "電話": phone_search_url(r.get("phone", "")),
                     "地址": r.get("address", ""),
                     "服務日期": r.get("service_date", ""),
                     "付款狀態": r.get("purchase_status_name", ""),
-                }
+                })
                 if show_source:
                     ref_no = r.get("source_order_id") or r.get("latest_same_order_id", "")
                     ref_dt = r.get("source_service_date") or r.get("latest_same_order_date", "")
                     row["參照訂單"] = f"{ref_no} {ref_dt}".strip()
-                    row["異動"] = "⚠️ 項目／時間不同" if r.get("service_change") else ""
                     row["服務項目（前次→本次）"] = f"{r.get('source_service_items_text', '') or '-'} → {r.get('service_items_text', '') or '-'}"
                     row["服務時間（前次→本次）"] = f"{r.get('source_service_time_text', '') or '-'} → {r.get('service_time_text', '') or '-'}"
                 row["狀態"] = _status_text(r)
@@ -515,6 +534,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                 disabled=disabled,
                 column_config={
                     "選取": st.column_config.CheckboxColumn("選取", width="small"),
+                    "電話": st.column_config.LinkColumn("電話", display_text=r"phone=(\d+)"),
                     "客服備註（將寫入）": st.column_config.TextColumn("客服備註（將寫入）", width="large"),
                 },
             )
