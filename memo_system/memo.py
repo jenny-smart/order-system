@@ -3,6 +3,8 @@
 # ============================================================
 # 更新記錄：
 # 2026-11-11
+# - preview row 新增 created_at（訂購時間）；新增 preview_section_label／preview_status_text／
+#   preview_change_kinds，給 10:30 排程把①②③寫進「客服備註」分頁用（與畫面相同文字）。
 # - 加速：讀訂單明細改為同時 5 筆並行（DETAIL_WORKERS），順序與結果不變。
 # - 加速：歷史比對只讀「同電話＋同地址、服務日期早於該訂單的最近 3 筆」明細
 #   （recent_same_address_history），不再把同電話全部歷史訂單逐筆開頁
@@ -1358,6 +1360,37 @@ def find_latest_same_order(current_item: Dict, history_items: List[Dict]) -> Opt
     return same[0]
 
 
+def order_created_at_text(item: Dict) -> str:
+    """列表卡片「訂購資訊」的訂購時間（第一個 YYYY-MM-DD HH:MM[:SS]），沒有回傳空字串。"""
+    m = re.search(r"(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}(?::\d{2})?)", str(item.get("row_text", "") or ""))
+    return f"{m.group(1)} {m.group(2)}" if m else ""
+
+
+def preview_section_label(row: Dict) -> str:
+    if row.get("section") == "processed":
+        return "③ 已處理需註記"
+    if row.get("has_history", not row.get("is_new_order")):
+        return "① 有相同訂單"
+    return "② 無相同訂單"
+
+
+def preview_status_text(row: Dict) -> str:
+    if row.get("own_notice"):
+        return "保留原備註＋註記" if row.get("service_change") else "保留原備註"
+    if row.get("can_autofill"):
+        return "複製最近已服務備註"
+    if row.get("has_history", not row.get("is_new_order")):
+        return "前次備註空白，請填寫"
+    return "新客，請填寫"
+
+
+def preview_change_kinds(row: Dict) -> str:
+    change = str(row.get("service_change", "") or "")
+    kinds = [label for key, label in (("服務項目：", "項目"), ("服務時間：", "時間"), ("付款方式：", "付款"), ("新客標記：", "N→O"))
+             if key in change]
+    return ("⚠️ " + "／".join(kinds)) if kinds else ""
+
+
 def build_preview_row(target: Dict, history_items: List[Dict]) -> Dict:
     has_history = has_any_same_address_history(target, history_items)
     source = find_best_source_order(target, history_items) if has_history else None
@@ -1365,6 +1398,7 @@ def build_preview_row(target: Dict, history_items: List[Dict]) -> Dict:
     own_notice = strip_change_block(target.get("notice", ""))
 
     return {
+        "created_at": order_created_at_text(target),
         "order_id": target.get("order_no", ""),
         "customer_name": target.get("name", ""),
         "phone": target.get("phone", ""),

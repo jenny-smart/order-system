@@ -3,6 +3,11 @@
 
 更新記錄：
 2026-11-11
+- 「客服備註」分頁改寫「訂單客服備註」頁面的①②③三區結果（同一套查詢：購買日期＝前一上班日～
+  今天、付款狀態全部，再依訂購時間篩前一上班日 10:00～今天 10:00）：
+  異動（最前方）／分類／訂單編號／客戶／客人電話（搜尋連結）／地址／服務日期／付款狀態／狀態／
+  參照訂單／服務項目（前次→本次）／服務時間（前次→本次）／客服備註（將寫入）。
+  只寫工作表，不改後台客服備註（寫入仍在訂單客服備註頁面勾選執行）。
 - 修正 ImportError（circular import）：shared.gsheet 匯入時會 import orders，而 orders 又
   從 shared.gsheet 匯入；排程直接先載入 shared.gsheet 就會失敗（貼表、行事曆、執行 Log 全部
   寫不進去）。改成開始前先 import orders（_preload_modules），與 Streamlit 端的載入順序相同。
@@ -20,9 +25,8 @@
   訂單編號／客人姓名／客人電話／服務日期／客人備註／客服備註；
   客人電話是 HYPERLINK，點了開後台訂單管理用電話搜尋的結果頁。
   訂單編號已在分頁上的不重複貼；沒有「客人備註」分頁時自動建立並寫標題列。
-- 同一批訂單另外檢查客服備註：標示 **VIP** 但付款方式不是儲值金、或有 **N-XXX** 但已非首次
-  服務（同電話＋同地址有更早的訂單）→ 貼到同一個內勤工作表單的「客服備註」分頁：
-  註記（最前方）／訂單編號／客人姓名／客人電話／服務日期／付款方式／客服備註（電話一樣是搜尋連結）。
+- 另外跑「訂單客服備註」的①②③查詢（①有相同訂單／②無相同訂單／③已處理但 VIP 非儲值金或 **N-
+  已非首次）→ 貼到同一個內勤工作表單的「客服備註」分頁，欄位與頁面列表相同，異動欄最前方。
 - 貼完在 jenny@hers.com.tw 行事曆記一則「【客人備註】台北 N 筆、台中 M 筆」（寫不進去改寫
   jenny@lemonclean.com.tw；可用 CUSTOMER_MEMO_CALENDAR_ID 指定），內容列出逐筆訂單與工作表連結。
 
@@ -47,8 +51,9 @@ SHEET_CATEGORY = "內勤工作表單"
 TAB_TITLE = "客人備註"
 HEADER = ["訂單編號", "客人姓名", "客人電話", "服務日期", "客人備註", "客服備註"]
 NOTICE_TAB_TITLE = "客服備註"
-NOTICE_HEADER = ["註記", "訂單編號", "客人姓名", "客人電話", "服務日期", "付款方式", "客服備註"]
-NOTICE_KEY_COL = 2  # 「客服備註」分頁的訂單編號在 B 欄（A 欄是註記）
+NOTICE_HEADER = ["異動", "分類", "訂單編號", "客戶", "客人電話", "地址", "服務日期", "付款狀態", "狀態",
+                 "參照訂單", "服務項目（前次→本次）", "服務時間（前次→本次）", "客服備註（將寫入）"]
+NOTICE_KEY_COL = 3  # 「客服備註」分頁的訂單編號在 C 欄
 CALENDAR_IDS = ("jenny@hers.com.tw", "jenny@lemonclean.com.tw")
 CALENDAR_PREFIX = "【客人備註】"
 
@@ -112,16 +117,48 @@ def build_sheet_rows(rows: list[dict], base_url: str) -> list[list[str]]:
 
 
 def build_notice_sheet_rows(rows: list[dict], base_url: str) -> list[list[str]]:
-    """「客服備註」分頁的列（註記放最前方）。"""
-    return [[
-        str(r.get("註記", "") or ""),
-        str(r.get("訂單號碼", "") or ""),
-        str(r.get("客人姓名", "") or ""),
-        phone_cell(base_url, r.get("電話", "")),
-        str(r.get("服務日期", "") or ""),
-        str(r.get("付款方式", "") or ""),
-        str(r.get("客服備註", "") or ""),
-    ] for r in rows]
+    """「客服備註」分頁的列：訂單客服備註①②③預覽列（異動放最前方）。"""
+    from memo_system import memo
+
+    out = []
+    for r in rows:
+        ref_no = r.get("source_order_id") or r.get("latest_same_order_id", "")
+        ref_dt = r.get("source_service_date") or r.get("latest_same_order_date", "")
+        has_ref = bool(ref_no) or r.get("section") == "processed"
+        out.append([
+            memo.preview_change_kinds(r),
+            memo.preview_section_label(r),
+            str(r.get("order_id", "") or ""),
+            str(r.get("customer_name", "") or ""),
+            phone_cell(base_url, r.get("phone", "")),
+            str(r.get("address", "") or ""),
+            str(r.get("service_date", "") or ""),
+            str(r.get("purchase_status_name", "") or ""),
+            memo.preview_status_text(r),
+            f"{ref_no} {ref_dt}".strip(),
+            (f"{r.get('source_service_items_text', '') or '-'} → {r.get('service_items_text', '') or '-'}" if has_ref else ""),
+            (f"{r.get('source_service_time_text', '') or '-'} → {r.get('service_time_text', '') or '-'}" if has_ref else ""),
+            str(r.get("source_notice_preview", "") or ""),
+        ])
+    return out
+
+
+def section_rows_in_window(rows: list[dict], window: tuple[datetime, datetime]) -> list[dict]:
+    """訂單客服備註預覽列中，訂購時間在 [window) 內的（沒有訂購時間的是代客預訂，略過）。"""
+    out = []
+    for r in rows:
+        text = str(r.get("created_at", "") or "")
+        try:
+            created = datetime.strptime(text[:16], "%Y-%m-%d %H:%M")
+        except ValueError:
+            continue
+        if window[0] <= created < window[1]:
+            out.append(r)
+    order = {"③": 0, "①": 1, "②": 2}
+    from memo_system import memo
+    out.sort(key=lambda r: (0 if r.get("service_change") else 1,
+                            order.get(memo.preview_section_label(r)[:1], 9), str(r.get("order_id", ""))))
+    return out
 
 
 def last_data_row(col_a: list[str]) -> int:
@@ -181,8 +218,9 @@ def append_rows(ws, sheet_rows: list[list[str]], width: int = len(HEADER), key_c
 def build_calendar_event(result: dict, window: tuple[datetime, datetime], now: datetime) -> dict:
     counts = "、".join(f"{region} {item.get('saved', 0)} 筆" for region, item in result.items())
     notice_total = sum(int(item.get("notice_saved", 0) or 0) for item in result.values())
+    flagged = sum(1 for item in result.values() for r in item.get("notice_rows") or [] if r.get("service_change"))
     if notice_total:
-        counts += f"；客服備註需註記 {notice_total} 筆"
+        counts += f"；客服備註 {notice_total} 筆" + (f"（異動 {flagged}）" if flagged else "")
     lines = [f"區間：{window[0]:%m/%d %H:%M} ～ {window[1]:%m/%d %H:%M}（訂購時間）", ""]
     for region, item in result.items():
         lines.append(f"■ {region}：貼入 {item.get('saved', 0)} 筆" + (f"（{item['error']}）" if item.get("error") else ""))
@@ -192,11 +230,18 @@ def build_calendar_event(result: dict, window: tuple[datetime, datetime], now: d
             memo_text = str(r.get("客人備註", "")).replace("\n", " ")
             lines.append(f"{r.get('訂單號碼', '')} {r.get('客人姓名', '')} {r.get('服務日期', '')}：{memo_text[:60]}")
         if item.get("notice_rows"):
-            lines.append(f"□ 客服備註需註記：貼入 {item.get('notice_saved', 0)} 筆")
+            from memo_system import memo
+            lines.append(f"□ 客服備註①②③：貼入 {item.get('notice_saved', 0)} 筆")
             if item.get("notice_sheet_url"):
                 lines.append(item["notice_sheet_url"])
-            for r in item["notice_rows"]:
-                lines.append(f"{r.get('訂單號碼', '')} {r.get('客人姓名', '')}：{r.get('註記', '')}")
+            flagged_rows = [r for r in item["notice_rows"] if r.get("service_change")]
+            others = len(item["notice_rows"]) - len(flagged_rows)
+            if others:
+                lines.append(f"（無異動 {others} 筆請看工作表）")
+            for r in flagged_rows:
+                kinds = memo.preview_change_kinds(r)
+                lines.append(f"{memo.preview_section_label(r)[:1]} {r.get('order_id', '')} {r.get('customer_name', '')}"
+                             f"：{memo.preview_status_text(r)}" + (f"　{kinds}" if kinds else ""))
         lines.append("")
     return dict(
         summary=f"{CALENDAR_PREFIX}{counts}（{now:%m/%d}）",
@@ -244,7 +289,7 @@ def run(env: str = "prod", today: date | None = None, regions=REGIONS, dry_run: 
         calendar: dict | None = None, now: datetime | None = None) -> dict:
     _preload_modules()
     from accounts import ACCOUNTS
-    from function.customer_memo_query import customer_memo_rows, fetch_window_orders, find_notice_flag_orders
+    from function.customer_memo_query import customer_memo_rows, fetch_window_orders
     from memo_system import memo
     from shared.weekend_reminder_schedule import is_off_day, load_work_calendar
 
@@ -277,9 +322,14 @@ def run(env: str = "prod", today: date | None = None, regions=REGIONS, dry_run: 
                     session, created_from=window[0], created_to=window[1],
                 )
                 rows = customer_memo_rows(candidates)
-                notice_rows = find_notice_flag_orders(candidates, session)
+                preview = memo.preview_by_conditions(
+                    "購買日期", window[0].strftime("%Y/%m/%d"), window[1].strftime("%Y/%m/%d"), "全部",
+                    session=session,
+                )
+                notice_rows = section_rows_in_window(preview, window)
             item["rows"], item["notice_rows"] = rows, notice_rows
-            print(f"QUERY {region} 客人備註非空白 {len(rows)} 筆、客服備註需註記 {len(notice_rows)} 筆", flush=True)
+            print(f"QUERY {region} 客人備註非空白 {len(rows)} 筆、客服備註①②③ {len(notice_rows)} 筆"
+                  f"（有異動 {sum(1 for r in notice_rows if r.get('service_change'))} 筆）", flush=True)
             if dry_run:
                 continue
             spreadsheet, ws = get_tab(region)
@@ -301,7 +351,7 @@ def run(env: str = "prod", today: date | None = None, regions=REGIONS, dry_run: 
         print(line, flush=True)
 
     errors = [f"{r}：{i['error']}" for r, i in result.items() if i["error"]]
-    summary = "；".join(f"{r} 客人備註 {len(i['rows'])} 筆貼入 {i['saved']} 筆、客服備註需註記 {len(i['notice_rows'])} 筆貼入 {i['notice_saved']} 筆"
+    summary = "；".join(f"{r} 客人備註 {len(i['rows'])} 筆貼入 {i['saved']} 筆、客服備註①②③ {len(i['notice_rows'])} 筆貼入 {i['notice_saved']} 筆"
                         for r, i in result.items())
     message = f"{window[0]:%m/%d %H:%M}～{window[1]:%m/%d %H:%M}：{summary}" + ("（試跑，未寫入）" if dry_run else "")
     if errors:

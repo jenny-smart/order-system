@@ -106,33 +106,60 @@ class NoticeFlagTest(unittest.TestCase):
             out = cmq.find_notice_flag_orders([self.item("LC5", "**N-A**首次")], session=object())
         self.assertEqual(out, [])
 
-    def test_notice_sheet_row(self):
-        rows = cms.build_notice_sheet_rows([{"訂單號碼": "LC1", "客人姓名": "王", "電話": "0912", "服務日期": "11/15",
-                                             "付款方式": "ATM", "註記": "x", "客服備註": "**VIP**"}], "https://b")
-        self.assertEqual(len(rows[0]), len(cms.NOTICE_HEADER))
-        self.assertEqual(cms.NOTICE_HEADER[0], "註記")
-        self.assertEqual(rows[0][0], "x")       # 註記在最前方
-        self.assertEqual(rows[0][1], "LC1")
-        self.assertTrue(rows[0][3].startswith('=HYPERLINK("https://b/purchase?'))
+    def test_notice_sheet_row_sections(self):
+        rows = [
+            {"order_id": "LC3", "customer_name": "魏", "phone": "0987", "address": "A", "service_date": "2026/11/15",
+             "purchase_status_name": "已付款", "section": "processed", "has_history": True, "can_autofill": True,
+             "own_notice": "**N-A**x", "service_change": "新客標記：**N-A** 已非首次服務／本次改為 **O-A**",
+             "source_notice_preview": "【服務異動】…", "latest_same_order_id": "LC1", "latest_same_order_date": "2026/10/31",
+             "source_service_items_text": "居家清潔（a）", "service_items_text": "居家清潔（b）",
+             "source_service_time_text": "14:00-17:00（3小時）", "service_time_text": "14:00-17:00（3小時）"},
+            {"order_id": "LC8", "customer_name": "戴", "phone": "0916", "address": "B", "service_date": "2026/11/15",
+             "purchase_status_name": "已付款", "has_history": False, "is_new_order": True, "can_autofill": False,
+             "own_notice": "", "service_change": "", "source_notice_preview": ""},
+        ]
+        out = cms.build_notice_sheet_rows(rows, "https://b")
+        self.assertEqual(cms.NOTICE_HEADER[:3], ["異動", "分類", "訂單編號"])
+        self.assertEqual(len(out[0]), len(cms.NOTICE_HEADER))
+        self.assertEqual(out[0][:3], ["⚠️ N→O", "③ 已處理需註記", "LC3"])
+        self.assertTrue(out[0][4].startswith('=HYPERLINK("https://b/purchase?'))
+        self.assertEqual(out[0][8], "保留原備註＋註記")
+        self.assertEqual(out[0][9], "LC1 2026/10/31")
+        self.assertEqual(out[1][:3], ["", "② 無相同訂單", "LC8"])
+        self.assertEqual(out[1][8], "新客，請填寫")
+        self.assertEqual(out[1][10], "")
 
-    def test_append_notice_tab_dedupes_by_order_column_b(self):
+    def test_section_rows_filtered_by_created_window(self):
+        rows = [{"order_id": "A", "created_at": "2026-11-09 09:59:00"},
+                {"order_id": "B", "created_at": "2026-11-09 10:00:00", "service_change": ""},
+                {"order_id": "C", "created_at": "2026-11-10 09:00:00", "service_change": "付款方式：…",
+                 "has_history": False},
+                {"order_id": "D", "created_at": ""}]
+        out = cms.section_rows_in_window(rows, (datetime(2026, 11, 9, 10), datetime(2026, 11, 10, 10)))
+        self.assertEqual([r["order_id"] for r in out], ["C", "B"])  # 有異動排前面
+
+    def test_append_notice_tab_dedupes_by_order_column_c(self):
         ws = MagicMock(row_count=1000)
-        ws.col_values.side_effect = lambda col: {1: ["註記", "x"], 2: ["訂單編號", "LC1"]}[col]
-        saved = cms.append_rows(ws, [["x", "LC1"] + [""] * 5, ["y", "LC2"] + [""] * 5],
-                                width=7, key_col=cms.NOTICE_KEY_COL)
+        ws.col_values.side_effect = lambda col: {1: ["異動", "x"], 3: ["訂單編號", "LC1"]}[col]
+        w = len(cms.NOTICE_HEADER)
+        saved = cms.append_rows(ws, [["x", "①", "LC1"] + [""] * (w - 3), ["", "②", "LC2"] + [""] * (w - 3)],
+                                width=w, key_col=cms.NOTICE_KEY_COL)
         self.assertEqual(saved, 1)
-        self.assertEqual(ws.update.call_args.kwargs["range_name"], "A3:G3")
-        self.assertEqual(ws.update.call_args.kwargs["values"][0][1], "LC2")
+        self.assertEqual(ws.update.call_args.kwargs["range_name"], "A3:M3")
+        self.assertEqual(ws.update.call_args.kwargs["values"][0][2], "LC2")
 
 
 class CalendarTest(unittest.TestCase):
     def test_event_summary_includes_notice_count(self):
-        result = {"台北": {"saved": 1, "rows": [], "notice_saved": 2,
-                           "notice_rows": [{"訂單號碼": "LC1", "客人姓名": "王", "註記": "付款方式：…"}]}}
+        result = {"台北": {"saved": 1, "rows": [], "notice_saved": 2, "notice_rows": [
+            {"order_id": "LC1", "customer_name": "王", "has_history": False, "own_notice": "**VIP**",
+             "service_change": "付款方式：備註標示 VIP／本次 ATM（非儲值金）"},
+            {"order_id": "LC2", "customer_name": "李", "has_history": False, "service_change": ""}]}}
         ev = cms.build_calendar_event(result, (datetime(2026, 11, 9, 10), datetime(2026, 11, 10, 10)),
                                       datetime(2026, 11, 10, 10, 5))
-        self.assertIn("客服備註需註記 2 筆", ev["summary"])
-        self.assertIn("LC1 王：付款方式", ev["description"])
+        self.assertIn("客服備註 2 筆（異動 1）", ev["summary"])
+        self.assertIn("② LC1 王：保留原備註＋註記　⚠️ 付款", ev["description"])
+        self.assertIn("無異動 1 筆請看工作表", ev["description"])
 
     def test_event_summary_and_reminder(self):
         result = {"台北": {"saved": 2, "rows": [{"訂單號碼": "LC1", "客人姓名": "王", "服務日期": "11/15", "客人備註": "a"}],
