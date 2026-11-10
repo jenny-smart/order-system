@@ -3,6 +3,12 @@
 
 更新記錄：
 2026-11-11
+- 欄位改成內勤工作表單上 Jenny 訂的標題，兩個分頁 A 欄都是「備註日期時間」（排程寫入時間）：
+  客人備註：備註日期時間／訂單編號／訂購人／電話號碼／預約日期／客人備註／客服備註
+  客服備註：備註日期時間／標記／訂單編號／訂購人／電話號碼／地址／服務日期／付款狀態／
+            異動單號／異動項目／異動時數／異動客服備註／異動註記
+  標記＝異動類別（⚠️ 付款／項目／時間／N→O），沒有異動時寫分類（①②③）。
+  分頁已存在但第 1 列空白時補寫標題列。
 - 修正行事曆 404：服務帳號沒有 jenny@hers.com.tw 行事曆的寫入權，改優先用 Jenny 本人授權
   （GOOGLE_HERS_CALENDAR_REFRESH_TOKEN＋GOOGLE_OAUTH_CLIENT_ID／SECRET，與 tool-system 相同）。
 - 「客服備註」分頁改寫「訂單客服備註」頁面的①②③三區結果（同一套查詢：購買日期＝前一上班日～
@@ -51,10 +57,11 @@ RUN_AT = time(10, 0)
 REGIONS = ("台北", "台中")
 SHEET_CATEGORY = "內勤工作表單"
 TAB_TITLE = "客人備註"
-HEADER = ["訂單編號", "客人姓名", "客人電話", "服務日期", "客人備註", "客服備註"]
+HEADER = ["備註日期時間", "訂單編號", "訂購人", "電話號碼", "預約日期", "客人備註", "客服備註"]
+KEY_COL = 2  # 「客人備註」分頁的訂單編號在 B 欄
 NOTICE_TAB_TITLE = "客服備註"
-NOTICE_HEADER = ["異動", "分類", "訂單編號", "客戶", "客人電話", "地址", "服務日期", "付款狀態", "狀態",
-                 "參照訂單", "服務項目（前次→本次）", "服務時間（前次→本次）", "客服備註（將寫入）"]
+NOTICE_HEADER = ["備註日期時間", "標記", "訂單編號", "訂購人", "電話號碼", "地址", "服務日期", "付款狀態",
+                 "異動單號", "異動項目", "異動時數", "異動客服備註", "異動註記"]
 NOTICE_KEY_COL = 3  # 「客服備註」分頁的訂單編號在 C 欄
 CALENDAR_IDS = ("jenny@hers.com.tw", "jenny@lemonclean.com.tw")
 CALENDAR_PREFIX = "【客人備註】"
@@ -106,9 +113,15 @@ def phone_cell(base_url: str, phone: str) -> str:
             if phone else "")
 
 
-def build_sheet_rows(rows: list[dict], base_url: str) -> list[list[str]]:
+def stamp_text(now: datetime | None = None) -> str:
+    """A 欄「備註日期時間」：排程寫入的台北時間。"""
+    return (now or datetime.now(TZ)).astimezone(TZ).strftime("%Y/%m/%d %H:%M")
+
+
+def build_sheet_rows(rows: list[dict], base_url: str, stamp: str = "") -> list[list[str]]:
     """「客人備註」分頁的列。"""
     return [[
+        stamp,
         str(r.get("訂單號碼", "") or ""),
         str(r.get("客人姓名", "") or ""),
         phone_cell(base_url, r.get("電話", "")),
@@ -118,8 +131,8 @@ def build_sheet_rows(rows: list[dict], base_url: str) -> list[list[str]]:
     ] for r in rows]
 
 
-def build_notice_sheet_rows(rows: list[dict], base_url: str) -> list[list[str]]:
-    """「客服備註」分頁的列：訂單客服備註①②③預覽列（異動放最前方）。"""
+def build_notice_sheet_rows(rows: list[dict], base_url: str, stamp: str = "") -> list[list[str]]:
+    """「客服備註」分頁的列：訂單客服備註①②③預覽列（欄位同工作表標題）。"""
     from memo_system import memo
 
     out = []
@@ -128,19 +141,19 @@ def build_notice_sheet_rows(rows: list[dict], base_url: str) -> list[list[str]]:
         ref_dt = r.get("source_service_date") or r.get("latest_same_order_date", "")
         has_ref = bool(ref_no) or r.get("section") == "processed"
         out.append([
-            memo.preview_change_kinds(r),
-            memo.preview_section_label(r),
-            str(r.get("order_id", "") or ""),
-            str(r.get("customer_name", "") or ""),
-            phone_cell(base_url, r.get("phone", "")),
-            str(r.get("address", "") or ""),
-            str(r.get("service_date", "") or ""),
-            str(r.get("purchase_status_name", "") or ""),
-            memo.preview_status_text(r),
-            f"{ref_no} {ref_dt}".strip(),
+            stamp,
+            memo.preview_change_kinds(r) or memo.preview_section_label(r),          # 標記
+            str(r.get("order_id", "") or ""),                                        # 訂單編號
+            str(r.get("customer_name", "") or ""),                                   # 訂購人
+            phone_cell(base_url, r.get("phone", "")),                                # 電話號碼
+            str(r.get("address", "") or ""),                                         # 地址
+            str(r.get("service_date", "") or ""),                                    # 服務日期
+            str(r.get("purchase_status_name", "") or ""),                            # 付款狀態
+            f"{ref_no} {ref_dt}".strip(),                                            # 異動單號
             (f"{r.get('source_service_items_text', '') or '-'} → {r.get('service_items_text', '') or '-'}" if has_ref else ""),
             (f"{r.get('source_service_time_text', '') or '-'} → {r.get('service_time_text', '') or '-'}" if has_ref else ""),
-            str(r.get("source_notice_preview", "") or ""),
+            memo.preview_status_text(r),                                             # 異動客服備註
+            str(r.get("source_notice_preview", "") or ""),                           # 異動註記
         ])
     return out
 
@@ -189,6 +202,9 @@ def get_tab(region: str, title: str = TAB_TITLE, header: list[str] = HEADER, spr
     spreadsheet = spreadsheet or open_spreadsheet(region)
     for ws in with_retry(spreadsheet.worksheets):
         if ws.title == title:
+            first = with_retry(ws.row_values, 1)
+            if not any(str(v).strip() for v in first):  # 分頁在但沒有標題列 → 補寫
+                with_retry(ws.update, values=[header], range_name=f"A1:{_col_letter(len(header))}1")
             return spreadsheet, ws
     ws = with_retry(spreadsheet.add_worksheet, title=title, rows=1000, cols=len(header))
     with_retry(ws.update, values=[header], range_name=f"A1:{_col_letter(len(header))}1")
@@ -332,12 +348,13 @@ def run(env: str = "prod", today: date | None = None, regions=REGIONS, dry_run: 
                 continue
             spreadsheet, ws = get_tab(region)
             item["sheet_url"] = f"https://docs.google.com/spreadsheets/d/{spreadsheet.id}/edit#gid={ws.id}"
-            item["saved"] = append_rows(ws, build_sheet_rows(rows, memo.BASE_URL))
+            stamp = stamp_text(now)
+            item["saved"] = append_rows(ws, build_sheet_rows(rows, memo.BASE_URL, stamp), key_col=KEY_COL)
             print(f"SAVE {region} 客人備註貼入 {item['saved']} 筆（重複略過 {len(rows) - item['saved']} 筆）", flush=True)
             if notice_rows:
                 _, nws = get_tab(region, NOTICE_TAB_TITLE, NOTICE_HEADER, spreadsheet=spreadsheet)
                 item["notice_sheet_url"] = f"https://docs.google.com/spreadsheets/d/{spreadsheet.id}/edit#gid={nws.id}"
-                item["notice_saved"] = append_rows(nws, build_notice_sheet_rows(notice_rows, memo.BASE_URL),
+                item["notice_saved"] = append_rows(nws, build_notice_sheet_rows(notice_rows, memo.BASE_URL, stamp),
                                                    width=len(NOTICE_HEADER), key_col=NOTICE_KEY_COL)
                 print(f"SAVE {region} 客服備註貼入 {item['notice_saved']} 筆", flush=True)
         except Exception as exc:
