@@ -1,4 +1,4 @@
-"""獨立的已成單預約完成 LINE 通知頁面。"""
+"""批次成單預約完成通知（原「已成單預約完成通知」）：批次建單後產生合併的 LINE 預約完成通知。"""
 import os
 import requests
 import streamlit as st
@@ -80,7 +80,7 @@ def _render_cloud_progress(sheet, row_spec):
 
 
 def render(backend_email, backend_password, env):
-    st.markdown("### 已成單預約完成通知")
+    st.markdown("### 批次成單預約完成通知")
     st.info("只處理 Google 日曆有對應行程的已成單資料；通知會直接寫入原排程工作表每個地址群組的第一列。")
     c1, c2 = st.columns(2)
     sheet_name = c1.text_input("工作表名稱", placeholder="例：台北202611", key="completed_notice_sheet")
