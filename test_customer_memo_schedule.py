@@ -8,6 +8,20 @@ from shared import customer_memo_schedule as cms
 from function import customer_memo_query as cmq
 
 
+class ImportOrderTest(unittest.TestCase):
+    def test_fresh_interpreter_can_use_gsheet_after_preload(self):
+        """全新直譯器（同 GitHub Actions）：先 _preload_modules 再用 shared.gsheet 不可 ImportError。"""
+        import subprocess
+        import sys
+        code = ("import shared.customer_memo_schedule as m; m._preload_modules(); "
+                "from shared.gsheet import build_gsheet_client, get_service_account_info; "
+                "from shared.atm_match_reconcile_schedule import _calendar_service; "
+                "from shared.execution_log_service import log_execution; print('ok')")
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120)
+        self.assertEqual(out.returncode, 0, out.stderr[-800:])
+        self.assertIn("ok", out.stdout)
+
+
 class WindowTest(unittest.TestCase):
     def test_tuesday_uses_monday_10(self):
         self.assertEqual(cms.query_window(date(2026, 11, 10), {}),
