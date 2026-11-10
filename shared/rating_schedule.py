@@ -3,11 +3,13 @@
 
 更新記錄：
 2026-11-11（新增）
-- complaint（上班日 07:00）：評價管理（/rating）中「服務滿意度」不是滿意／非常滿意（尚可、不滿意…）的評價，
+- complaint（上班日 07:00）：評價管理（/rating）中「服務滿意度」為不滿意或尚可的評價；
+  滿意但評價項目有非正面（例：準時到達：無）或備註有負面字詞（NEGATIVE_KEYWORDS）也登記，客訴內容最前面註明交客服判斷；
   插入該區當年度「內勤工作表單」的「清潔客訴」分頁（最後一筆客訴之後插列，下方下拉選單清單會往下移）。
 - booking（上班日 07:20）：有勾選「預約下次服務」的評價，插入「評價預約」分頁主名單之後
   （插列，主名單下方的空白列與手寫區塊整段往下移，不會被覆蓋）。
 - relink（手動）：整理「清潔客訴」「評價預約」既有列的電話與姓名連結。
+- 獨立功能「整理姓名／電話連結」（function/sheet_link_tool.py）：任一工作表指定姓名／電話欄套用同樣連結。
 - 電話一律放後台訂單管理電話查詢連結；姓名一律加上 LINE 聊天連結（查不到 LINE 就維持文字）。
 - 兩個排程的區間都是「前一上班日 07:00 ～ 今天 07:00」（依評價時間），已登記過的不重複貼。
 - 貼完記 jenny@hers.com.tw 行事曆（寫不進去改 jenny@lemonclean.com.tw；可用 RATING_CALENDAR_ID 指定）。
@@ -44,8 +46,15 @@ COMPLAINT_FIRST_ROW = 3
 COMPLAINT_WIDTH = 13  # A～M
 COMPLAINT_NAME_COL, COMPLAINT_PHONE_COL = 7, 8  # G、H
 COMPLAINT_SOURCE = "官網評價"
-OK_SATISFACTION = {"滿意", "非常滿意"}
-OK_ITEM_VALUES = {"有", "是", "良好", "滿意", "非常滿意", "準時"}
+COMPLAINT_SATISFACTION = {"尚可", "不滿意"}
+OK_ITEM_VALUES = {"有", "是", "良好", "滿意", "非常滿意", "準時", "好", "很好", "非常好"}
+# 服務滿意度「滿意」但備註有這些字，也登記清潔客訴（客訴內容最前面註明，交客服判斷）
+NEGATIVE_KEYWORDS = (
+    "不乾淨", "沒乾淨", "沒擦", "沒有擦", "沒清", "沒有清", "沒洗", "漏掉", "遺漏", "漏了", "沒做", "沒有做", "未完成",
+    "髒", "汙漬", "污漬", "水垢", "灰塵", "頭髮", "毛髮", "痕跡", "刮傷", "刮痕", "損壞", "弄壞", "打破", "破損", "不見",
+    "遲到", "太慢", "超時", "提早離開", "態度不", "不禮貌", "不專業", "敷衍", "馬虎", "粗心", "隨便",
+    "失望", "不滿", "可惜", "抱怨", "不舒服", "加強", "改進", "改善", "再注意", "希望下次", "不夠",
+)
 SKIP_ITEMS = {"服務滿意度", "從何得知我們的服務", "預約下一次服務時間"}
 
 # ------------------------------------------------------------
@@ -59,7 +68,7 @@ BOOKING_LAYOUTS = {
 MAIN_LIST_GAP = 3  # 連續這麼多列 A～K 全空白＝主名單結束
 
 CALENDAR_PREFIX = {"complaint": "【評價客訴】", "booking": "【評價預約】"}
-TOOL_NAME = {"complaint": "官網評價不滿意→清潔客訴：自動排程", "booking": "官網評價預約下次→評價預約：自動排程",
+TOOL_NAME = {"complaint": "官網評價尚可／不滿意／有負面意見→清潔客訴：自動排程", "booking": "官網評價預約下次→評價預約：自動排程",
              "relink": "清潔客訴／評價預約：整理電話與姓名連結"}
 
 
@@ -197,15 +206,41 @@ def fetch_ratings(session, base_url: str, date_s: str, date_e: str, max_pages: i
 
 
 def is_unsatisfied(rating: dict) -> bool:
-    value = str(rating.get("items", {}).get("服務滿意度", "")).strip()
-    return bool(value) and value not in OK_SATISFACTION
+    """服務滿意度為「尚可」或「不滿意」才登記清潔客訴（後台選項只有 滿意／尚可／不滿意）。"""
+    return str(rating.get("items", {}).get("服務滿意度", "")).strip() in COMPLAINT_SATISFACTION
+
+
+def negative_items(rating: dict) -> list[str]:
+    return [f"{k}：{v}" for k, v in rating.get("items", {}).items()
+            if k not in SKIP_ITEMS and v and v not in OK_ITEM_VALUES]
+
+
+def negative_keywords(text: str) -> list[str]:
+    return [k for k in NEGATIVE_KEYWORDS if k in str(text or "")]
+
+
+def complaint_reason(rating: dict) -> str:
+    """要登記清潔客訴的原因；不用登記回傳空字串。
+    尚可／不滿意 → 一律登記；滿意 → 評價項目有非正面，或備註有負面字詞才登記。"""
+    if is_unsatisfied(rating):
+        return f"服務滿意度{rating['items']['服務滿意度']}"
+    if str(rating.get("items", {}).get("服務滿意度", "")).strip() != "滿意":
+        return ""
+    reasons = negative_items(rating)
+    words = negative_keywords(rating.get("note", ""))
+    if words:
+        reasons.append("意見含「" + "、".join(words[:5]) + "」")
+    return ("滿意但" + "；".join(reasons)) if reasons else ""
 
 
 def complaint_text(rating: dict) -> str:
-    """客訴內容：服務滿意度＋非正面的評價項目＋備註＋訂單編號（重複判斷用）。"""
+    """客訴內容：（滿意但有疑慮的註記）＋服務滿意度＋非正面的評價項目＋備註＋訂單編號（重複判斷用）。"""
     items = rating.get("items", {})
-    lines = [f"服務滿意度：{items.get('服務滿意度', '')}"]
-    lines += [f"{k}：{v}" for k, v in items.items() if k not in SKIP_ITEMS and v and v not in OK_ITEM_VALUES]
+    lines = []
+    if not is_unsatisfied(rating):
+        lines += [f"【{complaint_reason(rating)}，請客服判斷】"]
+    lines += [f"服務滿意度：{items.get('服務滿意度', '')}"]
+    lines += negative_items(rating)
     if rating.get("note"):
         lines += ["", f"備註：{rating['note']}"]
     lines += ["", f"訂單：{rating.get('order_no', '')}"]
@@ -375,8 +410,9 @@ def _complaint_region(region: str, env: str, window, dry_run: bool, item: dict) 
     session, base_url, _, _ = _login(region, env)
     with contextlib.redirect_stdout(io.StringIO()):
         ratings = fetch_ratings(session, base_url, window[0].date().isoformat(), window[1].date().isoformat())
-    targets = [r for r in ratings if in_window(r["rated_at"], window) and is_unsatisfied(r)]
-    print(f"QUERY {region} 評價 {len(ratings)} 筆，區間內非滿意 {len(targets)} 筆", flush=True)
+    targets = [r for r in ratings if in_window(r["rated_at"], window) and complaint_reason(r)]
+    print(f"QUERY {region} 評價 {len(ratings)} 筆，區間內要登記 {len(targets)} 筆"
+          f"（尚可／不滿意 {sum(1 for r in targets if is_unsatisfied(r))}）", flush=True)
     item["found"] = len(targets)
     spreadsheet, ws = get_tab(region, COMPLAINT_TAB)
     item["sheet_url"] = f"https://docs.google.com/spreadsheets/d/{spreadsheet.id}/edit#gid={ws.id}"
@@ -393,7 +429,7 @@ def _complaint_region(region: str, env: str, window, dry_run: bool, item: dict) 
             detail = {}
             summary.append(f"⚠️ {r['order_no']} 查訂單失敗：{exc}")
         rows.append(build_complaint_row(r, detail, base_url))
-        summary.append(f"{r['rated_at'][:16]} {r['name']} {r['order_no']}：服務滿意度 {r['items'].get('服務滿意度', '')}"
+        summary.append(f"{r['rated_at'][:16]} {r['name']} {r['order_no']}：{complaint_reason(r)}"
                        + (f"／{r['note'][:40]}" if r.get("note") else ""))
     item["summary_lines"] = summary
     if rows and not dry_run:
@@ -522,6 +558,62 @@ def relink_updates(formulas: list[list], name_col: int, phone_col: int, first_ro
             if line_url:
                 updates.append({"range": f"{_col_letter(name_col)}{idx + 1}", "values": [[name_cell(name, line_url)]]})
     return updates
+
+
+def col_index(letter: str) -> int:
+    """欄位字母 → 1 起算的欄號（支援 AB、AC 等多字母）。"""
+    letter = str(letter or "").strip().upper()
+    if not re.fullmatch(r"[A-Z]{1,3}", letter):
+        raise ValueError(f"欄位格式錯誤：{letter or '（空白）'}")
+    n = 0
+    for ch in letter:
+        n = n * 26 + ord(ch) - 64
+    return n
+
+
+def spreadsheet_key(text: str) -> str:
+    """Google Sheet 網址或 ID → ID。"""
+    text = str(text or "").strip()
+    m = re.search(r"/spreadsheets/d/([\w-]+)", text)
+    key = m.group(1) if m else text
+    if not re.fullmatch(r"[\w-]{20,}", key):
+        raise ValueError("請貼 Google Sheet 網址或 ID")
+    return key
+
+
+def login_session(email: str, password: str, env: str = "prod"):
+    """用指定後台帳密登入（獨立功能用畫面上的帳密）。"""
+    import requests
+    import quick_order as qo
+
+    base_url = qo._configure_environment(env)
+    session = requests.Session()
+    if not qo.login(session, email, password):
+        raise RuntimeError("後台登入失敗，請確認帳號密碼")
+    return session, base_url
+
+
+def plan_sheet_links(ws, session, base_url: str, name_col: int, phone_col: int, first_row: int,
+                     last_row: int = 0, line_col: int = 0) -> list[dict]:
+    """任一工作表：回傳要更新的儲存格（姓名→LINE 連結、電話→訂單管理電話查詢連結）。"""
+    from memo_system.memo import with_retry
+
+    width = max(name_col, phone_col, line_col or 0)
+    end = last_row or ws.row_count
+    formulas = with_retry(ws.get, f"A1:{_col_letter(width)}{end}", value_render_option="FORMULA")
+    if not last_row:
+        cols = (name_col, phone_col)
+        last_row = last_row_by_columns(formulas, cols)
+    cache: dict = {}
+    return relink_updates(formulas, name_col, phone_col, first_row, base_url,
+                          lambda p: line_url_by_phone(session, p, cache), line_col=line_col, last_row=last_row)
+
+
+def apply_updates(ws, updates: list[dict]) -> None:
+    from memo_system.memo import with_retry
+
+    for i in range(0, len(updates), 200):
+        with_retry(ws.batch_update, updates[i:i + 200], value_input_option="USER_ENTERED")
 
 
 def relink(env: str = "prod", regions=REGIONS, dry_run: bool = False) -> dict:

@@ -1,9 +1,13 @@
 # ============================================================
 # 檔名：ordersapp.py
-# 版本：v8.80
+# 版本：v8.83
 # 模組：服務訂單系統主畫面／統一功能選單
-# 最後更新：2026-11-09
+# 最後更新：2026-11-11
 #
+# v8.83
+# - 新增獨立功能「整理姓名／電話連結」（function/sheet_link_tool.py），放在
+#   E. 會員／客戶管理「整理預約下次服務」下方：任一工作表的姓名加 LINE 連結、
+#   電話加訂單管理電話查詢連結（可指定 Sheet ID、工作表名稱、姓名／電話欄）。
 # v8.82
 # - 新增獨立功能「客人備註查詢」（function/customer_memo_query.py），放在
 #   C. 稽核比對工具，不併在訂單客服備註內。
@@ -101,6 +105,7 @@ from function import order_creation as _order_creation_page
 from function import line_notice_generator as _line_notice_page
 from function import completed_booking_notice as _completed_notice_page
 from function import next_appointment_list as _next_appointment_page
+from function import sheet_link_tool as _sheet_link_page
 from function import next_service_time_updater as _next_service_time_page
 from function import member_preferences as _member_preferences_page
 from function import member_phone_lookup as _member_phone_lookup_page
@@ -214,6 +219,7 @@ FUNCTION_OPTIONS = [
     ("會員手機查詢：貼上姓名／LINE 或讀取 Google Sheet 指定列，查詢手機並核對會員。", "orders", "會員手機查詢"),
     ("會員喜好設定：輸入電話查會員，設定喜愛專員性別與喜愛／不喜愛專員。", "orders", "會員喜好設定"),
     ("整理預約下次服務：搜尋評價日期區間內有填預約下次服務的評價並整理名單。", "orders", "整理預約下次服務"),
+    ("整理姓名／電話連結：任一工作表指定姓名／電話欄，姓名加 LINE 連結、電話加訂單管理電話查詢連結。", "orders", "整理姓名／電話連結"),
     ("更新建議下次服務時間：依地址＋電話查後台最近3次服務日期並寫回 Sheet。", "orders", "更新建議下次服務時間"),
     # ---------- F. 財務功能 ----------
     ("台北/台中區對帳：ATM 待付款清單查詢、配對銀行明細、更新系統對帳。", "memo", "台北/台中區對帳"),
@@ -409,6 +415,8 @@ elif mode == "已成單預約完成通知":
     _completed_notice_page.render(backend_email, backend_password, env)
 elif mode == "整理預約下次服務":
     _next_appointment_page.render(backend_email, backend_password, env)
+elif mode == "整理姓名／電話連結":
+    _sheet_link_page.render(backend_email, backend_password, env)
 elif mode == "更新建議下次服務時間":
     _next_service_time_page.render(backend_email, backend_password, env)
 elif mode == "會員手機查詢":

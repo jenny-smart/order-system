@@ -48,8 +48,22 @@ class RatingTest(unittest.TestCase):
         self.assertTrue(rs.is_unsatisfied(self.rating))
         self.assertTrue(rs.is_unsatisfied({"items": {"服務滿意度": "不滿意"}}))
         self.assertFalse(rs.is_unsatisfied({"items": {"服務滿意度": "滿意"}}))
-        self.assertFalse(rs.is_unsatisfied({"items": {"服務滿意度": "非常滿意"}}))
+        self.assertFalse(rs.is_unsatisfied({"items": {"服務滿意度": "其他"}}))
         self.assertFalse(rs.is_unsatisfied({"items": {}}))
+
+    def test_satisfied_with_negative_note_is_registered(self):
+        r = {"items": {"服務滿意度": "滿意", "準時到達": "有"}, "note": "浴室鏡子沒擦，希望下次加強", "order_no": "LC1"}
+        self.assertIn("沒擦", rs.complaint_reason(r))
+        self.assertTrue(rs.complaint_text(r).startswith("【滿意但意見含「沒擦"))
+
+    def test_satisfied_with_negative_item_is_registered(self):
+        r = {"items": {"服務滿意度": "滿意", "準時到達": "無"}, "note": ""}
+        self.assertEqual(rs.complaint_reason(r), "滿意但準時到達：無")
+
+    def test_satisfied_and_positive_is_not_registered(self):
+        r = {"items": {"服務滿意度": "滿意", "準時到達": "有", "服務態度": "良好", "從何得知我們的服務": "朋友介紹"},
+             "note": "非常棒，很感謝"}
+        self.assertEqual(rs.complaint_reason(r), "")
 
     def test_complaint_row(self):
         row = rs.build_complaint_row(self.rating, {"phone": "0966671212", "service_date": "2026/11/10",
@@ -116,6 +130,27 @@ class BookingTest(unittest.TestCase):
         self.assertEqual(kwargs["row"], 204)
         self.assertTrue(kwargs["inherit_from_before"])
         self.assertEqual(kwargs["value_input_option"], "USER_ENTERED")
+
+
+class SheetToolTest(unittest.TestCase):
+    def test_col_index_and_key(self):
+        self.assertEqual(rs.col_index("g"), 7)
+        self.assertEqual(rs.col_index("AB"), 28)
+        with self.assertRaises(ValueError):
+            rs.col_index("7")
+        key = "1bNcJuFuP--jdpNo2zJKOpvuq-5rSHW3LgGE8HEepf44"
+        self.assertEqual(rs.spreadsheet_key(f"https://docs.google.com/spreadsheets/d/{key}/edit#gid=1"), key)
+        self.assertEqual(rs.spreadsheet_key(key), key)
+
+    def test_plan_sheet_links_any_sheet(self):
+        ws = MagicMock(row_count=100)
+        ws.get.return_value = [["姓名", "電話"], ["王", "0911222333"], ["", ""]]
+        session = MagicMock()
+        session.get.return_value = MagicMock(status_code=200, text=f'<a href="{LINE}">LINE</a>')
+        ups = rs.plan_sheet_links(ws, session, BASE, 1, 2, 2)
+        ranges = {u["range"]: u["values"][0][0] for u in ups}
+        self.assertEqual(ranges["A2"], f'=HYPERLINK("{LINE}","王")')
+        self.assertIn("phone=0911222333", ranges["B2"])
 
 
 class RelinkTest(unittest.TestCase):
