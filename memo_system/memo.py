@@ -2,6 +2,12 @@
 # -*- coding: utf-8 -*-
 # ============================================================
 # 更新記錄：
+# 2026-11-11
+# - 加速：讀訂單明細改為同時 5 筆並行（DETAIL_WORKERS），順序與結果不變。
+# - 加速：歷史比對只讀「同電話＋同地址、服務日期早於該訂單的最近 3 筆」明細
+#   （recent_same_address_history），不再把同電話全部歷史訂單逐筆開頁
+#   （例：0966403195 有 81 筆）。服務日期先從列表「服務日期」欄讀。
+#   已處理訂單先用列表服務日期篩掉已過期的，再讀明細。
 # 2026-11-10
 # - 查詢（By 電話／By 搜尋條件）除了未處理訂單，另外檢查同條件內「已處理」且客服備註
 #   本來就有內容的訂單（服務日期 ≥ 今天）：標示 **VIP** 但付款方式不是儲值金、或 **N-**
@@ -624,6 +630,11 @@ def parse_purchase_list_page(html: str) -> List[Dict]:
         tds = tr.find_all("td", recursive=False)
         info_td = tds[1] if len(tds) > 1 else tr
         row_data["service_items"] = [li.get_text(" ", strip=True) for li in info_td.find_all("li")]
+        if len(tds) > 2:
+            m_sd = re.search(r"\d{4}-\d{2}-\d{2}", tds[2].get_text(" ", strip=True))
+            if m_sd:
+                row_data["service_date_obj"] = parse_date(m_sd.group(0))
+                row_data["service_date"] = m_sd.group(0).replace("-", "/")
 
         edit_link = tr.select_one('a[href*="/purchase/edit/"]')
         edit_url = f"{BASE_URL}{edit_link['href']}" if edit_link and edit_link.get("href", "").startswith("/") else (edit_link["href"] if edit_link else "")
@@ -832,6 +843,40 @@ def might_need_notice_flag(item: Dict) -> bool:
 def upcoming(item: Dict) -> bool:
     dt = item_service_date_obj(item)
     return bool(dt) and dt >= today_tw()
+
+
+HISTORY_LIMIT = 3
+
+
+def recent_same_address_history(session, target: Dict, phone_list_cache: Dict, log=None,
+                                limit: int = HISTORY_LIMIT) -> List[Dict]:
+    """
+    同電話＋同地址、服務日期早於目標訂單的最近 limit 筆（排除取消／退款）；只讀這幾筆的明細。
+    回傳 [target] + 這幾筆，給 build_preview_row 用。
+    phone_list_cache：{電話: 列表（未讀明細，讀過明細的會就地更新）}
+    """
+    phone = normalize_phone(target.get("phone", ""))
+    if not phone:
+        return [target]
+    if phone not in phone_list_cache:
+        phone_list_cache[phone] = search_all_orders_by_phone(session, phone)
+        if log:
+            log(f"[歷史比對] 電話 {phone} 共 {len(phone_list_cache[phone])} 筆（只讀同地址最近 {limit} 筆明細）")
+    target_dt = item_service_date_obj(target)
+    same = [
+        x for x in phone_list_cache[phone]
+        if x.get("order_no") != target.get("order_no")
+        and x.get("purchase_status") not in ("2", "3")
+        and same_address(x.get("address", ""), target.get("address", ""))
+        and item_service_date_obj(x)
+        and (not target_dt or item_service_date_obj(x) < target_dt)
+    ]
+    same.sort(key=lambda k: item_service_date_obj(k), reverse=True)
+    picked = same[:limit]
+    todo = [x for x in picked if not x.get("_detail")]
+    if todo:
+        enrich_items_from_detail(session, todo, phone, log=None)
+    return [target] + picked
 
 
 def processed_flag_rows(items: List[Dict], history_for, log=None) -> List[Dict]:
@@ -1194,24 +1239,33 @@ def enrich_item_from_detail(session, item: Dict, phone="") -> Dict:
     return item
 
 
-def enrich_items_from_detail(session, items: List[Dict], phone="", log=None, context_label="") -> List[Dict]:
-    result = []
-    total = len(items)
+DETAIL_WORKERS = 5
 
+
+def enrich_items_from_detail(session, items: List[Dict], phone="", log=None, context_label="") -> List[Dict]:
+    """逐筆讀訂單修改頁補明細；同時 DETAIL_WORKERS 筆並行，回傳順序與輸入相同。"""
+    from concurrent.futures import ThreadPoolExecutor
+
+    total = len(items)
     if log and context_label:
         log(f"[明細補抓] {context_label}，共 {total} 筆")
+    if not items:
+        return []
 
-    for idx, item in enumerate(items, start=1):
+    def _one(item):
         try:
-            result.append(enrich_item_from_detail(session, item, phone))
+            return enrich_item_from_detail(session, item, phone), None
         except Exception as e:
-            if log:
-                log(f"[明細補抓失敗] {item.get('order_no', '')}：{e}")
+            return item, e
+
+    result = []
+    with ThreadPoolExecutor(max_workers=min(DETAIL_WORKERS, total)) as pool:
+        for idx, (item, err) in enumerate(pool.map(_one, items), start=1):
+            if err and log:
+                log(f"[明細補抓失敗] {item.get('order_no', '')}：{err}")
             result.append(item)
-
-        if log and total > 0 and (idx == total or idx == 1 or idx % 5 == 0):
-            log(f"[明細補抓進度] {idx}/{total}")
-
+            if log and (idx == total or idx == 1 or idx % 10 == 0):
+                log(f"[明細補抓進度] {idx}/{total}")
     return result
 
 
@@ -1418,22 +1472,14 @@ def get_target_and_source_for_order(session, target: Dict, log, override_notice:
     if not target_phone or not target_addr:
         raise RuntimeError(f"❌ 處理失敗 {target_order_no}：目標單缺少電話或地址")
 
-    log("[歷史查詢] 開始抓同電話全部歷史訂單")
-    items = search_all_orders_by_phone(session, target_phone)
-    log(f"[歷史查詢] 主列表共 {len(items)} 筆")
-
-    items = enrich_items_from_detail(
-        session,
-        items,
-        target_phone,
-        log=log,
-        context_label=f"同電話 {target_phone} 歷史訂單"
-    )
+    log("[歷史查詢] 開始抓同電話歷史訂單列表")
+    phone_list = search_all_orders_by_phone(session, target_phone)
+    log(f"[歷史查詢] 列表共 {len(phone_list)} 筆，只讀同地址最近 {HISTORY_LIMIT} 筆明細")
 
     target_item = None
-    for x in items:
+    for x in phone_list:
         if x.get("order_no") == target_order_no:
-            target_item = x
+            target_item = enrich_item_from_detail(session, x, target_phone)
             break
 
     if not target_item:
@@ -1451,6 +1497,7 @@ def get_target_and_source_for_order(session, target: Dict, log, override_notice:
             "edit_url": target.get("edit_url", ""),
         }
 
+    items = recent_same_address_history(session, target_item, {normalize_phone(target_phone): phone_list})
     source = find_best_source_order(target_item, items)
     manual_notice = str(override_notice or "").strip()
 
@@ -1763,24 +1810,22 @@ def preview_by_phone(phone, ui_logger=None, session=None):
     items = search_all_orders_by_phone(session, phone, log=log)
     log(f"[查詢列表] 主列表共 {len(items)} 筆")
 
-    items = enrich_items_from_detail(
-        session,
-        items,
-        phone,
-        log=log,
-        context_label=f"電話 {phone} 查詢結果"
-    )
-
+    phone_list_cache = {phone: items}
     targets = [x for x in items if x.get("status_code") == "0"]
+    processed = [x for x in items if x.get("status_code") == "1" and upcoming(x)]
+    to_read = [x for x in targets + processed if not x.get("_detail")]
+    enrich_items_from_detail(session, to_read, phone, log=log, context_label=f"電話 {phone} 未處理／即將服務")
 
     preview = []
     total = len(targets)
     for idx, item in enumerate(targets, start=1):
-        preview.append(build_preview_row(item, items))
+        preview.append(build_preview_row(item, recent_same_address_history(session, item, phone_list_cache)))
         if idx == total or idx == 1 or idx % 5 == 0:
             log(f"[整理預覽進度] {idx}/{total}")
 
-    preview.extend(processed_flag_rows(items, lambda _item: items, log=log))
+    candidates = [x for x in processed if might_need_notice_flag(x)]
+    preview.extend(processed_flag_rows(
+        candidates, lambda it: recent_same_address_history(session, it, phone_list_cache), log=log))
 
     preview.sort(
         key=lambda x: (
@@ -1849,52 +1894,25 @@ def preview_by_conditions(date_mode, date_start, date_end, purchase_status_name,
     )
 
 
-    phone_cache = {}
+    phone_list_cache = {}
     preview = []
 
     for idx, item in enumerate(items, start=1):
-        phone = normalize_phone(item.get("phone", ""))
-        if not phone:
-            preview.append(build_preview_row(item, [item]))
-            continue
-
-        if phone not in phone_cache:
-            log(f"[歷史比對] 開始抓電話 {phone} 的全部歷史訂單")
-            history = search_all_orders_by_phone(session, phone)
-            log(f"[歷史比對] 電話 {phone} 主列表共 {len(history)} 筆")
-            history = enrich_items_from_detail(
-                session,
-                history,
-                phone,
-                log=log,
-                context_label=f"電話 {phone} 歷史訂單"
-            )
-            phone_cache[phone] = history
-
-        preview.append(build_preview_row(item, phone_cache[phone]))
-
+        preview.append(build_preview_row(item, recent_same_address_history(session, item, phone_list_cache, log=log)))
         if idx == len(items) or idx == 1 or idx % 5 == 0:
             log(f"[整理預覽進度] {idx}/{len(items)}")
 
-    # 已處理且客服備註本來就有內容的訂單：只檢查 VIP 非儲值金／**N- 已非首次服務
+    # 已處理且客服備註本來就有內容的訂單：檢查 VIP 非儲值金／**N- 已非首次服務
     log("[已處理客服備註檢查] 開始抓同條件已處理訂單")
     processed = search_by_conditions(session, date_mode, date_start, date_end, purchase_status_name, progress="1")
-    processed = [x for x in processed if x.get("order_no") not in {r["order_id"] for r in preview}]
-    log(f"[已處理客服備註檢查] 已處理 {len(processed)} 筆，讀取明細")
+    seen = {r["order_id"] for r in preview}
+    processed = [x for x in processed if x.get("order_no") not in seen and upcoming(x)]
+    log(f"[已處理客服備註檢查] 已處理且服務日期 ≥ 今天 {len(processed)} 筆，讀取明細")
     processed = enrich_items_from_detail(session, processed, log=log, context_label="已處理訂單")
-
-    def _history_for(item):
-        phone = normalize_phone(item.get("phone", ""))
-        if not phone:
-            return [item]
-        if phone not in phone_cache:
-            history = search_all_orders_by_phone(session, phone)
-            phone_cache[phone] = enrich_items_from_detail(session, history, phone, log=log,
-                                                          context_label=f"電話 {phone} 歷史訂單")
-        return phone_cache[phone]
-
     candidates = [x for x in processed if x.get("status_code") == "1" and upcoming(x) and might_need_notice_flag(x)]
-    preview.extend(processed_flag_rows(candidates, _history_for, log=log))
+    log(f"[已處理客服備註檢查] 客服備註有 VIP／**N- 標記 {len(candidates)} 筆，比對同地址最近 {HISTORY_LIMIT} 筆")
+    preview.extend(processed_flag_rows(
+        candidates, lambda it: recent_same_address_history(session, it, phone_list_cache, log=log), log=log))
 
     dedup = {}
     for row in preview:
