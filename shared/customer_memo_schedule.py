@@ -3,6 +3,8 @@
 
 更新記錄：
 2026-11-11
+- 修正行事曆 404：服務帳號沒有 jenny@hers.com.tw 行事曆的寫入權，改優先用 Jenny 本人授權
+  （GOOGLE_HERS_CALENDAR_REFRESH_TOKEN＋GOOGLE_OAUTH_CLIENT_ID／SECRET，與 tool-system 相同）。
 - 「客服備註」分頁改寫「訂單客服備註」頁面的①②③三區結果（同一套查詢：購買日期＝前一上班日～
   今天、付款狀態全部，再依訂購時間篩前一上班日 10:00～今天 10:00）：
   異動（最前方）／分類／訂單編號／客戶／客人電話（搜尋連結）／地址／服務日期／付款狀態／狀態／
@@ -252,20 +254,16 @@ def build_calendar_event(result: dict, window: tuple[datetime, datetime], now: d
 
 def write_calendar(result: dict, window, now: datetime, service_factory=None) -> list[str]:
     """寫行事曆；失敗只回報，不影響貼表結果。"""
-    from shared.atm_match_reconcile_schedule import _calendar_service, _insert_event
+    from shared.atm_match_reconcile_schedule import _calendar_service, _insert_event, service_for
 
     service_factory = service_factory or _calendar_service
     preferred = os.getenv("CUSTOMER_MEMO_CALENDAR_ID", "").strip()
     calendar_ids = (preferred,) if preferred else CALENDAR_IDS
-    try:
-        service = service_factory()
-    except Exception as exc:
-        return [f"⚠️ 無法連線行事曆：{exc}"]
     event = build_calendar_event(result, window, now)
     last_error = None
     for calendar_id in calendar_ids:
         try:
-            _insert_event(service, calendar_id, **event)
+            _insert_event(service_for(service_factory, calendar_id), calendar_id, **event)
             return [f"已記入行事曆 {calendar_id}"]
         except Exception as exc:
             last_error = exc
