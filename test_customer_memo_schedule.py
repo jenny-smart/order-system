@@ -42,19 +42,20 @@ class SheetTest(unittest.TestCase):
     def test_phone_is_hyperlink_to_backend_search(self):
         rows = cms.build_sheet_rows([{"訂單號碼": "LC1", "客人姓名": "王", "電話": "0987652932",
                                       "服務日期": "2026/11/15", "客人備註": "帶拖鞋", "客服備註": ""}],
-                                    "https://backend.lemonclean.com.tw")
-        self.assertEqual(rows[0][0], "LC1")
-        self.assertTrue(rows[0][2].startswith('=HYPERLINK("https://backend.lemonclean.com.tw/purchase?keyword=&name=&phone=0987652932&'))
-        self.assertTrue(rows[0][2].endswith(',"0987652932")'))
-        self.assertEqual(rows[0][3:], ["2026/11/15", "帶拖鞋", ""])
+                                    "https://backend.lemonclean.com.tw", "2026/11/11 10:30")
+        self.assertEqual(cms.HEADER, ["備註日期時間", "訂單編號", "訂購人", "電話號碼", "預約日期", "客人備註", "客服備註"])
+        self.assertEqual(rows[0][:2], ["2026/11/11 10:30", "LC1"])
+        self.assertTrue(rows[0][3].startswith('=HYPERLINK("https://backend.lemonclean.com.tw/purchase?keyword=&name=&phone=0987652932&'))
+        self.assertTrue(rows[0][3].endswith(',"0987652932")'))
+        self.assertEqual(rows[0][4:], ["2026/11/15", "帶拖鞋", ""])
 
     def test_append_skips_existing_and_writes_after_last_row(self):
         ws = MagicMock(row_count=1000)
         ws.col_values.return_value = ["訂單編號", "LC1", "LC2", "", ""]
-        saved = cms.append_rows(ws, [["LC2", "", "", "", "", ""], ["LC3", "", "", "", "", ""]])
+        saved = cms.append_rows(ws, [["LC2", "", "", "", "", "", ""], ["LC3", "", "", "", "", "", ""]])
         self.assertEqual(saved, 1)
         kwargs = ws.update.call_args.kwargs
-        self.assertEqual(kwargs["range_name"], "A4:F4")
+        self.assertEqual(kwargs["range_name"], "A4:G4")
         self.assertEqual(kwargs["value_input_option"], "USER_ENTERED")
 
 
@@ -118,16 +119,19 @@ class NoticeFlagTest(unittest.TestCase):
              "purchase_status_name": "已付款", "has_history": False, "is_new_order": True, "can_autofill": False,
              "own_notice": "", "service_change": "", "source_notice_preview": ""},
         ]
-        out = cms.build_notice_sheet_rows(rows, "https://b")
-        self.assertEqual(cms.NOTICE_HEADER[:3], ["異動", "分類", "訂單編號"])
+        out = cms.build_notice_sheet_rows(rows, "https://b", "2026/11/11 10:30")
+        self.assertEqual(cms.NOTICE_HEADER, ["備註日期時間", "標記", "訂單編號", "訂購人", "電話號碼", "地址", "服務日期",
+                                             "付款狀態", "異動單號", "異動項目", "異動時數", "異動客服備註", "異動註記"])
         self.assertEqual(len(out[0]), len(cms.NOTICE_HEADER))
-        self.assertEqual(out[0][:3], ["⚠️ N→O", "③ 已處理需註記", "LC3"])
+        self.assertEqual(out[0][:3], ["2026/11/11 10:30", "⚠️ N→O", "LC3"])
         self.assertTrue(out[0][4].startswith('=HYPERLINK("https://b/purchase?'))
-        self.assertEqual(out[0][8], "保留原備註＋註記")
-        self.assertEqual(out[0][9], "LC1 2026/10/31")
-        self.assertEqual(out[1][:3], ["", "② 無相同訂單", "LC8"])
-        self.assertEqual(out[1][8], "新客，請填寫")
-        self.assertEqual(out[1][10], "")
+        self.assertEqual(out[0][8], "LC1 2026/10/31")      # 異動單號
+        self.assertIn("→", out[0][9])                       # 異動項目
+        self.assertEqual(out[0][11], "保留原備註＋註記")     # 異動客服備註
+        self.assertEqual(out[0][12], "【服務異動】…")         # 異動註記
+        self.assertEqual(out[1][1:3], ["② 無相同訂單", "LC8"])
+        self.assertEqual(out[1][11], "新客，請填寫")
+        self.assertEqual(out[1][9], "")
 
     def test_section_rows_filtered_by_created_window(self):
         rows = [{"order_id": "A", "created_at": "2026-11-09 09:59:00"},
@@ -140,13 +144,32 @@ class NoticeFlagTest(unittest.TestCase):
 
     def test_append_notice_tab_dedupes_by_order_column_c(self):
         ws = MagicMock(row_count=1000)
-        ws.col_values.side_effect = lambda col: {1: ["異動", "x"], 3: ["訂單編號", "LC1"]}[col]
+        ws.col_values.side_effect = lambda col: {1: ["備註日期時間", "x"], 3: ["訂單編號", "LC1"]}[col]
         w = len(cms.NOTICE_HEADER)
         saved = cms.append_rows(ws, [["x", "①", "LC1"] + [""] * (w - 3), ["", "②", "LC2"] + [""] * (w - 3)],
                                 width=w, key_col=cms.NOTICE_KEY_COL)
         self.assertEqual(saved, 1)
         self.assertEqual(ws.update.call_args.kwargs["range_name"], "A3:M3")
         self.assertEqual(ws.update.call_args.kwargs["values"][0][2], "LC2")
+
+
+class TabHeaderTest(unittest.TestCase):
+    def test_existing_tab_without_header_gets_header(self):
+        ws = MagicMock(title="客人備註")
+        ws.row_values.return_value = []
+        sp = MagicMock()
+        sp.worksheets.return_value = [ws]
+        cms.get_tab("台中", spreadsheet=sp)
+        self.assertEqual(ws.update.call_args.kwargs["values"], [cms.HEADER])
+        self.assertEqual(ws.update.call_args.kwargs["range_name"], "A1:G1")
+
+    def test_existing_header_untouched(self):
+        ws = MagicMock(title="客人備註")
+        ws.row_values.return_value = ["備註日期時間", "訂單編號"]
+        sp = MagicMock()
+        sp.worksheets.return_value = [ws]
+        cms.get_tab("台北", spreadsheet=sp)
+        ws.update.assert_not_called()
 
 
 class CalendarTest(unittest.TestCase):
