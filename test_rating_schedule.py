@@ -56,6 +56,10 @@ class RatingTest(unittest.TestCase):
         self.assertIn("沒擦", rs.complaint_reason(r))
         self.assertTrue(rs.complaint_text(r).startswith("【滿意但意見含「沒擦"))
 
+    def test_efficiency_and_unclean_keywords(self):
+        self.assertEqual(rs.negative_keywords("效率不太好，廚房也不乾淨"), ["不乾淨", "效率"])
+        self.assertEqual(rs.negative_keywords("專員很有效率，效率高"), [])
+
     def test_satisfied_with_negative_item_is_registered(self):
         r = {"items": {"服務滿意度": "滿意", "準時到達": "無"}, "note": ""}
         self.assertEqual(rs.complaint_reason(r), "滿意但準時到達：無")

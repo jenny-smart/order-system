@@ -54,7 +54,10 @@ NEGATIVE_KEYWORDS = (
     "髒", "汙漬", "污漬", "水垢", "灰塵", "頭髮", "毛髮", "痕跡", "刮傷", "刮痕", "損壞", "弄壞", "打破", "破損", "不見",
     "遲到", "太慢", "超時", "提早離開", "態度不", "不禮貌", "不專業", "敷衍", "馬虎", "粗心", "隨便",
     "失望", "不滿", "可惜", "抱怨", "不舒服", "加強", "改進", "改善", "再注意", "希望下次", "不夠",
+    "效率",  # 「很有效率」「效率高」等稱讚不算，見 POSITIVE_PHRASES
 )
+# 稱讚用語：先從備註拿掉再比對負面字詞（避免「很有效率」被當成客訴）
+POSITIVE_PHRASES = ("有效率", "效率很好", "效率好", "效率高", "效率佳", "效率很高", "效率一流", "效率十足")
 SKIP_ITEMS = {"服務滿意度", "從何得知我們的服務", "預約下一次服務時間"}
 
 # ------------------------------------------------------------
@@ -216,7 +219,10 @@ def negative_items(rating: dict) -> list[str]:
 
 
 def negative_keywords(text: str) -> list[str]:
-    return [k for k in NEGATIVE_KEYWORDS if k in str(text or "")]
+    text = str(text or "")
+    for phrase in POSITIVE_PHRASES:
+        text = text.replace(phrase, "")
+    return [k for k in NEGATIVE_KEYWORDS if k in text]
 
 
 def complaint_reason(rating: dict) -> str:
