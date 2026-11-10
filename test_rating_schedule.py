@@ -97,6 +97,16 @@ class RatingTest(unittest.TestCase):
         self.assertEqual(rs.last_row_by_columns(values, (3, 5, 7)), 3)
 
 
+class WriteComplaintsTest(unittest.TestCase):
+    def test_write_inserts_after_last_complaint(self):
+        ws = MagicMock()
+        values = [["客服"], ["客訴來源"], ["line", "", "2026-10-28", "", "2026-10-29", "", "楊雅琪"], [],
+                  ["line", "A.清潔速度"]]
+        n = rs.write_complaints({"rows": [["官網評價"]], "values": values, "ws": ws})
+        self.assertEqual(n, 1)
+        self.assertEqual(ws.insert_rows.call_args.kwargs["row"], 4)
+
+
 class BookingTest(unittest.TestCase):
     r = {"評價日期": "2026-11-10", "評價時間": "2026-11-10 15:05:45", "姓名": "莊欣瑜", "電話": "0988680803",
          "地址": "台北市", "預約下次日期": "2026-12-05", "預約下次時間": "09:00-12:00",

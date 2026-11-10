@@ -9,6 +9,7 @@
 - booking（上班日 07:20）：有勾選「預約下次服務」的評價，插入「評價預約」分頁主名單之後
   （插列，主名單下方的空白列與手寫區塊整段往下移，不會被覆蓋）。
 - relink（手動）：整理「清潔客訴」「評價預約」既有列的電話與姓名連結。
+- 獨立功能「評價管理客訴」（function/rating_complaint_page.py）：手動選地區與評價時間區間，預覽後寫入清潔客訴。
 - 獨立功能「整理姓名／電話連結」（function/sheet_link_tool.py）：任一工作表指定姓名／電話欄套用同樣連結。
 - 電話一律放後台訂單管理電話查詢連結；姓名一律加上 LINE 聊天連結（查不到 LINE 就維持文字）。
 - 兩個排程的區間都是「前一上班日 07:00 ～ 今天 07:00」（依評價時間），已登記過的不重複貼。
@@ -410,39 +411,64 @@ def _login(region: str, env: str):
     return session, base_url, email, password
 
 
-def _complaint_region(region: str, env: str, window, dry_run: bool, item: dict) -> None:
+def plan_complaints(region: str, session, base_url: str, window) -> dict:
+    """查評價＋比對清潔客訴分頁，回傳預覽（不寫入）。排程與「評價管理客訴」頁面共用。
+    preview：每筆要登記的評價（含 status 新增／已登記略過、原因）；rows：要插入的列。"""
     from memo_system.memo import with_retry
 
-    session, base_url, _, _ = _login(region, env)
     with contextlib.redirect_stdout(io.StringIO()):
         ratings = fetch_ratings(session, base_url, window[0].date().isoformat(), window[1].date().isoformat())
     targets = [r for r in ratings if in_window(r["rated_at"], window) and complaint_reason(r)]
-    print(f"QUERY {region} 評價 {len(ratings)} 筆，區間內要登記 {len(targets)} 筆"
-          f"（尚可／不滿意 {sum(1 for r in targets if is_unsatisfied(r))}）", flush=True)
-    item["found"] = len(targets)
     spreadsheet, ws = get_tab(region, COMPLAINT_TAB)
-    item["sheet_url"] = f"https://docs.google.com/spreadsheets/d/{spreadsheet.id}/edit#gid={ws.id}"
     values = with_retry(ws.get_all_values)
     orders_seen, name_dates = existing_complaint_keys(values)
-    rows, summary = [], []
+    rows, preview, summary = [], [], []
     for r in targets:
         rated = (parse_rating_time(r["rated_at"]) or datetime.now()).strftime("%Y-%m-%d")
+        reason = complaint_reason(r)
+        entry = {"評價時間": r["rated_at"], "客戶": r["name"], "訂單編號": r["order_no"], "原因": reason,
+                 "備註": r.get("note", ""), "服務專員": r.get("staff", ""), "狀態": "新增"}
         if r["order_no"] in orders_seen or (rated, r["name"]) in name_dates:
+            entry["狀態"] = "已登記略過"
+            preview.append(entry)
             continue
+        orders_seen.add(r["order_no"])
         try:
             detail = order_detail(session, r["order_no"]) if r["order_no"] else {}
         except Exception as exc:
             detail = {}
+            entry["狀態"] = f"新增（查訂單失敗：{exc}）"
             summary.append(f"⚠️ {r['order_no']} 查訂單失敗：{exc}")
         rows.append(build_complaint_row(r, detail, base_url))
-        summary.append(f"{r['rated_at'][:16]} {r['name']} {r['order_no']}：{complaint_reason(r)}"
+        preview.append(entry)
+        summary.append(f"{r['rated_at'][:16]} {r['name']} {r['order_no']}：{reason}"
                        + (f"／{r['note'][:40]}" if r.get("note") else ""))
-    item["summary_lines"] = summary
-    if rows and not dry_run:
-        last = max(last_row_by_columns(values, (3, 5, 7)), COMPLAINT_FIRST_ROW - 1)
-        insert_after(ws, last, rows)
-    item["saved"] = len(rows)
-    print(f"SAVE {region} 清潔客訴新增 {len(rows)} 筆（已登記略過 {len(targets) - len(rows)} 筆）", flush=True)
+    return {"region": region, "ratings": len(ratings), "targets": targets, "preview": preview, "rows": rows,
+            "summary_lines": summary, "values": values, "ws": ws,
+            "sheet_url": f"https://docs.google.com/spreadsheets/d/{spreadsheet.id}/edit#gid={ws.id}"}
+
+
+def write_complaints(plan: dict) -> int:
+    """把 plan_complaints 的列插在最後一筆客訴之後；回傳寫入筆數。"""
+    if plan["rows"]:
+        last = max(last_row_by_columns(plan["values"], (3, 5, 7)), COMPLAINT_FIRST_ROW - 1)
+        insert_after(plan["ws"], last, plan["rows"])
+    return len(plan["rows"])
+
+
+def _complaint_region(region: str, env: str, window, dry_run: bool, item: dict) -> None:
+    session, base_url, _, _ = _login(region, env)
+    plan = plan_complaints(region, session, base_url, window)
+    targets = plan["targets"]
+    print(f"QUERY {region} 評價 {plan['ratings']} 筆，區間內要登記 {len(targets)} 筆"
+          f"（尚可／不滿意 {sum(1 for r in targets if is_unsatisfied(r))}）", flush=True)
+    item["found"] = len(targets)
+    item["sheet_url"] = plan["sheet_url"]
+    item["summary_lines"] = plan["summary_lines"]
+    if not dry_run:
+        write_complaints(plan)
+    item["saved"] = len(plan["rows"])
+    print(f"SAVE {region} 清潔客訴新增 {item['saved']} 筆（已登記略過 {len(targets) - item['saved']} 筆）", flush=True)
 
 
 def _booking_region(region: str, env: str, window, dry_run: bool, item: dict) -> None:

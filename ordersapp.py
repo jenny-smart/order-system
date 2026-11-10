@@ -5,6 +5,8 @@
 # 最後更新：2026-11-11
 #
 # v8.83
+# - 新增獨立功能「評價管理客訴」（function/rating_complaint_page.py），放在 E 類
+#   「整理預約下次服務」上方：尚可／不滿意／滿意但有負面意見的評價 → 清潔客訴。
 # - 新增獨立功能「整理姓名／電話連結」（function/sheet_link_tool.py），放在
 #   E. 會員／客戶管理「整理預約下次服務」下方：任一工作表的姓名加 LINE 連結、
 #   電話加訂單管理電話查詢連結（可指定 Sheet ID、工作表名稱、姓名／電話欄）。
@@ -105,6 +107,7 @@ from function import order_creation as _order_creation_page
 from function import line_notice_generator as _line_notice_page
 from function import completed_booking_notice as _completed_notice_page
 from function import next_appointment_list as _next_appointment_page
+from function import rating_complaint_page as _rating_complaint_page
 from function import sheet_link_tool as _sheet_link_page
 from function import next_service_time_updater as _next_service_time_page
 from function import member_preferences as _member_preferences_page
@@ -218,6 +221,7 @@ FUNCTION_OPTIONS = [
     # ---------- E. 會員／客戶管理 ----------
     ("會員手機查詢：貼上姓名／LINE 或讀取 Google Sheet 指定列，查詢手機並核對會員。", "orders", "會員手機查詢"),
     ("會員喜好設定：輸入電話查會員，設定喜愛專員性別與喜愛／不喜愛專員。", "orders", "會員喜好設定"),
+    ("評價管理客訴：評價為尚可／不滿意，或滿意但意見有負面內容，登記到內勤工作表單「清潔客訴」。", "orders", "評價管理客訴"),
     ("整理預約下次服務：搜尋評價日期區間內有填預約下次服務的評價並整理名單。", "orders", "整理預約下次服務"),
     ("整理姓名／電話連結：任一工作表指定姓名／電話欄，姓名加 LINE 連結、電話加訂單管理電話查詢連結。", "orders", "整理姓名／電話連結"),
     ("更新建議下次服務時間：依地址＋電話查後台最近3次服務日期並寫回 Sheet。", "orders", "更新建議下次服務時間"),
@@ -413,6 +417,8 @@ elif mode == "LINE 通知產生器":
     _line_notice_page.render(backend_email, backend_password, env)
 elif mode == "已成單預約完成通知":
     _completed_notice_page.render(backend_email, backend_password, env)
+elif mode == "評價管理客訴":
+    _rating_complaint_page.render(backend_email, backend_password, env)
 elif mode == "整理預約下次服務":
     _next_appointment_page.render(backend_email, backend_password, env)
 elif mode == "整理姓名／電話連結":
