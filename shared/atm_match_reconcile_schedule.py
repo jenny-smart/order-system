@@ -110,15 +110,49 @@ def build_calendar_events(result: dict, now: datetime) -> list[dict]:
     return events
 
 
-def _calendar_service():
+HERS_CALENDAR_ID = "jenny@hers.com.tw"
+
+
+def _oauth_calendar_credentials(calendar_id: str):
+    """
+    Jenny 本人授權的行事曆憑證（與 tool-system calendar_notify 相同的 Secrets）：
+    jenny@hers.com.tw → GOOGLE_HERS_CALENDAR_REFRESH_TOKEN；其他 → GOOGLE_CALENDAR_REFRESH_TOKEN。
+    用戶端：GOOGLE_CALENDAR_CLIENT_ID／SECRET，沒有就用 GOOGLE_OAUTH_CLIENT_ID／SECRET。
+    沒設定回傳 None（服務帳號沒有 Jenny 行事曆的寫入權，會回 404）。
+    """
+    from google.oauth2.credentials import Credentials as OAuthCredentials
+
+    key = "GOOGLE_HERS_CALENDAR_REFRESH_TOKEN" if calendar_id == HERS_CALENDAR_ID else "GOOGLE_CALENDAR_REFRESH_TOKEN"
+    refresh_token = os.getenv(key, "").strip()
+    client_id = (os.getenv("GOOGLE_CALENDAR_CLIENT_ID", "") or os.getenv("GOOGLE_OAUTH_CLIENT_ID", "")).strip()
+    client_secret = (os.getenv("GOOGLE_CALENDAR_CLIENT_SECRET", "") or os.getenv("GOOGLE_OAUTH_CLIENT_SECRET", "")).strip()
+    if not (refresh_token and client_id and client_secret):
+        return None
+    return OAuthCredentials(token=None, refresh_token=refresh_token, token_uri="https://oauth2.googleapis.com/token",
+                            client_id=client_id, client_secret=client_secret,
+                            scopes=["https://www.googleapis.com/auth/calendar.events"])
+
+
+def _calendar_service(calendar_id: str = ""):
+    """行事曆連線：有 Jenny 本人授權就用（寫得進她的行事曆），沒有才用服務帳號。"""
     from google.oauth2.service_account import Credentials
     from googleapiclient.discovery import build
 
-    from shared.gsheet import get_service_account_info
+    creds = _oauth_calendar_credentials(calendar_id)
+    if creds is None:
+        from shared.gsheet import get_service_account_info
 
-    creds = Credentials.from_service_account_info(
-        get_service_account_info(), scopes=["https://www.googleapis.com/auth/calendar"])
+        creds = Credentials.from_service_account_info(
+            get_service_account_info(), scopes=["https://www.googleapis.com/auth/calendar"])
     return build("calendar", "v3", credentials=creds, cache_discovery=False)
+
+
+def service_for(service_factory, calendar_id: str):
+    """依行事曆取得連線（相容只收 0 個參數的 factory）。"""
+    try:
+        return service_factory(calendar_id)
+    except TypeError:
+        return service_factory()
 
 
 def _insert_event(service, calendar_id: str, summary: str, description: str, start: datetime,
@@ -150,17 +184,13 @@ def write_calendar(result: dict, now: datetime | None = None, service_factory=_c
         return []
     preferred = os.getenv("ATM_CALENDAR_ID", "").strip()
     calendar_ids = (preferred,) if preferred else CALENDAR_IDS
-    try:
-        service = service_factory()
-    except Exception as exc:
-        return [f"⚠️ 無法連線行事曆：{exc}"]
     messages = []
     for kwargs in events:
         title = kwargs["replace_prefix"]
         last_error = None
         for calendar_id in calendar_ids:
             try:
-                _insert_event(service, calendar_id, **kwargs)
+                _insert_event(service_for(service_factory, calendar_id), calendar_id, **kwargs)
                 messages.append(f"已記入行事曆 {calendar_id}：{title}")
                 last_error = None
                 break

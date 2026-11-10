@@ -5,7 +5,7 @@
 # 規則見 shared/customer_memo_schedule.py：區間＝前一上班日 10:00～今天 10:00（訂購時間），
 # 全部付款狀態、排除代客預訂、客人備註非空白；非上班日直接結束。
 #
-# 需要的 Secrets：GOOGLE_SERVICE_ACCOUNT_JSON、TAIPEI_EMAIL／PASSWORD、TAICHUNG_EMAIL／PASSWORD
+# 需要的 Secrets：GOOGLE_SERVICE_ACCOUNT_JSON、GOOGLE_HERS_CALENDAR_REFRESH_TOKEN＋GOOGLE_OAUTH_CLIENT_ID／SECRET（行事曆）、TAIPEI_EMAIL／PASSWORD、TAICHUNG_EMAIL／PASSWORD
 # 行事曆用服務帳號寫入，服務帳號要有 jenny@hers.com.tw（或 jenny@lemonclean.com.tw）行事曆的編輯權限。
 name: Customer Memo Schedule
 run-name: ${{ inputs.scheduled_slot && format('cloud-{0}', inputs.scheduled_slot) || format('Customer Memo Schedule {0}', inputs.date) }}
@@ -37,6 +37,13 @@ jobs:
       - name: Paste customer memo orders and add calendar event
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          # 行事曆用 Jenny 本人授權（與 tool-system 相同的 Secrets；沒設定時退回服務帳號，會 404）
+          GOOGLE_HERS_CALENDAR_REFRESH_TOKEN: ${{ secrets.GOOGLE_HERS_CALENDAR_REFRESH_TOKEN }}
+          GOOGLE_CALENDAR_REFRESH_TOKEN: ${{ secrets.GOOGLE_CALENDAR_REFRESH_TOKEN }}
+          GOOGLE_CALENDAR_CLIENT_ID: ${{ secrets.GOOGLE_CALENDAR_CLIENT_ID }}
+          GOOGLE_CALENDAR_CLIENT_SECRET: ${{ secrets.GOOGLE_CALENDAR_CLIENT_SECRET }}
+          GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
+          GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
           TAIPEI_EMAIL: ${{ secrets.TAIPEI_EMAIL }}
           TAIPEI_PASSWORD: ${{ secrets.TAIPEI_PASSWORD }}
           TAICHUNG_EMAIL: ${{ secrets.TAICHUNG_EMAIL }}
