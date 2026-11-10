@@ -1,6 +1,13 @@
 # -*- coding: utf-8 -*-
 """客人備註非空白（雲端排程，上班日 10:00）。
 
+更新記錄：
+2026-11-11
+- 修正 ImportError（circular import）：shared.gsheet 匯入時會 import orders，而 orders 又
+  從 shared.gsheet 匯入；排程直接先載入 shared.gsheet 就會失敗（貼表、行事曆、執行 Log 全部
+  寫不進去）。改成開始前先 import orders（_preload_modules），與 Streamlit 端的載入順序相同。
+
+
 由 tool-system 的 Cloud Schedule Router 依主控表「排程設定」（功能代號 customer_memo_daily）
 派送 .github/workflows/customer-memo-schedule.yml。
 
@@ -44,6 +51,12 @@ NOTICE_HEADER = ["註記", "訂單編號", "客人姓名", "客人電話", "服�
 NOTICE_KEY_COL = 2  # 「客服備註」分頁的訂單編號在 B 欄（A 欄是註記）
 CALENDAR_IDS = ("jenny@hers.com.tw", "jenny@lemonclean.com.tw")
 CALENDAR_PREFIX = "【客人備註】"
+
+
+def _preload_modules() -> None:
+    """先載入 orders，再用 shared.gsheet（shared.gsheet ↔ orders 互相 import，順序反了會失敗）。"""
+    import orders  # noqa: F401
+    import shared.gsheet  # noqa: F401
 
 
 # ------------------------------------------------------------
@@ -229,6 +242,7 @@ def _log(status: str, message: str, traceback_text: str = "") -> None:
 
 def run(env: str = "prod", today: date | None = None, regions=REGIONS, dry_run: bool = False,
         calendar: dict | None = None, now: datetime | None = None) -> dict:
+    _preload_modules()
     from accounts import ACCOUNTS
     from function.customer_memo_query import customer_memo_rows, fetch_window_orders, find_notice_flag_orders
     from memo_system import memo
@@ -301,6 +315,7 @@ def run(env: str = "prod", today: date | None = None, regions=REGIONS, dry_run: 
 
 
 def main():
+    _preload_modules()
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--env", default="prod")
     parser.add_argument("--date", default="", help="以這天當作執行日（YYYY-MM-DD，測試用）")
