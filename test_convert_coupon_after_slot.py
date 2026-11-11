@@ -73,3 +73,11 @@ class CouponTitleTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MergeNoteTest(unittest.TestCase):
+    def test_merge_text_and_lemon_keep(self):
+        self.assertEqual(q.merge_note_text(["LC1", "LC2", "LC3"], ["3人4小時", "2人3小時"]), "LC1＋LC2＋LC3合併3人4小時、2人3小時")
+        self.assertEqual(q.add_lemon_keep("**VIP**\n**2-4**請帶工具"), "**VIP**\n**2-4**檸檬人勿動請帶工具")
+        self.assertEqual(q.add_lemon_keep("**2-4**檸檬人勿動"), "**2-4**檸檬人勿動")
+        self.assertEqual(q.add_lemon_keep(""), "檸檬人勿動")

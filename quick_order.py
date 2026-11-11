@@ -10,6 +10,8 @@
 # - 訂單轉換第二段：優惠券與新單用同一計價等級。
 # - 服務金額設定畫面改以「每2人1小時」輸入（內部仍存每人時單價）。
 # - 折價券標題改為訂購人姓名＋金額；編碼前綴台北 tpe＋MMDD、台中 tai＋MMDD（訂購日）。
+# - 合併訂單（訂單轉換、儲值金補價差）不再寫處理備註；只在客人備註註記
+#   「訂單A＋訂單B合併X人X小時」，檸檬人訂單在客服備註 **X-X** 後加註「檸檬人勿動」。
 # - 儲值金補價差第二段（客付補差價單）：年節期間（服務金額設定的大掃除
 #   PART1／PART2）總金額一律以一般客（非VIP）單價計，例：2026 第二階段
 #   VIP 4275、一般客 4650 → 補差價單以 4650 計。第一段儲值金清零單不變。
@@ -1618,6 +1620,62 @@ def _update_order_note(session, base_url, order_no, note):
         return False, str(e)
 
 
+_PERSON_HOUR_TAG_RE = re.compile(r"\*\*\d+-\d+\*\*")
+LEMON_KEEP = "檸檬人勿動"
+
+
+def merge_note_text(order_nos, combos):
+    """合併訂單客人備註：訂單A＋訂單B合併X人X小時（多種人時用「、」）。"""
+    return "＋".join(o for o in order_nos if o) + "合併" + "、".join(c for c in combos if c)
+
+
+def add_lemon_keep(notice):
+    """客服備註 **X-X** 後方加註「檸檬人勿動」；已有就不重複，沒有 **X-X** 就放最前面。"""
+    notice = str(notice or "")
+    if LEMON_KEEP in notice:
+        return notice
+    m = _PERSON_HOUR_TAG_RE.search(notice)
+    return notice[:m.end()] + LEMON_KEEP + notice[m.end():] if m else LEMON_KEEP + notice
+
+
+def _order_has_lemon(session, order_no):
+    try:
+        joined = "\n".join(_fetch_purchase_block_for_order_no(session, order_no).get("lines", []))
+    except Exception:
+        return False
+    return bool(re.search(r"檸檬人\d", joined))
+
+
+def _update_merge_notes(session, base_url, order_no, merge_text):
+    """
+    合併訂單備註（2026-11-11 依客服規則）：不再寫處理備註；只在客人備註(memo)
+    加註「訂單A＋訂單B合併X人X小時」，專員為檸檬人的訂單在客服備註(notice)
+    **X-X** 後方加註「檸檬人勿動」。原有備註內容保留。
+    """
+    try:
+        lemon = _order_has_lemon(session, order_no)
+        edit_id = _fetch_order_edit_id(session, order_no)
+        if not edit_id:
+            return False, f"找不到訂單 {order_no} 的編輯 ID"
+        edit_url = f"{base_url}/purchase/edit/{edit_id}"
+        get_resp = session.get(edit_url, headers=HEADERS, allow_redirects=True)
+        if get_resp.status_code != 200:
+            return False, f"無法開啟編輯頁面：HTTP {get_resp.status_code}"
+        token_m = re.search(r'<meta name="csrf-token" content="([^"]+)"', get_resp.text) or re.search(r'name="_token"[^>]*value="([^"]+)"', get_resp.text)
+        if not token_m:
+            return False, "無法取得 CSRF token"
+        payload = _build_purchase_edit_payload_from_page(get_resp.text, token_m.group(1))
+        memo = str(payload.get("memo") or "")
+        if merge_text not in memo:
+            payload["memo"] = f"{memo}\n{merge_text}" if memo.strip() else merge_text
+        if lemon:
+            payload["notice"] = add_lemon_keep(payload.get("notice"))
+        post_resp = session.post(edit_url, data=payload, headers={**HEADERS, "Content-Type": "application/x-www-form-urlencoded"}, allow_redirects=True)
+        return post_resp.status_code in (200, 302), f"HTTP {post_resp.status_code}" + ("（含檸檬人勿動）" if lemon else "")
+    except Exception as e:
+        return False, str(e)
+
+
 def _update_order_service_date(session, base_url, order_no, new_date_s, new_period_s="", phone=""):
     """
     把原訂單服務日期/時段改成新的。
@@ -2069,16 +2127,16 @@ def convert_order(
     )
     order_no_b = order_b_result["order_no"]
     combo_desc = f"{new_person}人{new_hour}小時"
-    note_b = f"{order_no_a}+{order_no_b} 合併{combo_desc}服務"
-    note_a = f"{order_no_a}+{order_no_b} 合併{combo_desc}服務，檸檬人勿動"
-    note_a_ok, note_a_msg = _update_order_note(session, base_url, order_no_a, note_a)
-    note_b_ok, note_b_msg = _update_order_note(session, base_url, order_no_b, note_b)
     line_msg = build_line_message(order_b_result)
     lemon_result = assign_lemon_cleaners_to_order(
         session=session, base_url=base_url, order_no_a=order_no_a,
         service_date=service_date_a, period_s=new_period_s, person_count=new_person,
         allow_auto_lemon_shift=True,
     )
+    # 換完檸檬人後才寫備註，客服備註才判斷得到檸檬人。
+    note_a = note_b = merge_note_text([order_no_a, order_no_b], [combo_desc])
+    note_a_ok, note_a_msg = _update_merge_notes(session, base_url, order_no_a, note_a)
+    note_b_ok, note_b_msg = _update_merge_notes(session, base_url, order_no_b, note_b)
     return {
         "order_no_a": order_no_a, "order_no_b": order_no_b, "coupon_code": coupon_code,
         "lemon_result": lemon_result, "coupon_discount": coupon_discount,
@@ -2437,13 +2495,12 @@ def convert_order_stage2_create_new_orders(stage1_result, new_orders):
     # 備註文字並自動寫入
     b_nos = [r["order_no"] for r in new_order_results if r.get("order_no")]
     all_nos_str = "+".join([order_no_a] + b_nos)
-    combo_desc = "、".join([f"{r['person']}人{r['hour']}小時" for r in new_order_results if r.get("order_no")])
-    note_text = f"{all_nos_str} 合併服務（{combo_desc}）"
-    note_a = f"{note_text}，原單配班請勿改動"
-    note_a_ok, note_a_msg = _update_order_note(session, base_url, order_no_a, note_a)
+    combos = list(dict.fromkeys(f"{r['person']}人{r['hour']}小時" for r in new_order_results if r.get("order_no")))
+    note_text = note_a = merge_note_text([order_no_a] + b_nos, combos)
+    note_a_ok, note_a_msg = _update_merge_notes(session, base_url, order_no_a, note_a)
     for r in new_order_results:
         if r.get("order_no"):
-            _update_order_note(session, base_url, r["order_no"], note_text)
+            _update_merge_notes(session, base_url, r["order_no"], note_text)
 
     # v2026.07.10：比對原訂單A跟新訂單合計是否有差額（客服要求的驗證步驟）
     new_amount_total = sum(int(r.get("price_with_tax", 0)) for r in new_order_results if r.get("order_no"))
@@ -3790,8 +3847,8 @@ def stored_value_makeup_create_stored_order(
     # 儲值金清零單一律要換成檸檬人（與訂單轉換第一段相同）：排班頁沒有檸檬人時，
     # 先到專員班表補檸檬人班再換；只補檸檬人，不動其他客人已配班專員。
     lemon_result = assign_lemon_cleaners_to_order(session=stored_order["session"], base_url=_configure_environment(env_name), order_no_a=stored_order["order_no"], service_date=service_date, period_s=period_s, person_count=str(person), allow_auto_lemon_shift=True)
-    note = (f"儲值金補價差第一段：儲值金折抵單 {stored_order['order_no']}，{ctx['day_type']}單價 {ctx['plan']['unit_price']} × {ctx['plan']['total_person_hours']}人時 = {ctx['plan']['dummy_price']}，優惠券A折抵 {ctx['plan']['coupon_a']} 元，剩餘 {ctx['plan']['stored_value_applied']} 元扣儲值金後總額應為 0，檸檬人勿動。")
-    _update_order_note(stored_order["session"], _configure_environment(env_name), stored_order["order_no"], note)
+    # 合併備註在第二段建立客付單後才寫（兩張單號都有了）。
+    note = ""
     return {"stage": "stored_order", "balance": ctx["balance"], "plan": ctx["plan"], "day_type": ctx["day_type"], "coupon_a": coupon_a, "stored_order": stored_order, "lemon_result": lemon_result, "note": note, "address": ctx["address"], "region": ctx["region"], "phone": phone, "clean_type_id": clean_type_id, "service_date": service_date, "period_s": period_s, "hour": str(hour), "person": str(person), "coupon_prefix_base": coupon_prefix_base or phone, "coupon_valid_days": coupon_valid_days}
 
 
@@ -3835,10 +3892,11 @@ def stored_value_makeup_create_paid_order(
     # 年節期間（大掃除 PART1／PART2）補差價單總金額一律以一般客計價。
     paid_tier = makeup_paid_tier(service_date, ctx["balance"])
     paid_order = quick_create_order(env_name=env_name, payway=customer_payway, region=ctx["region"], lookup_result=ctx["lookup"], address=ctx["address"], clean_type_id=clean_type_id, date_s=service_date, period_s=period_s, hour=str(hour), person=str(person), discount_code=_make_coupon_b, pricing_balance=ctx["balance"], pricing_tier=paid_tier, allow_auto_lemon_shift=bool(allow_auto_lemon_shift), **invoice)
-    pair = f"儲值折抵單 {stored_order_no} + 客付補價差單 {paid_order['order_no']}" if stored_order_no else f"客付補價差單 {paid_order['order_no']}"
-    tier_note = "，年節期間總金額以一般客計價" if paid_tier == "regular" and ctx["balance"] > 0 else ""
-    note = f"儲值金補價差第二段：{pair}，客付單使用優惠券B折抵原儲值金餘額 {ctx['balance']} 元{tier_note}。"
-    _update_order_note(paid_order["session"], _configure_environment(env_name), paid_order["order_no"], note)
+    note = ""
+    if stored_order_no:
+        note = merge_note_text([stored_order_no, paid_order["order_no"]], [f"{person}人{hour}小時"])
+        for _ono in (stored_order_no, paid_order["order_no"]):
+            _update_merge_notes(paid_order["session"], _configure_environment(env_name), _ono, note)
     service_due = _service_due_after_fare(paid_order["session"], paid_order["order_no"])
     if service_due == 0:
         # v8.51：跟訂單轉換一致，總金額扣車馬費為 0 時要自動標記已付款。
