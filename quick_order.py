@@ -1432,6 +1432,32 @@ def _mark_order_as_paid(session, base_url, order_no):
         return False, f"標記已付款失敗：{e}"
 
 
+def settle_zero_due_order(session, base_url, order_no):
+    """
+    訂單轉換／儲值金補價差：新單「總金額扣車馬費」為 0 時，發票欄填「不開立發票」並標記已付款。
+    先改發票欄再標記已付款（避免修改頁送出蓋回付款狀態），最後回查訂單卡片確認兩者都生效。
+    回傳 (service_due, mark_paid_ok, mark_paid_msg, invoice_note_ok, invoice_note_msg)；
+    金額不為 0 時 mark_paid_ok 為 None。
+    """
+    service_due = _service_due_after_fare(session, order_no)
+    if service_due != 0:
+        return (service_due, None, f"服務金額未歸零（總金額扣車馬費={service_due}），不自動標記已付款",
+                False, "服務金額未歸零，不自動標註不開立發票")
+    invoice_ok, invoice_msg = _update_order_invoice_no_text(session, base_url, order_no, "不開立發票")
+    paid_ok, paid_msg = _mark_order_as_paid(session, base_url, order_no)
+    try:
+        joined = "\n".join(_fetch_purchase_block_for_order_no(session, order_no).get("lines", []))
+    except Exception as exc:
+        joined = ""
+        paid_msg = f"{paid_msg}（回查失敗：{exc}）"
+    if joined:
+        if not re.search(r"付款狀態\s*[：:]\s*已付款", joined):
+            paid_ok, paid_msg = False, "已送出，但回查付款狀態不是已付款，請至後台手動標記"
+        if "不開立發票" not in joined:
+            invoice_ok, invoice_msg = False, "已送出，但回查發票欄沒有「不開立發票」，請至後台手動填寫"
+    return service_due, paid_ok, paid_msg, invoice_ok, invoice_msg
+
+
 def _service_due_after_fare(session, order_no):
     block = _fetch_purchase_block_for_order_no(session, order_no)
     joined = "\n".join(block.get("lines", []))
@@ -2149,6 +2175,7 @@ def convert_order(
     )
     order_no_b = order_b_result["order_no"]
     combo_desc = f"{new_person}人{new_hour}小時"
+    _due_b, mark_paid_ok, mark_paid_msg, invoice_note_ok, invoice_note_msg = settle_zero_due_order(session, base_url, order_no_b)
     line_msg = build_line_message(order_b_result)
     lemon_result = assign_lemon_cleaners_to_order(
         session=session, base_url=base_url, order_no_a=order_no_a,
@@ -2166,6 +2193,8 @@ def convert_order(
         "note_a": note_a, "note_b": note_b,
         "note_a_ok": note_a_ok, "note_a_msg": note_a_msg,
         "note_b_ok": note_b_ok, "note_b_msg": note_b_msg,
+        "mark_paid_ok": mark_paid_ok, "mark_paid_msg": mark_paid_msg,
+        "invoice_note_ok": invoice_note_ok, "invoice_note_msg": invoice_note_msg,
         "edit_url_a": f"{base_url}/purchase/edit/{order_no_a.replace('LC00', '')}",
         "purchase_url_a": f"{base_url}/purchase?orderNo={order_no_a}",
         "line_message": line_msg, "order_b_result": order_b_result, "region": region_a,
@@ -2394,16 +2423,8 @@ def convert_order_stage2_create_new_orders(stage1_result, new_orders):
                 remaining_coupon_budget -= coupon_discount
             new_order_nos.append(order_result["order_no"])
 
-            service_due = _service_due_after_fare(session, order_result["order_no"])
-            if service_due == 0:
-                # v8.51：依客服確認改回來——總金額扣車馬費為 0 時，要自動標記
-                # 已付款（客人已用優惠券折抵完畢，不需要再刷卡/匯款），並在
-                # 發票號碼欄註記「不開立發票」，兩個動作都要做。
-                mark_paid_ok, mark_paid_msg = _mark_order_as_paid(session, base_url, order_result["order_no"])
-                invoice_note_ok, invoice_note_msg = _update_order_invoice_no_text(session, base_url, order_result["order_no"], "不開立發票")
-            else:
-                mark_paid_ok, mark_paid_msg = None, f"服務金額未歸零（總金額扣車馬費={service_due}），不自動標記已付款"
-                invoice_note_ok, invoice_note_msg = False, "服務金額未歸零，不自動標註不開立發票"
+            # 總金額扣車馬費為 0：不開立發票＋已付款（回查確認）。
+            service_due, mark_paid_ok, mark_paid_msg, invoice_note_ok, invoice_note_msg = settle_zero_due_order(session, base_url, order_result["order_no"])
 
             # v2026.07.10：訂單轉換的 LINE 訊息改成「原訂單A＋新訂單B 合併
             # 訂單」的格式，另起一行顯示新訂單真正的服務時間，且不顯示
@@ -3923,14 +3944,7 @@ def stored_value_makeup_create_paid_order(
         note = merge_note_text([stored_order_no, paid_order["order_no"]], [f"{person}人{hour}小時"])
         for _ono in (stored_order_no, paid_order["order_no"]):
             _update_merge_notes(paid_order["session"], _configure_environment(env_name), _ono, note)
-    service_due = _service_due_after_fare(paid_order["session"], paid_order["order_no"])
-    if service_due == 0:
-        # v8.51：跟訂單轉換一致，總金額扣車馬費為 0 時要自動標記已付款。
-        mark_paid_ok, mark_paid_msg = _mark_order_as_paid(paid_order["session"], _configure_environment(env_name), paid_order["order_no"])
-        invoice_note_ok, invoice_note_msg = _update_order_invoice_no_text(paid_order["session"], _configure_environment(env_name), paid_order["order_no"], "不開立發票")
-    else:
-        mark_paid_ok, mark_paid_msg = None, f"服務金額未歸零（總金額扣車馬費={service_due}），不自動標記已付款"
-        invoice_note_ok, invoice_note_msg = False, "服務金額未歸零，不自動標註不開立發票"
+    service_due, mark_paid_ok, mark_paid_msg, invoice_note_ok, invoice_note_msg = settle_zero_due_order(paid_order["session"], _configure_environment(env_name), paid_order["order_no"])
 
     # v2026.07.10：LINE 訊息改成「儲值金歸零訂單＋補價差訂單 合併訂單」的
     # 格式，另起一行顯示補價差訂單真正的服務時間；服務金額這行要顯示（跟
