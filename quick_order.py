@@ -1,13 +1,16 @@
 # ============================================================
 # 檔名：quick_order.py
-# 版本：v8.69
+# 版本：v8.70
 # 最後更新：2026-11-11
 #
 # Change Log
-# v8.69
+# v8.70
 # - 客人地址不在服務區域（補勾檸檬人後重查仍沒有時段）：本次補勾的檸檬人取消，
 #   改用「台北市大安區信義路四段210號4樓」約，成立訂單後再到訂單修改頁把地址
 #   （含服務區域、經緯度）改回客人地址；畫面提醒車馬費依代約地址計算。
+# v8.69
+# - fetch_rating_next_appointments 每筆多帶「評價時間」（含時分秒），供上班日 07:20
+#   評價預約排程（shared/rating_schedule.py）依「前一上班日 07:00～今天 07:00」篩選。
 # v8.68
 # - 本次補勾的檸檬人當次用完：成單後仍在班表「未配班」的檸檬人（或訂單失敗時
 #   全部）立即取消勾班，不留到下次（shared/cleaner_shift.release_unused_lemon_shifts）。
@@ -1093,7 +1096,7 @@ def _run_with_lemon_release(args, kwargs, addr_holder=None):
 
 
 def _update_order_address(session, base_url, order_no, info):
-    """v8.69：訂單修改頁把地址改回客人真正地址（地址、服務區域、經緯度）。"""
+    """v8.70：訂單修改頁把地址改回客人真正地址（地址、服務區域、經緯度）。"""
     edit_id = _fetch_order_edit_id(session, order_no)
     if not edit_id:
         return False, f"找不到訂單 {order_no} 的編輯 ID"
@@ -1126,7 +1129,7 @@ def _update_order_address(session, base_url, order_no, info):
 def quick_create_order(*args, **kwargs):
     """v8.68：包住實際成單；本次補勾的檸檬人成單後沒用到（或訂單失敗）就取消勾班。
 
-    v8.69：客人地址不在服務區域（補勾檸檬人後仍查不到時段）時，改用
+    v8.70：客人地址不在服務區域（補勾檸檬人後仍查不到時段）時，改用
     FALLBACK_BOOKING_ADDRESS 約，成立訂單後再把訂單地址改回客人地址。
     """
     real_info = {}
@@ -3252,6 +3255,7 @@ def fetch_rating_next_appointments(env_name, backend_email, backend_password, da
                 "地址": address, "預約下次日期": row["next_date"], "預約下次時間": row["next_time"],
                 "服務日期及時間": service_dt_display, "服務人數": f"{person}人" if person else "",
                 "訂單編號": row["order_no"], "LINE": line_url,
+                "評價時間": row["rating_datetime_full"],
             })
         except Exception as e:
             results.append({
@@ -3259,6 +3263,7 @@ def fetch_rating_next_appointments(env_name, backend_email, backend_password, da
                 "地址": "", "預約下次日期": row["next_date"], "預約下次時間": row["next_time"],
                 "服務日期及時間": f"⚠️ 查詢訂單失敗：{e}", "服務人數": "",
                 "訂單編號": row["order_no"], "LINE": "",
+                "評價時間": row["rating_datetime_full"],
             })
     return results
 

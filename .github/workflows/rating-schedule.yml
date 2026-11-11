@@ -1,0 +1,58 @@
+# 官網評價自動登記：上班日 07:00 不滿意→清潔客訴、07:20 預約下次服務→評價預約；另可手動整理電話／姓名連結
+#
+# 由 tool-system 的 Cloud Schedule Router 依主控表「排程設定」派送過來：
+#   rating_complaint_daily → job=complaint（07:00）
+#   rating_booking_daily   → job=booking（07:20）
+# relink（整理「清潔客訴」「評價預約」既有列的電話查詢連結＋姓名 LINE 連結）請在這裡手動執行，建議先勾「試跑」。
+# 規則見 shared/rating_schedule.py：區間＝前一上班日 07:00～今天 07:00（評價時間）；非上班日直接結束。
+#
+# 需要的 Secrets：GOOGLE_SERVICE_ACCOUNT_JSON、GOOGLE_HERS_CALENDAR_REFRESH_TOKEN＋GOOGLE_OAUTH_CLIENT_ID／SECRET（行事曆）、TAIPEI_EMAIL／PASSWORD、TAICHUNG_EMAIL／PASSWORD
+name: Rating Schedule
+run-name: ${{ inputs.scheduled_slot && format('cloud-{0}', inputs.scheduled_slot) || format('Rating Schedule {0} {1}', inputs.job, inputs.date) }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      job: {description: "complaint（不滿意→清潔客訴）／booking（預約下次→評價預約）／relink（整理電話姓名連結）", required: true, default: "complaint", type: string}
+      date: {description: "以這天當作執行日（YYYY-MM-DD，空白＝今天；relink 不用）", required: false, default: "", type: string}
+      regions: {description: "地區（逗號分隔）", required: false, default: "台北,台中", type: string}
+      env: {description: prod / dev, required: false, default: "prod", type: string}
+      dry_run: {description: 試跑：只查詢不寫入工作表與行事曆, required: false, default: false, type: boolean}
+      scheduled_slot: {description: 排程設定派送時段（手動執行請留空）, required: false, default: "", type: string}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rating-schedule
+  cancel-in-progress: false
+
+jobs:
+  rating:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12", cache: pip}
+      - run: pip install -r requirements.txt
+      - name: Rating schedule
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_HERS_CALENDAR_REFRESH_TOKEN: ${{ secrets.GOOGLE_HERS_CALENDAR_REFRESH_TOKEN }}
+          GOOGLE_CALENDAR_REFRESH_TOKEN: ${{ secrets.GOOGLE_CALENDAR_REFRESH_TOKEN }}
+          GOOGLE_CALENDAR_CLIENT_ID: ${{ secrets.GOOGLE_CALENDAR_CLIENT_ID }}
+          GOOGLE_CALENDAR_CLIENT_SECRET: ${{ secrets.GOOGLE_CALENDAR_CLIENT_SECRET }}
+          GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
+          GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
+          TAIPEI_EMAIL: ${{ secrets.TAIPEI_EMAIL }}
+          TAIPEI_PASSWORD: ${{ secrets.TAIPEI_PASSWORD }}
+          TAICHUNG_EMAIL: ${{ secrets.TAICHUNG_EMAIL }}
+          TAICHUNG_PASSWORD: ${{ secrets.TAICHUNG_PASSWORD }}
+          RATING_CALENDAR_ID: ${{ vars.RATING_CALENDAR_ID }}
+          RUN_JOB: ${{ inputs.job }}
+          RUN_DATE: ${{ inputs.date }}
+          RUN_REGIONS: ${{ inputs.regions || '台北,台中' }}
+          RUN_ENV: ${{ inputs.env || 'prod' }}
+          DRY_RUN: ${{ inputs.dry_run && '--dry-run' || '' }}
+        run: python -u -m shared.rating_schedule --job "$RUN_JOB" --env "$RUN_ENV" --date "$RUN_DATE" --regions "$RUN_REGIONS" $DRY_RUN
