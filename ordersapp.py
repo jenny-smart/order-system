@@ -1,9 +1,13 @@
 # ============================================================
 # 檔名：ordersapp.py
-# 版本：v8.85
+# 版本：v8.86
 # 模組：服務訂單系統主畫面／統一功能選單
 # 最後更新：2026-11-12
 #
+# v8.86
+# - 新增獨立功能「代客預訂LINE比對」（function/line_compare_page.py），放在 D. 稽核比對工具
+#   「查詢無LINE連結訂單」下方：撈出訂購日期區間內已付款／待付款的代客預訂訂單，
+#   貼到內勤工作表單「line比對」分頁（訂購人帶 LINE 連結、電話帶訂單管理搜尋連結）。
 # v8.85
 # - 新增獨立功能「評價預約成單」（function/rating_booking_order_page.py），放在 F 類
 #   「整理預約下次服務」下方：「評價預約」分頁指定列先預覽，再交給雲端成單
@@ -111,6 +115,7 @@ from function import calendar_check as _calendar_check_page
 from function import cleaner_next_day_reminder as _cleaner_next_day_page
 from function import weekend_reminder_page as _weekend_reminder_page
 from function import no_line_link_search as _no_line_link_page
+from function import line_compare_page as _line_compare_page
 from function import customer_memo_query as _customer_memo_page
 from function import bonus_note as _bonus_note_page
 from function import order_creation as _order_creation_page
@@ -225,6 +230,7 @@ FUNCTION_OPTIONS = [
     ("雙向訂單檢查：Google Sheet vs. 後台，針對已有訂單編號的工作表跟後台做雙向比對。", "orders", "雙向訂單檢查"),
     ("後台／Google 日曆雙向比對：後台 vs. Google 日曆，以事件時間與顏色做雙向比對。", "orders", "後台／Google 日曆雙向比對"),
     ("查詢無LINE連結訂單：搜尋訂購資訊裡沒有LINE連結的訂單。", "orders", "查詢無LINE連結訂單"),
+    ("代客預訂LINE比對：撈出訂購日期區間內已付款／待付款的代客預訂訂單，貼到內勤工作表單「line比對」分頁，供比對 LINE 對話。", "orders", "代客預訂LINE比對"),
     # ---------- E. LINE 通知／提醒 ----------
     ("批次成單預約完成通知：批次建單後，依排程工作表把同一客人的多筆訂單合成一則 LINE 預約完成通知（先核對日曆與後台），並寫回工作表。", "orders", "已成單預約完成通知"),
     ("LINE 通知產生器：輸入訂單編號（含儲值金購買單）補產生通知訊息，支援多筆同時產生；可選擇標記日曆有無行程。", "orders", "LINE 通知產生器"),
@@ -423,6 +429,8 @@ elif mode == "週末服務 LINE 提醒":
     _weekend_reminder_page.render(backend_email, backend_password, env)
 elif mode == "查詢無LINE連結訂單":
     _no_line_link_page.render(backend_email, backend_password, env)
+elif mode == "代客預訂LINE比對":
+    _line_compare_page.render(backend_email, backend_password, env)
 elif mode == "客人備註查詢":
     _customer_memo_page.render(backend_email, backend_password, env)
 elif mode == "儲值獎金備註":
