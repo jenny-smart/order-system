@@ -787,9 +787,15 @@ def _get_occupied_staff_for_period(
         soup = BeautifulSoup(html, "html.parser")
         rows = []
         order_row_count = 0
+        target_re = re.compile(rf"\b(?:LC|TT)0*{re.escape(exclude_purchase_id)}\b") if exclude_purchase_id else None
         for tr in soup.find_all("tr"):
-            if re.search(r"\b(?:LC|TT)\d+\b", tr.get_text(" ", strip=True)):
+            tr_text = tr.get_text(" ", strip=True)
+            if re.search(r"\b(?:LC|TT)\d+\b", tr_text):
                 order_row_count += 1
+            # 目標訂單只要出現在當日清單就算找到；改日期後原單常常還沒有專員
+            # （沒有 /schedule/edit 連結），之前因此誤判「找不到目標訂單」。
+            if target_re and target_re.search(tr_text):
+                saw_excluded_purchase = True
             shift_links = tr.find_all("a", href=re.compile(r"/schedule/edit\?", re.I))
             if shift_links:
                 rows.append((tr, shift_links))
@@ -814,7 +820,8 @@ def _get_occupied_staff_for_period(
             break
     if exclude_purchase_id and not saw_excluded_purchase:
         raise RuntimeError(
-            f"占用人力查詢中找不到目標訂單 ID {exclude_purchase_id}，無法安全換班"
+            f"{service_date} 的訂單清單找不到目標訂單 ID {exclude_purchase_id}"
+            "（原訂單日期可能沒改成功），無法安全換班"
         )
     return occupied
 
