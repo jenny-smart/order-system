@@ -3,6 +3,10 @@
 # 說明：整併進 tool-system，包成 render_memo_system() 供
 #       pages/訂單系統.py 呼叫。
 # 更新記錄：
+# 2026-11-12
+# - 服務異動新增「階段 C：自後台補齊＋同步 ATM 工作表」（memo_system/change_order_fill.py）：
+#   清潔異動缺的資料（ATM 退款 P／Q 除外）自檸檬後台補空白格，ATM 待退款／待收款同步 ATM 工作表；
+#   先按「預覽」只列出不寫入，確認後再按「執行」。
 # 2026-11-10
 # - 新增③「已處理但客服備註需註記」：同條件內已處理、客服備註本來就有內容的訂單，標示 VIP
 #   但非儲值金付款或 **N- 已非首次服務，可勾選批次執行（保留原備註＋註記）。
@@ -56,6 +60,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
     from . import payment_match
     payment_match = importlib.reload(payment_match)
     from . import change_order
+    from . import change_order_fill
     from shared import calendar_phone_search
 
     def default_region_from_email(email_value):
@@ -1622,11 +1627,57 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
 
     def render_change_order_section():
         step("3", "選擇服務異動步驟")
-        co_mode = st.radio("", ["階段 A：查詢試算（寫入清潔異動工作表）", "階段 B：回填系統（讀工作表寫回後台）"], horizontal=True, label_visibility="collapsed", key="change_order_mode")
+        co_mode = st.radio("", ["階段 A：查詢試算（寫入清潔異動工作表）", "階段 B：回填系統（讀工作表寫回後台）",
+                                "階段 C：自後台補齊＋同步 ATM 工作表"], horizontal=True, label_visibility="collapsed", key="change_order_mode")
         if co_mode.startswith("階段 A"):
             render_change_order_stage_a()
-        else:
+        elif co_mode.startswith("階段 B"):
             render_change_order_stage_b()
+        else:
+            render_change_order_stage_c()
+
+    def render_change_order_stage_c():
+        step("3", "自後台補齊＋同步 ATM 工作表")
+        st.markdown('<div class="info-strip"><b>處理範圍</b><ul><li>登記日期 2026/10/16 以後、B 欄還沒完成的列</li>'
+                    '<li>缺的資料自檸檬後台補「空白格」（不覆蓋）：LINE 連結、客戶類別、姓名、服務時間、原發票號碼／二聯三聯、'
+                    '付款方式、退款金額 S、收款金額 N、收款時間 M（後台已收款才補）、車馬費</li>'
+                    '<li>ATM 退款的銀行代碼／帳號（P／Q）不補，仍需人工</li>'
+                    '<li>待退款／待收款且付款方式 ATM → 補進同地區 ATM 工作表待配對區（同訂單同金額不重複）</li></ul>'
+                    '<b>建議先按「預覽」</b>確認要補的內容，再按「執行」寫入。tool-system 每日 07:50 也會自動執行。</div>',
+                    unsafe_allow_html=True)
+        region = st.selectbox("地區", ["台北", "台中", "桃園", "新竹", "高雄"], key="co_region_c")
+        c_preview, c_run = st.columns(2)
+        preview_btn = c_preview.button("👀 預覽（不寫入）", use_container_width=True,
+                                       disabled=not st.session_state.credentials_ready, key="co_fill_preview")
+        run_btn = c_run.button("🚀 執行補齊＋同步 ATM", type="primary", use_container_width=True,
+                               disabled=not st.session_state.credentials_ready, key="co_fill_run")
+
+        with st.expander("執行 LOG", expanded=True):
+            log_box_local = st.empty()
+            log_box_local.text("\n".join(st.session_state.logs[-3000:]) if st.session_state.logs else "尚未執行")
+
+        def co_log(msg):
+            st.session_state.logs.append(str(msg))
+            try: log_box_local.text("\n".join(st.session_state.logs[-3000:]))
+            except: pass
+
+        if preview_btn or run_btn:
+            dry_run = bool(preview_btn)
+            st.session_state.logs = []
+            co_log(f"===== 【{region}】{'預覽' if dry_run else '執行'}：自後台補齊＋同步 ATM 工作表 =====")
+            try:
+                with st.spinner("讀取清潔異動並查詢後台中…"):
+                    session = get_session(ui_logger=co_log)
+                    result = change_order_fill.run(region, session, log=co_log, dry_run=dry_run)
+                c1, c2 = st.columns(2)
+                c1.metric("補齊列數" if not dry_run else "會補齊列數", len(result["filled"]))
+                c2.metric("新增 ATM 列" if not dry_run else "會新增 ATM 列", len(result["atm_rows"]))
+                if dry_run:
+                    st.info("以上為預覽，尚未寫入；確認後請按「執行補齊＋同步 ATM」。")
+                else:
+                    st.success("✅ 已完成")
+            except Exception as e:
+                co_log(f"❌ 失敗：{e}"); st.error(str(e))
 
     def _co_vip_calendar(phone, session, co_log):
         """VIP（儲值金餘額 > 0）才用電話查日曆；非 VIP 或查不到電話回傳 None。"""
