@@ -1,9 +1,13 @@
 # ============================================================
 # 檔名：quick_order.py
-# 版本：v8.68
-# 最後更新：2026-11-09
+# 版本：v8.69
+# 最後更新：2026-11-11
 #
 # Change Log
+# v8.69
+# - 客人地址不在服務區域（補勾檸檬人後重查仍沒有時段）：本次補勾的檸檬人取消，
+#   改用「台北市大安區信義路四段210號4樓」約，成立訂單後再到訂單修改頁把地址
+#   （含服務區域、經緯度）改回客人地址；畫面提醒車馬費依代約地址計算。
 # v8.68
 # - 本次補勾的檸檬人當次用完：成單後仍在班表「未配班」的檸檬人（或訂單失敗時
 #   全部）立即取消勾班，不留到下次（shared/cleaner_shift.release_unused_lemon_shifts）。
@@ -1046,19 +1050,36 @@ def _release_tracked_lemons(tracker, order_failed):
     return "；".join(msgs)
 
 
-def quick_create_order(*args, **kwargs):
-    """v8.68：包住實際成單；本次補勾的檸檬人成單後沒用到（或訂單失敗）就取消勾班。"""
+FALLBACK_BOOKING_ADDRESS = "台北市大安區信義路四段210號4樓"
+_BOOKING_ADDRESS_INFO = contextvars.ContextVar("booking_address_info", default=None)
+
+
+class OutOfServiceAreaError(Exception):
+    """補勾檸檬人成功後重查仍沒有時段：視為此地址不在服務區域。"""
+
+
+_QUICK_CREATE_PARAMS = (
+    "env_name", "payway", "region", "lookup_result", "address", "clean_type_id",
+    "date_s", "period_s", "hour",
+)
+
+
+def _run_with_lemon_release(args, kwargs, addr_holder=None):
     tracker = []
     reset = _LEMON_TRACKER.set(tracker)
+    reset_addr = _BOOKING_ADDRESS_INFO.set(addr_holder)
     try:
         result = _quick_create_order_impl(*args, **kwargs)
     except Exception as exc:
         _LEMON_TRACKER.reset(reset)
+        _BOOKING_ADDRESS_INFO.reset(reset_addr)
         note = _release_tracked_lemons(tracker, order_failed=True)
         if note:
-            raise Exception(f"{exc}（{note}）") from exc
+            wrapped = (OutOfServiceAreaError if isinstance(exc, OutOfServiceAreaError) else Exception)(f"{exc}（{note}）")
+            raise wrapped from exc
         raise
     _LEMON_TRACKER.reset(reset)
+    _BOOKING_ADDRESS_INFO.reset(reset_addr)
     note = _release_tracked_lemons(tracker, order_failed=False)
     if note:
         if isinstance(result, dict):
@@ -1068,6 +1089,78 @@ def quick_create_order(*args, **kwargs):
             (_st.warning if "⚠️" in note else _st.info)(f"🍋 訂單 {(result or {}).get('order_no', '')}：{note}")
         except Exception:
             pass
+    return result
+
+
+def _update_order_address(session, base_url, order_no, info):
+    """v8.69：訂單修改頁把地址改回客人真正地址（地址、服務區域、經緯度）。"""
+    edit_id = _fetch_order_edit_id(session, order_no)
+    if not edit_id:
+        return False, f"找不到訂單 {order_no} 的編輯 ID"
+    edit_url = f"{base_url}/purchase/edit/{edit_id}"
+    get_resp = session.get(edit_url, headers=HEADERS, allow_redirects=True)
+    if get_resp.status_code != 200:
+        return False, f"無法開啟編輯頁面：HTTP {get_resp.status_code}"
+    token_m = re.search(r'<meta name="csrf-token" content="([^"]+)"', get_resp.text) or re.search(r'name="_token"[^>]*value="([^"]+)"', get_resp.text)
+    csrf = token_m.group(1) if token_m else ""
+    if not csrf:
+        return False, "無法取得 CSRF token"
+    overrides = {"address": info.get("address", "")}
+    for key in ("area_id", "lat", "lng"):
+        if info.get(key):
+            overrides[key] = info[key]
+    payload = _build_purchase_edit_payload_from_page(get_resp.text, csrf, overrides=overrides)
+    if info.get("country_id") and "country_id" in payload:
+        payload["country_id"] = info["country_id"]
+    post_resp = session.post(edit_url, data=payload,
+                             headers={**HEADERS, "Content-Type": "application/x-www-form-urlencoded"}, allow_redirects=True)
+    if post_resp.status_code not in (200, 302):
+        return False, f"HTTP {post_resp.status_code}"
+    check = session.get(edit_url, headers=HEADERS, allow_redirects=True)
+    now_addr = str((_extract_purchase_json_from_edit_html(check.text) or {}).get("address") or "")
+    if normalize_addr_for_match(now_addr) != normalize_addr_for_match(info.get("address", "")):
+        return False, f"送出後訂單地址仍為「{now_addr}」"
+    return True, ""
+
+
+def quick_create_order(*args, **kwargs):
+    """v8.68：包住實際成單；本次補勾的檸檬人成單後沒用到（或訂單失敗）就取消勾班。
+
+    v8.69：客人地址不在服務區域（補勾檸檬人後仍查不到時段）時，改用
+    FALLBACK_BOOKING_ADDRESS 約，成立訂單後再把訂單地址改回客人地址。
+    """
+    real_info = {}
+    try:
+        return _run_with_lemon_release(args, kwargs, real_info)
+    except OutOfServiceAreaError as first_exc:
+        if not real_info.get("address"):
+            raise
+        if normalize_addr_for_match(real_info["address"]) == normalize_addr_for_match(FALLBACK_BOOKING_ADDRESS):
+            raise
+        bound = dict(zip(_QUICK_CREATE_PARAMS, args))
+        bound.update(kwargs)
+        bound["address"] = FALLBACK_BOOKING_ADDRESS
+        try:
+            result = _run_with_lemon_release((), bound, {})
+        except Exception as second_exc:
+            raise Exception(f"{first_exc}｜改用 {FALLBACK_BOOKING_ADDRESS} 約也失敗：{second_exc}") from second_exc
+    order_no = (result or {}).get("order_no") if isinstance(result, dict) else ""
+    session = (result or {}).get("session") or (bound.get("lookup_result") or {}).get("session")
+    base_url = _configure_environment(bound.get("env_name"))
+    ok, why = _update_order_address(session, base_url, order_no, real_info) if order_no else (False, "沒有訂單編號")
+    msg = (f"此地址不在服務區域，先用 {FALLBACK_BOOKING_ADDRESS} 約成訂單 {order_no}，"
+           + (f"已改回客人地址 {real_info['address']}。" if ok else f"⚠️ 改回客人地址失敗（{why}），請到後台手動改成 {real_info['address']}。")
+           + "車馬費是依代約地址計算，請確認是否需要調整。")
+    if isinstance(result, dict):
+        result["proxy_address_note"] = msg
+        result["address_mismatch_warning"] = "；".join(x for x in (str(result.get("address_mismatch_warning") or ""), msg) if x)
+        if ok:
+            result["address"] = real_info["address"]
+    try:
+        import streamlit as _st
+        (_st.info if ok else _st.warning)(f"📍 {msg}")
+    except Exception:
+        pass
     return result
 
 
@@ -1090,6 +1183,9 @@ def _quick_create_order_impl(
     payway, base_url, session, token = _ctx["payway"], _ctx["base_url"], _ctx["session"], _ctx["token"]
     base_data, phone, member_name = _ctx["base_data"], _ctx["phone"], _ctx["member_name"]
     selected_address = _ctx["selected_address"]
+    _addr_holder = _BOOKING_ADDRESS_INFO.get()
+    if isinstance(_addr_holder, dict):
+        _addr_holder.update({k: str(base_data.get(k) or "") for k in ("address", "area_id", "lat", "lng", "country_id", "fare")})
     slot = f"{date_s}_{period_s}"
     raw_section, token, auto_shift_result = _query_booking_slot_with_lemon_retry(
         session, base_url, payway, base_data, token, slot, allow_auto_lemon_shift,
@@ -4372,11 +4468,12 @@ def _query_booking_slot_with_lemon_retry(session, base_url, payway, data, token,
         pre["message"] = f"{basis}；" + "；".join(m for m in msgs if m)
     if not found:
         service_date_of_slot = slot.split("_", 1)[0]
+        out_of_area = bool(pre.get("success") and pre.get("assigned"))
         # v8.67：只顯示補班統計，不逐位列出檸檬人（逐位原因留在 pre["skipped"]）。
         shift_message = str(pre.get("message") or "")
         period_of_slot = slot.split("_", 1)[1] if "_" in slot else ""
         others = _sections_on_date(raw, service_date_of_slot)
-        raise Exception(
+        raise (OutOfServiceAreaError if out_of_area else Exception)(
             f"{service_date_of_slot} {period_of_slot}（{data.get('person', '')} 人）無可預約人力："
             "後台查詢班表結果沒有這個時段。"
             + (f"補檸檬人結果：{shift_message}。" if shift_message else "")
