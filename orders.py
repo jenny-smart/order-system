@@ -1,10 +1,14 @@
 # ============================================================
 # 檔名：orders.py
-# 版本：v2026.11.09-1
+# 版本：v2026.11.12-1
 # 模組：批次建單核心引擎（Google Sheet → 後台訂單，供 ordersapp.py 呼叫）
 # 最後更新：2026-10-17
 #
 # Change Log
+# v2026.11.12-1
+# - find_pending_stored_value_orders 新增 created_from／created_to（依訂購時間精確到分鐘篩選，
+#   給每日 08:20 儲值金客服備註空白排程 shared/stored_value_notice_schedule.py 使用），
+#   結果新增 created_time（訂購時間 YYYY-MM-DD HH:MM:SS）。不給時行為不變。
 # v2026.11.09-1
 # - 無班表的列以 1 人查詢班表，記下此地址該時段可派人數（_查詢班表可派人數，
 #   不寫入工作表），批次補檸檬人時只補缺額。
@@ -2642,6 +2646,17 @@ def _extract_order_dates_from_block_lines(lines):
     return created_at, service_date, paid_date
 
 
+def _extract_created_datetime_from_block_lines(lines):
+    """v2026.11.12-1：訂單卡片的訂購時間（第一個單獨一行的「YYYY-MM-DD HH:MM:SS」），讀不到回傳 None。"""
+    for ln in lines:
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", str(ln).strip()):
+            try:
+                return datetime.strptime(str(ln).strip(), "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                return None
+    return None
+
+
 def find_orders_without_line_link(
     env_name, backend_email, backend_password,
     date_s=None, date_e=None,
@@ -2822,6 +2837,8 @@ def find_pending_stored_value_orders(
     notice_status="blank",
     max_pages=80,
     return_debug=False,
+    created_from=None,
+    created_to=None,
 ):
     """
     v2026.07.13-2：獨立工具——搜尋「購買項目：儲值金」且「客服備註是空白」的
@@ -2921,6 +2938,15 @@ def find_pending_stored_value_orders(
 
         if allowed_status_texts and status_text not in allowed_status_texts:
             continue
+        created_time = _extract_created_datetime_from_block_lines(lines)
+        if created_from or created_to:
+            # v2026.11.12-1：依訂購時間篩選 [created_from, created_to)，讀不到訂購時間的略過
+            if created_time is None:
+                continue
+            if created_from and created_time < created_from:
+                continue
+            if created_to and created_time >= created_to:
+                continue
         notice_text = _fetch_order_edit_notice(session, order_no, edit_id_map.get(order_no))
         if notice_text is None:
             notice_text = "（列表顯示有客服備註）" if notice_map.get(order_no) else ""
@@ -2946,6 +2972,7 @@ def find_pending_stored_value_orders(
             "purchase_status": status_text,
             "paid_date": paid_date or "",
             "notice": notice_text,
+            "created_time": created_time.strftime("%Y-%m-%d %H:%M:%S") if created_time else "",
         })
 
     if return_debug:

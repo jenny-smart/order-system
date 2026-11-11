@@ -1,0 +1,54 @@
+# 儲值金訂單客服備註空白：上班日 08:20 列出台北／台中訂購人姓名，記入行事曆
+#
+# 由 tool-system 的 Cloud Schedule Router 依主控表「排程設定」（功能代號 stored_value_notice_daily）
+# 派送過來（不用 GitHub cron）。也可以在這裡手動執行。
+# 規則見 shared/stored_value_notice_schedule.py：區間＝前一上班日 08:00～今天 08:00（訂購時間），
+# 購買項目＝儲值金、待付款＋已付款、客服備註空白；非上班日直接結束。
+#
+# 需要的 Secrets：GOOGLE_SERVICE_ACCOUNT_JSON（執行 Log）、GOOGLE_HERS_CALENDAR_REFRESH_TOKEN＋GOOGLE_OAUTH_CLIENT_ID／SECRET（行事曆）、TAIPEI_EMAIL／PASSWORD、TAICHUNG_EMAIL／PASSWORD
+name: Stored Value Notice Schedule
+run-name: ${{ inputs.scheduled_slot && format('cloud-{0}', inputs.scheduled_slot) || format('Stored Value Notice Schedule {0}', inputs.date) }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      date: {description: "以這天當作執行日（YYYY-MM-DD，空白＝今天）", required: false, default: "", type: string}
+      env: {description: prod / dev, required: false, default: "prod", type: string}
+      dry_run: {description: 只查詢不寫行事曆, required: false, default: false, type: boolean}
+      scheduled_slot: {description: 排程設定派送時段（手動執行請留空）, required: false, default: "", type: string}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stored-value-notice-schedule
+  cancel-in-progress: false
+
+jobs:
+  stored-value-notice:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12", cache: pip}
+      - run: pip install -r requirements.txt
+      - name: List stored value orders with blank notice and add calendar event
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          # 行事曆用 Jenny 本人授權（與 tool-system 相同的 Secrets；沒設定時退回服務帳號，會 404）
+          GOOGLE_HERS_CALENDAR_REFRESH_TOKEN: ${{ secrets.GOOGLE_HERS_CALENDAR_REFRESH_TOKEN }}
+          GOOGLE_CALENDAR_REFRESH_TOKEN: ${{ secrets.GOOGLE_CALENDAR_REFRESH_TOKEN }}
+          GOOGLE_CALENDAR_CLIENT_ID: ${{ secrets.GOOGLE_CALENDAR_CLIENT_ID }}
+          GOOGLE_CALENDAR_CLIENT_SECRET: ${{ secrets.GOOGLE_CALENDAR_CLIENT_SECRET }}
+          GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
+          GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
+          TAIPEI_EMAIL: ${{ secrets.TAIPEI_EMAIL }}
+          TAIPEI_PASSWORD: ${{ secrets.TAIPEI_PASSWORD }}
+          TAICHUNG_EMAIL: ${{ secrets.TAICHUNG_EMAIL }}
+          TAICHUNG_PASSWORD: ${{ secrets.TAICHUNG_PASSWORD }}
+          STORED_VALUE_NOTICE_CALENDAR_ID: ${{ vars.STORED_VALUE_NOTICE_CALENDAR_ID }}
+          RUN_DATE: ${{ inputs.date }}
+          RUN_ENV: ${{ inputs.env || 'prod' }}
+          DRY_RUN: ${{ inputs.dry_run && '--dry-run' || '' }}
+        run: python -u -m shared.stored_value_notice_schedule --env "$RUN_ENV" --date "$RUN_DATE" $DRY_RUN
