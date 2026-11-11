@@ -1,10 +1,10 @@
 # ============================================================
 # 檔名：quick_order.py
-# 版本：v8.69
+# 版本：v8.70
 # 最後更新：2026-11-11
 #
 # Change Log
-# v8.69
+# v8.70
 # - 服務金額設定改存 Google Sheet「_服務金額設定」，重新部署不再遺失（原本退回
 #   600／700，造成訂單轉換大掃除期間優惠券以 600 計）。
 # - 訂單轉換第二段：優惠券與新單用同一計價等級。
@@ -13,6 +13,9 @@
 # - 儲值金補價差第二段（客付補差價單）：年節期間（服務金額設定的大掃除
 #   PART1／PART2）總金額一律以一般客（非VIP）單價計，例：2026 第二階段
 #   VIP 4275、一般客 4650 → 補差價單以 4650 計。第一段儲值金清零單不變。
+# v8.69
+# - fetch_rating_next_appointments 每筆多帶「評價時間」（含時分秒），供上班日 07:20
+#   評價預約排程（shared/rating_schedule.py）依「前一上班日 07:00～今天 07:00」篩選。
 # v8.68
 # - 本次補勾的檸檬人當次用完：成單後仍在班表「未配班」的檸檬人（或訂單失敗時
 #   全部）立即取消勾班，不留到下次（shared/cleaner_shift.release_unused_lemon_shifts）。
@@ -3182,6 +3185,7 @@ def fetch_rating_next_appointments(env_name, backend_email, backend_password, da
                 "地址": address, "預約下次日期": row["next_date"], "預約下次時間": row["next_time"],
                 "服務日期及時間": service_dt_display, "服務人數": f"{person}人" if person else "",
                 "訂單編號": row["order_no"], "LINE": line_url,
+                "評價時間": row["rating_datetime_full"],
             })
         except Exception as e:
             results.append({
@@ -3189,6 +3193,7 @@ def fetch_rating_next_appointments(env_name, backend_email, backend_password, da
                 "地址": "", "預約下次日期": row["next_date"], "預約下次時間": row["next_time"],
                 "服務日期及時間": f"⚠️ 查詢訂單失敗：{e}", "服務人數": "",
                 "訂單編號": row["order_no"], "LINE": "",
+                "評價時間": row["rating_datetime_full"],
             })
     return results
 
