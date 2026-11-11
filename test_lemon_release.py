@@ -37,6 +37,12 @@ class ReleaseTest(unittest.TestCase):
             shifts.release_unused_lemon_shifts(s, 'b', '2026-11-18', '14:00-18:00', [('1', '檸檬人10')], order_failed=True)
             rm.assert_called_once()
 
+    def test_failed_order_releases_all_even_if_not_in_unassigned(self):
+        with patch.object(shifts, '_remove_cleaner_shift', return_value=(True, '')) as rm:
+            shifts.release_unused_lemon_shifts(sess(SCHEDULE), 'b', '2026-11-18', '14:00-18:00',
+                                               [('1', '檸檬人1'), ('2', '檸檬人2')], order_failed=True)
+        self.assertEqual(rm.call_count, 2)
+
     def test_remove_keeps_other_shifts(self):
         s = Mock()
         s.post.return_value = Mock(status_code=200)
