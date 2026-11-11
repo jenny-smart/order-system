@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-"""ATM 對帳 ② 配對銀行明細＋③ 更新系統對帳（雲端排程，每日 08:10）。
+"""ATM 對帳 ② 配對銀行明細＋③ 更新系統對帳（雲端排程；2026-11-12 起跟在 ① 待付款清單後 10 分鐘，
+上班日 08:30～18:00 每 30 分鐘，時間見主控表「排程設定」atm_match_reconcile）。
 
 由 tool-system 的 Cloud Schedule Router 依主控表「排程設定」（功能代號 atm_match_reconcile）
 派送 .github/workflows/atm-match-reconcile-schedule.yml。
@@ -12,9 +13,10 @@
      訂單本來就已付款的不再發確認信；未開立發票的不發確認信。
      需確認／疑似拆單／非訂單收入一律留給人工。
 行事曆（預設 jenny@hers.com.tw，寫不進去改寫 jenny@lemonclean.com.tw；可用 ATM_CALENDAR_ID 指定）：
-  當日完成對帳的訂單記一則「【ATM對帳】今日完成」（只留紀錄，不跳提醒）；
+  當日完成對帳的訂單記一則「【ATM對帳】今日完成」（只留紀錄，不跳提醒；一天跑多次會累加，不會蓋掉早上的）；
   已付款但未開立發票的另記「【ATM對帳】未開立發票」（30 分鐘後、提前 20／10 分鐘跳提醒）；
   ② 需確認／疑似拆單／未配對／清潔異動未回填等記「【ATM對帳】需人工處理」（同上提醒）。
+  這兩種內容和當天已記的一樣就不重建，避免每 30 分鐘重複跳通知；有新的項目才換成最新一則。
 
 Actions 紀錄只印各區筆數，不印客戶姓名、訂單編號；逐筆明細寫進行事曆與統一執行 Log。
 """
@@ -24,6 +26,7 @@ import argparse
 import contextlib
 import io
 import os
+import re
 import sys
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -92,7 +95,7 @@ def build_calendar_events(result: dict, now: datetime) -> list[dict]:
         events.append(dict(
             summary=f"{DONE_PREFIX} {len(done)} 筆（{now:%m/%d}）",
             description="\n".join(_line(d) for d in done),
-            start=now, reminder_minutes=[], replace_prefix=DONE_PREFIX,
+            start=now, reminder_minutes=[], replace_prefix=DONE_PREFIX, merge=True,
         ))
     if no_invoice:
         events.append(dict(
@@ -156,15 +159,27 @@ def service_for(service_factory, calendar_id: str):
 
 
 def _insert_event(service, calendar_id: str, summary: str, description: str, start: datetime,
-                  reminder_minutes: list, replace_prefix: str) -> None:
+                  reminder_minutes: list, replace_prefix: str, merge: bool = False) -> None:
+    """同一天同一種紀錄只留一則。
+    merge=True（今日完成）：把當天舊事件的明細和這次的合併（去重），筆數重算，不會蓋掉早上的紀錄。
+    merge=False（未開立發票／需人工處理）：內容和當天舊事件一樣就不動（不會每 30 分鐘重複跳通知），有變才換成最新。"""
     day_start = start.astimezone(TZ).replace(hour=0, minute=0, second=0, microsecond=0)
-    # 同一天同一種紀錄只留最新一則
     old = service.events().list(calendarId=calendar_id, timeMin=day_start.isoformat(),
                                 timeMax=(day_start + timedelta(days=1)).isoformat(), q=replace_prefix,
                                 singleEvents=True, maxResults=50).execute().get("items", [])
+    old = [e for e in old if str(e.get("summary", "")).startswith(replace_prefix)]
+    if merge:
+        lines = []
+        for event in old:
+            lines += [x for x in str(event.get("description", "")).splitlines() if x.strip()]
+        lines += [x for x in description.splitlines() if x.strip()]
+        lines = list(dict.fromkeys(lines))
+        description = "\n".join(lines)
+        summary = re.sub(r"\d+ 筆", f"{len(lines)} 筆", summary, count=1)
+    elif any(str(e.get("description", "")) == description for e in old):
+        return
     for event in old:
-        if str(event.get("summary", "")).startswith(replace_prefix):
-            service.events().delete(calendarId=calendar_id, eventId=event["id"]).execute()
+        service.events().delete(calendarId=calendar_id, eventId=event["id"]).execute()
     body = {
         "summary": summary,
         "description": description,

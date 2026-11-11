@@ -658,3 +658,49 @@ def test_ensure_format_retries_per_row_when_batch_fails():
     result = atm.ensure_candidate_row_format(ws, [8, 9])
     assert any("第8列下拉選單失敗" in e for e in result["errors"])
     assert (9, 14) in _dv_targets(ws) and (8, 14) not in _dv_targets(ws)
+
+
+class _ListEvents(_FakeEvents):
+    def __init__(self, items):
+        super().__init__()
+        self.items = items
+        self.deleted = []
+        self.bodies = []
+
+    def list(self, **kw):
+        items = self.items
+        return type("R", (), {"execute": lambda s: {"items": items}})()
+
+    def delete(self, calendarId, eventId):
+        self.deleted.append(eventId)
+        return type("R", (), {"execute": lambda s: None})()
+
+    def insert(self, calendarId, body, sendUpdates):
+        self.bodies.append(body)
+        return super().insert(calendarId, body, sendUpdates)
+
+
+def test_done_event_accumulates_over_the_day():
+    from shared import atm_match_reconcile_schedule as job
+
+    events = _ListEvents([{"id": "e1", "summary": "【ATM對帳】今日完成 1 筆（11/12）", "description": "台北 第5列 LC1 甲 $4800"}])
+    service = type("S", (), {"events": lambda s: events})()
+    job._insert_event(service, "jenny@hers.com.tw", "【ATM對帳】今日完成 1 筆（11/12）", "台中 第3列 LC9 乙 $2000",
+                      datetime(2026, 11, 12, 9, 0, tzinfo=TZ), [], job.DONE_PREFIX, merge=True)
+    assert events.deleted == ["e1"]
+    assert events.bodies[0]["summary"] == "【ATM對帳】今日完成 2 筆（11/12）"
+    assert events.bodies[0]["description"].splitlines() == ["台北 第5列 LC1 甲 $4800", "台中 第3列 LC9 乙 $2000"]
+
+
+def test_review_event_not_recreated_when_unchanged():
+    from shared import atm_match_reconcile_schedule as job
+
+    same = "台北 第3列【需確認】LC1 甲 $4800　已預填"
+    events = _ListEvents([{"id": "e1", "summary": "【ATM對帳】需人工處理 1 列", "description": same}])
+    service = type("S", (), {"events": lambda s: events})()
+    job._insert_event(service, "jenny@hers.com.tw", "【ATM對帳】需人工處理 1 列", same,
+                      datetime(2026, 11, 12, 9, 30, tzinfo=TZ), [20, 10], job.REVIEW_PREFIX)
+    assert events.deleted == [] and events.bodies == []  # 不重複跳通知
+    job._insert_event(service, "jenny@hers.com.tw", "【ATM對帳】需人工處理 2 列", same + "\n台中 第4列【未配對】",
+                      datetime(2026, 11, 12, 10, 0, tzinfo=TZ), [20, 10], job.REVIEW_PREFIX)
+    assert events.deleted == ["e1"] and len(events.bodies) == 1  # 有新項目才換
