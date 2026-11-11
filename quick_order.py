@@ -1743,8 +1743,23 @@ def _update_order_service_date(session, base_url, order_no, new_date_s, new_peri
             headers={**HEADERS, "Content-Type": "application/x-www-form-urlencoded"},
             allow_redirects=True,
         )
-        success = post_resp.status_code in (200, 302)
-        return success, f"HTTP {post_resp.status_code}"
+        if post_resp.status_code not in (200, 302):
+            return False, f"HTTP {post_resp.status_code}"
+        # 後台驗證失敗時也是 302 轉回 200，不能只看 HTTP；回查訂單卡片確認日期真的改了。
+        try:
+            joined = "\n".join(_fetch_purchase_block_for_order_no(session, order_no).get("lines", []))
+            actual_date, _ = _parse_service_date_time_loose(joined)
+        except Exception as exc:
+            return False, f"已送出，但回查訂單日期失敗：{exc}"
+        if actual_date != str(new_date_s):
+            err = ""
+            try:
+                box = BeautifulSoup(post_resp.text or "", "html.parser").select_one(".alert-danger, .invalid-feedback, .help-block")
+                err = box.get_text(" ", strip=True) if box else ""
+            except Exception:
+                pass
+            return False, f"後台未改成功（訂單仍為 {actual_date or '未知'}）" + (f"：{err}" if err else "，可能該日期時段無法預約")
+        return True, f"已改為 {actual_date}"
     except Exception as e:
         return False, str(e)
 
@@ -2258,11 +2273,15 @@ def convert_order_stage1_reassign_original(
         date_change_msg = "日期相同，無須修改"
         target_date_a = service_date_a
 
-    lemon_result_a = assign_lemon_cleaners_to_order(
-        session=session, base_url=base_url, order_no_a=order_no_a,
-        service_date=target_date_a, period_s=period_a_for_assign, person_count=str(person_a),
-        allow_auto_lemon_shift=True,
-    )
+    if date_change_ok:
+        lemon_result_a = assign_lemon_cleaners_to_order(
+            session=session, base_url=base_url, order_no_a=order_no_a,
+            service_date=target_date_a, period_s=period_a_for_assign, person_count=str(person_a),
+            allow_auto_lemon_shift=True,
+        )
+    else:
+        # 日期沒改成功就不換班，避免在錯的日期勾檸檬人。
+        lemon_result_a = {"success": False, "assigned": [], "message": f"原訂單日期修改失敗，未換檸檬人：{date_change_msg}"}
     lemon_result_a["date_change_ok"] = date_change_ok
     lemon_result_a["date_change_msg"] = date_change_msg
     lemon_result_a["new_service_date"] = target_date_a
