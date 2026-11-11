@@ -12,6 +12,9 @@ quick_order.py 版本：判斷班別代碼時會多考慮欄位所屬的群組�
 排除），且保留其既有班別、只新增目標時段；絕不拆解、改動其他客人已經配好班的專員。
 
 Change Log
+v2026.11.11-1
+- 修正：訂單失敗時，本次補勾的檸檬人一律取消勾班（舊版只取消班表未配班
+  名單裡的，補勾的檸檬人不在此區域時會漏掉）。
 v2026.11.09-1
 - 修正：當天沒有任何檸檬人勾班，卻全部被判成「已勾班」。排班頁改用
   BeautifulSoup 只讀真正有 checked 屬性的 shift_ 欄位，日期由欄位名稱判斷；
@@ -494,9 +497,13 @@ def release_unused_lemon_shifts(session, base_url, service_date, period_s, added
     if not added:
         return {"released": [], "failed": [], "message": ""}
     code = _period_to_shift_code(period_s)
-    unused = schedule_unassigned_lemons(session, base_url, service_date, period_s)
-    if unused is None:
-        targets = added if order_failed else []
+    # v2026.11.11-1：訂單失敗時本次補勾的一律取消，不再看未配班名單
+    # （補勾的檸檬人若不服務此地址區域，班表上不會出現在未配班，舊版會漏取消）。
+    unused = None if order_failed else schedule_unassigned_lemons(session, base_url, service_date, period_s)
+    if order_failed:
+        targets = added
+    elif unused is None:
+        targets = []
     else:
         targets = [(i, n) for i, n in added if n in unused]
     released, failed = [], []
