@@ -3,6 +3,7 @@
 
 更新記錄：
 2026-11-12（新增）
+- 訂單編號認 LC／TT／KK（測試機是 TT），列表改由本檔自行解析。
 - 依訂購日期（後台「購買日期」）逐日查詢，付款狀態只查「已付款」「待付款」，
   只留列表卡片上方有「代客預訂：○○」的訂單。
 - 貼到該區「內勤工作表單」的「line比對」分頁最下方，欄位：
@@ -40,7 +41,7 @@ STATUSES = (("1", "已付款"), ("0", "待付款"))  # 後台 purchase_status �
 MAX_DAYS = 31
 
 _PROXY_RE = re.compile(r"代客預[訂約]\s*[：:]\s*([^\n]*)")
-_ORDER_NO_RE = re.compile(r"LC\d+")
+_ORDER_NO_RE = re.compile(r"(?:LC|TT|KK)\d+")  # 正式 LC、測試機 TT（同 orders.ORDER_NO_REGEX）
 
 
 # ------------------------------------------------------------
@@ -115,23 +116,31 @@ def amount_text(item: dict, config=None) -> str:
 
 
 def parse_list_html(html: str) -> list[dict]:
-    """後台訂單列表一頁 → 訂單（memo 的解析結果＋LINE 連結＋已配班專員人數）。"""
+    """後台訂單列表一頁 → 訂單（卡片欄位＋服務日期＋LINE 連結＋已配班專員人數）。
+
+    不用 memo.parse_purchase_list_page：它只認 LC 開頭，測試機（TT）整頁會被當成沒有訂單。
+    """
     from memo_system import memo
 
-    items = memo.parse_purchase_list_page(html)
-    extra: dict[str, dict] = {}
-    for tr in BeautifulSoup(html, "html.parser").find_all("tr"):
-        m = _ORDER_NO_RE.search(tr.get_text(" ", strip=True))
-        if not m or m.group(0) in extra:
+    soup = BeautifulSoup(html, "html.parser")
+    items: dict[str, dict] = {}
+    for tr in soup.select("table tbody tr") or soup.select("tr"):
+        text = tr.get_text("\n", strip=True)
+        m = _ORDER_NO_RE.search(text)
+        if not m:
             continue
+        item = memo.parse_purchase_row_text(text)
+        item["order_no"] = m.group(0)
+        tds = tr.find_all("td", recursive=False)
+        if len(tds) > 2:
+            m_sd = re.search(r"\d{4}-\d{2}-\d{2}", tds[2].get_text(" ", strip=True))
+            if m_sd:
+                item["service_date"] = m_sd.group(0).replace("-", "/")
         link = tr.find("a", href=re.compile(r"chat\.line\.biz"))
-        extra[m.group(0)] = {
-            "line_url": str(link.get("href") or "").strip() if link else "",
-            "staff_count": len(tr.select('a[href*="schedule/edit"]')),
-        }
-    for item in items:
-        item.update(extra.get(item.get("order_no", ""), {"line_url": "", "staff_count": 0}))
-    return items
+        item["line_url"] = str(link.get("href") or "").strip() if link else ""
+        item["staff_count"] = len(tr.select('a[href*="schedule/edit"]'))
+        items[item["order_no"]] = item
+    return list(items.values())
 
 
 # ------------------------------------------------------------

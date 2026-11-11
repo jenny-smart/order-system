@@ -48,6 +48,12 @@ class CardTest(unittest.TestCase):
                          ("2026/11/20", "09:00-13:00", "0953655686"))
         self.assertEqual(lc.amount_text(item, PRICING), "4,800（2人）")  # 4800 ÷ (4 小時 × 600)
 
+    def test_dev_order_prefix_is_parsed(self):
+        items = lc.parse_list_html(page(card("TT00217785"), card("LC00000009")))
+        self.assertEqual([x["order_no"] for x in items], ["TT00217785", "LC00000009"])
+        self.assertEqual(items[0]["line_url"], "https://chat.line.biz/Uoa/chat/UTT00217785")
+        self.assertEqual((items[0]["service_date"], items[0]["phone"]), ("2026/11/20", "0953655686"))
+
     def test_persons_weekend_price_fare_and_fallbacks(self):
         weekend = lc.parse_list_html(page(card("LC1", total="5,600", date_text="2026-11-21 (六)")))[0]
         self.assertEqual(lc.amount_text(weekend, PRICING), "5,600（2人）")  # 週末 700
