@@ -1,9 +1,12 @@
 # ============================================================
 # 檔名：quick_order.py
-# 版本：v8.68
-# 最後更新：2026-11-09
+# 版本：v8.69
+# 最後更新：2026-11-11
 #
 # Change Log
+# v8.69
+# - fetch_rating_next_appointments 每筆多帶「評價時間」（含時分秒），供上班日 07:20
+#   評價預約排程（shared/rating_schedule.py）依「前一上班日 07:00～今天 07:00」篩選。
 # v8.68
 # - 本次補勾的檸檬人當次用完：成單後仍在班表「未配班」的檸檬人（或訂單失敗時
 #   全部）立即取消勾班，不留到下次（shared/cleaner_shift.release_unused_lemon_shifts）。
@@ -3156,6 +3159,7 @@ def fetch_rating_next_appointments(env_name, backend_email, backend_password, da
                 "地址": address, "預約下次日期": row["next_date"], "預約下次時間": row["next_time"],
                 "服務日期及時間": service_dt_display, "服務人數": f"{person}人" if person else "",
                 "訂單編號": row["order_no"], "LINE": line_url,
+                "評價時間": row["rating_datetime_full"],
             })
         except Exception as e:
             results.append({
@@ -3163,6 +3167,7 @@ def fetch_rating_next_appointments(env_name, backend_email, backend_password, da
                 "地址": "", "預約下次日期": row["next_date"], "預約下次時間": row["next_time"],
                 "服務日期及時間": f"⚠️ 查詢訂單失敗：{e}", "服務人數": "",
                 "訂單編號": row["order_no"], "LINE": "",
+                "評價時間": row["rating_datetime_full"],
             })
     return results
 
