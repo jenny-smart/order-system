@@ -114,6 +114,18 @@ def customer_tier(flow, balance=None):
     return 'vip' if Decimal(str(balance)) > 0 else 'regular'
 
 
+def makeup_paid_tier(service_date, balance, config=None):
+    """儲值金補價差第二段（客付補差價單）的計價等級。
+
+    年節期間（大掃除 PART1／PART2）總金額一律以一般客（非VIP）計價；
+    其他期間沿用舊客規則（有餘額＝VIP）。
+    """
+    config = config if config is not None else load_config()
+    if config['enabled'] and period_for(service_date, config) != 'normal':
+        return 'regular'
+    return customer_tier('existing', balance)
+
+
 def period_for(service_date, config):
     day = as_date(service_date)
     for key in ('part1', 'part2'):

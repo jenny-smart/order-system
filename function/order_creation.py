@@ -22,7 +22,7 @@ from function.ui_common import (
 from shared.execution_log_service import log_execution
 
 import quick_order as qo
-from service_pricing import unit_price
+from service_pricing import makeup_paid_tier, unit_price
 from shared import calendar_phone_search as _cps
 
 _REQUIRED_QUICK_ORDER_NAMES = [
@@ -1471,6 +1471,7 @@ def render_topup_diff(backend_email, backend_password, env):
         "日期類型由服務日期自動判斷：週一到週五為平日，週六日為週末。",
         "儲值金清零單走 /booking/stored_value_routine，優惠券A = 服務總額 - 儲值金餘額；剩餘額用儲值金扣掉後歸零。",
         "補差價訂單走 /booking/single，優惠券B = 原儲值金餘額，付款方式限 ATM / 信用卡。",
+        "年節期間（大掃除 PART1／PART2）補差價訂單總金額一律以一般客（非VIP）單價計算。",
     ])
     step("4", "客人與服務資料")
     sv1, sv2, sv3 = st.columns(3)
@@ -1603,6 +1604,9 @@ def render_topup_diff(backend_email, backend_password, env):
                     st.error(f"換成檸檬人失敗：{e}")
         step("6", "第二段：建立客付補價差訂單")
         st.markdown(f'<div class="hint-box">客付補價差單會建立優惠券B，面額為原儲值金餘額 <b>{stored_stage["balance"]}</b> 元，付款方式為 <b>{sv_customer_payway}</b>。</div>', unsafe_allow_html=True)
+        if makeup_paid_tier(sv_svc_date, stored_stage["balance"]) == "regular" and stored_stage["balance"] > 0:
+            _sv_regular_unit = unit_price(sv_svc_date, "regular")
+            st.caption(f"年節期間：補差價單總金額以一般客計價 {_sv_regular_unit} × {sv_person_hours} = {_sv_regular_unit * sv_person_hours}（含稅，未扣優惠券B）")
         _sv_stage_ready = bool(lemon_r.get("success"))
         if st.button("② 建立客付補價差訂單（single）", use_container_width=True, key="sv_create_paid_btn", disabled=not _sv_stage_ready):
             # v8.15：開始新的一次嘗試前，先清空上一次殘留的舊結果。

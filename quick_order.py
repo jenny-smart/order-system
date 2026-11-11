@@ -1,9 +1,13 @@
 # ============================================================
 # 檔名：quick_order.py
-# 版本：v8.68
-# 最後更新：2026-11-09
+# 版本：v8.69
+# 最後更新：2026-11-11
 #
 # Change Log
+# v8.69
+# - 儲值金補價差第二段（客付補差價單）：年節期間（服務金額設定的大掃除
+#   PART1／PART2）總金額一律以一般客（非VIP）單價計，例：2026 第二階段
+#   VIP 4275、一般客 4650 → 補差價單以 4650 計。第一段儲值金清零單不變。
 # v8.68
 # - 本次補勾的檸檬人當次用完：成單後仍在班表「未配班」的檸檬人（或訂單失敗時
 #   全部）立即取消勾班，不留到下次（shared/cleaner_shift.release_unused_lemon_shifts）。
@@ -473,7 +477,7 @@ BOOKING_ENDPOINT_MAP = {name: booking_flow.route_for(name).path for name in ("�
 
 
 
-from service_pricing import account_balance, customer_tier, unit_price as service_unit_price, apply_booking_price, load_config
+from service_pricing import account_balance, customer_tier, unit_price as service_unit_price, apply_booking_price, load_config, makeup_paid_tier
 
 TAX_RATE = 1.05
 
@@ -1077,6 +1081,7 @@ def _quick_create_order_impl(
     payment_type="", carrier_info="", company_no="", company_title="",
     invoice_type_override="", carrier_type_id_override="", donate_code_override="",
     extra_fields=None, allow_auto_lemon_shift=False, pricing_balance=None,
+    pricing_tier=None,
 ):
     _ctx = _prepare_booking_data(
         env_name, payway, lookup_result, address, clean_type_id, date_s, period_s, hour,
@@ -1085,7 +1090,7 @@ def _quick_create_order_impl(
         company_title=company_title, invoice_type_override=invoice_type_override,
         carrier_type_id_override=carrier_type_id_override,
         donate_code_override=donate_code_override, extra_fields=extra_fields,
-        pricing_balance=pricing_balance,
+        pricing_balance=pricing_balance, pricing_tier=pricing_tier,
     )
     payway, base_url, session, token = _ctx["payway"], _ctx["base_url"], _ctx["session"], _ctx["token"]
     base_data, phone, member_name = _ctx["base_data"], _ctx["phone"], _ctx["member_name"]
@@ -3705,9 +3710,12 @@ def stored_value_makeup_create_paid_order(
         return coupon_b.get("coupon_code") or coupon_b.get("coupon_prefix") or ctx["prefix_b"]
 
     invoice = _invoice_payload(invoice_mode, member_email=ctx["member"].get("email") or "", mobile_carrier=mobile_carrier, company_title=company_title, company_no=company_no)
-    paid_order = quick_create_order(env_name=env_name, payway=customer_payway, region=ctx["region"], lookup_result=ctx["lookup"], address=ctx["address"], clean_type_id=clean_type_id, date_s=service_date, period_s=period_s, hour=str(hour), person=str(person), discount_code=_make_coupon_b, pricing_balance=ctx["balance"], allow_auto_lemon_shift=bool(allow_auto_lemon_shift), **invoice)
+    # 年節期間（大掃除 PART1／PART2）補差價單總金額一律以一般客計價。
+    paid_tier = makeup_paid_tier(service_date, ctx["balance"])
+    paid_order = quick_create_order(env_name=env_name, payway=customer_payway, region=ctx["region"], lookup_result=ctx["lookup"], address=ctx["address"], clean_type_id=clean_type_id, date_s=service_date, period_s=period_s, hour=str(hour), person=str(person), discount_code=_make_coupon_b, pricing_balance=ctx["balance"], pricing_tier=paid_tier, allow_auto_lemon_shift=bool(allow_auto_lemon_shift), **invoice)
     pair = f"儲值折抵單 {stored_order_no} + 客付補價差單 {paid_order['order_no']}" if stored_order_no else f"客付補價差單 {paid_order['order_no']}"
-    note = f"儲值金補價差第二段：{pair}，客付單使用優惠券B折抵原儲值金餘額 {ctx['balance']} 元。"
+    tier_note = "，年節期間總金額以一般客計價" if paid_tier == "regular" and ctx["balance"] > 0 else ""
+    note = f"儲值金補價差第二段：{pair}，客付單使用優惠券B折抵原儲值金餘額 {ctx['balance']} 元{tier_note}。"
     _update_order_note(paid_order["session"], _configure_environment(env_name), paid_order["order_no"], note)
     service_due = _service_due_after_fare(paid_order["session"], paid_order["order_no"])
     if service_due == 0:
@@ -4390,7 +4398,7 @@ def _prepare_booking_data(
     date_s, period_s, hour, person="2", fallback_fare="0", discount_code="",
     payment_type="", carrier_info="", company_no="", company_title="",
     invoice_type_override="", carrier_type_id_override="", donate_code_override="",
-    extra_fields=None, pricing_balance=None,
+    extra_fields=None, pricing_balance=None, pricing_tier=None,
 ):
     """成單步驟 1–5：會員、地址（查詢地區）、坪數與計算時數；查班表前的共用資料。"""
     payway = normalize_booking_payway(payway)
@@ -4487,8 +4495,13 @@ def _prepare_booking_data(
     base_data["price_vvip"] = str(calc_fields.get("price_vvip") or "0")
     pricing_config = load_config()
     if pricing_config["enabled"]:
-        balance = pricing_balance if pricing_balance is not None else account_balance(member_payload)
-        apply_booking_price(base_data, customer_tier("existing", balance), pricing_config)
+        if pricing_tier:
+            # 指定計價等級（例：儲值金補價差第二段年節期間一律一般客價）。
+            tier = pricing_tier
+        else:
+            balance = pricing_balance if pricing_balance is not None else account_balance(member_payload)
+            tier = customer_tier("existing", balance)
+        apply_booking_price(base_data, tier, pricing_config)
     base_data["fare"] = first_nonzero(calc_fields.get("fare"), best_addr.get("fare"), default="0")
     if base_data["price"] in ("", "0", "0.0") and payway != "儲值金":
         raise Exception("計算時數後金額為 0，請確認坪數/時數設定是否正確")

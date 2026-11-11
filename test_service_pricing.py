@@ -111,6 +111,43 @@ class PricingTest(unittest.TestCase):
                 self.assertEqual(result['amount'], rate * 3)
 
 class PricingIntegrationTest(unittest.TestCase):
+    def test_makeup_paid_tier_holiday_uses_regular(self):
+        config = configured()
+        self.assertEqual(p.makeup_paid_tier('2027-01-05', 100, config), 'regular')  # PART1
+        self.assertEqual(p.makeup_paid_tier('2027-01-15', 100, config), 'regular')  # PART2
+        self.assertEqual(p.makeup_paid_tier('2026-12-25', 100, config), 'vip')      # 非大掃除
+        self.assertEqual(p.makeup_paid_tier('2026-12-25', 0, config), 'regular')
+        config['enabled'] = False
+        self.assertEqual(p.makeup_paid_tier('2027-01-05', 100, config), 'vip')
+
+    def test_makeup_paid_order_priced_regular_in_holiday(self):
+        import quick_order as q
+        ctx = dict(balance=500, plan={'coupon_b': 500}, day_type='平日', address='test', region='台北', member={}, lookup={}, today_str='2027-01-01', date_e='2027-03-01', prefix_b='svB0000')
+        created = {'order_no': 'B1', 'session': Mock()}
+        with patch.dict(os.environ, {'SERVICE_PRICING_JSON': json.dumps(configured())}), \
+             patch.object(q, '_stored_value_makeup_context', return_value=ctx), \
+             patch.object(q, '_invoice_payload', return_value={}), \
+             patch.object(q, 'quick_create_order', return_value=created) as create, \
+             patch.object(q, '_update_order_note'), patch.object(q, '_configure_environment', return_value=''), \
+             patch.object(q, '_service_due_after_fare', return_value=100), \
+             patch.object(q, 'build_line_message', return_value=''):
+            for day, tier in [('2027-01-15', 'regular'), ('2026-12-25', 'vip')]:
+                q.stored_value_makeup_create_paid_order('dev', '', '', '0900000000', '1', day, '08:00-12:00', 4, 2)
+                self.assertEqual(create.call_args.kwargs['pricing_tier'], tier)
+
+    def test_prepare_booking_pricing_tier_override(self):
+        import quick_order as q
+        with patch.dict(os.environ, {'SERVICE_PRICING_JSON': json.dumps(configured())}), \
+             patch.object(q, '_configure_environment', return_value='https://example.invalid'), \
+             patch.object(q, '_get_booking_token_for_payway', return_value='token'), \
+             patch.object(q, 'resolve_backend_booking_address', return_value=({'address':'test'}, {}, {})), \
+             patch.object(q, 'calculate_hour', return_value={'data': {'price': 1}}), \
+             patch.object(q, '_query_booking_slot_with_lemon_retry', side_effect=RuntimeError('stop')) as query:
+            with self.assertRaisesRegex(RuntimeError, 'stop'):
+                q.quick_create_order('dev', 'ATM', '', {'session': Mock(), 'phone':'0900000000', 'member_payload': {'member': {'member_id':'1'}, 'storedValue': 500}}, 'test', '1', '2027-01-14', '08:00-12:00', '4', pricing_balance=500, pricing_tier='regular')
+            # PART2 平日一般客 1000 × 4h × 2人 = 8000 含稅 → 未稅 7619
+            self.assertEqual(query.call_args.args[3]['price'], '7619')
+
     def test_change_fee_uses_configured_regular_price(self):
         from memo_system import change_order as c
         order = dict(payway='儲值金', pricing_balance='0', service_hours=4, cleaner_count=2, total=100, travel_fee=0)
