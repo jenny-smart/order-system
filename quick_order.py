@@ -5,6 +5,10 @@
 #
 # Change Log
 # v8.69
+# - 服務金額設定改存 Google Sheet「_服務金額設定」，重新部署不再遺失（原本退回
+#   600／700，造成訂單轉換大掃除期間優惠券以 600 計）。
+# - 訂單轉換第二段：優惠券與新單用同一計價等級。
+# - 服務金額設定畫面改以「每2人1小時」輸入（內部仍存每人時單價）。
 # - 儲值金補價差第二段（客付補差價單）：年節期間（服務金額設定的大掃除
 #   PART1／PART2）總金額一律以一般客（非VIP）單價計，例：2026 第二階段
 #   VIP 4275、一般客 4650 → 補差價單以 4650 計。第一段儲值金清零單不變。
@@ -2147,7 +2151,9 @@ def convert_order_stage2_create_new_orders(stage1_result, new_orders):
 
         try:
             _day_type_new = _day_type_from_date(new_date_s)
-            _unit_price_new = service_unit_price(new_date_s, customer_tier("existing", account_balance(member_payload)) if load_config()["enabled"] else "regular")
+            # 優惠券金額與新單金額必須用同一個計價等級（大掃除期間 VIP／一般客單價）。
+            _tier_new = customer_tier("existing", account_balance(member_payload)) if load_config()["enabled"] else "regular"
+            _unit_price_new = service_unit_price(new_date_s, _tier_new)
             _person_hours_new = int(new_person) * int(float(new_hour))
             price_with_tax = _unit_price_new * _person_hours_new
             if price_with_tax <= 0 and payway_a != "儲值金":
@@ -2183,6 +2189,7 @@ def convert_order_stage2_create_new_orders(stage1_result, new_orders):
                 lookup_result=lookup_result, address=address_a,
                 clean_type_id=clean_type_id, date_s=new_date_s, period_s=new_period_s,
                 hour=new_hour, person=new_person, discount_code=_make_coupon,
+                pricing_tier=_tier_new,
                 allow_auto_lemon_shift=bool(new_order.get("allow_lemon", False)),
             )
             coupon_code = order_result.get("discount_code", "")

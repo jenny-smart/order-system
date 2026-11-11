@@ -3,6 +3,7 @@ import json
 import os
 import tempfile
 import unittest
+from pathlib import Path
 from datetime import date
 from unittest.mock import patch, Mock
 import service_pricing as p
@@ -111,6 +112,19 @@ class PricingTest(unittest.TestCase):
                 self.assertEqual(result['amount'], rate * 3)
 
 class PricingIntegrationTest(unittest.TestCase):
+    def test_sheet_store_survives_missing_file(self):
+        p._sheet_cache.update(at=0.0, config=None)
+        stored = {}
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {'SERVICE_PRICING_JSON': ''}), \
+             patch.object(p, '_use_sheet', return_value=True), patch.object(p, 'config_path', return_value=Path(folder) / 'x.json'), \
+             patch.object(p, '_write_sheet', side_effect=lambda c: stored.update(c=c)), \
+             patch.object(p, '_read_sheet', side_effect=lambda: stored.get('c')):
+            p.save_config(configured())
+            (Path(folder) / 'x.json').unlink()  # 模擬重新部署
+            p._sheet_cache.update(at=0.0, config=None)
+            self.assertTrue(p.load_config()['enabled'])
+        p._sheet_cache.update(at=0.0, config=None)
+
     def test_makeup_paid_tier_holiday_uses_regular(self):
         config = configured()
         self.assertEqual(p.makeup_paid_tier('2027-01-05', 100, config), 'regular')  # PART1
@@ -171,7 +185,8 @@ class PricingIntegrationTest(unittest.TestCase):
             app = AppTest.from_string('import streamlit as st\nfrom service_pricing import render_settings\nrender_settings(st)').run()
             self.assertFalse(app.exception)
             self.assertEqual(len(app.number_input), 12)
-            app.number_input[0].set_value(555.25)
+            self.assertEqual(app.number_input[0].value, 1200)  # 每2人1小時
+            app.number_input[0].set_value(1110.5)
             app.checkbox[0].check()
             app.button[0].click().run()
             self.assertFalse(app.exception)
