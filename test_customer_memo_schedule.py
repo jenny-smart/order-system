@@ -25,14 +25,14 @@ class ImportOrderTest(unittest.TestCase):
 class WindowTest(unittest.TestCase):
     def test_tuesday_uses_monday_10(self):
         self.assertEqual(cms.query_window(date(2026, 11, 10), {}),
-                         (datetime(2026, 11, 9, 8, 30), datetime(2026, 11, 10, 8, 30)))
+                         (datetime(2026, 11, 9, 8), datetime(2026, 11, 10, 8)))
 
     def test_monday_covers_weekend_from_friday(self):
-        self.assertEqual(cms.query_window(date(2026, 11, 9), {})[0], datetime(2026, 11, 6, 8, 30))
+        self.assertEqual(cms.query_window(date(2026, 11, 9), {})[0], datetime(2026, 11, 6, 8))
 
     def test_holiday_skipped_back_to_last_workday(self):
         cal = {date(2026, 11, 6): True}  # 週五放假
-        self.assertEqual(cms.query_window(date(2026, 11, 9), cal)[0], datetime(2026, 11, 5, 8, 30))
+        self.assertEqual(cms.query_window(date(2026, 11, 9), cal)[0], datetime(2026, 11, 5, 8))
 
     def test_off_day_does_not_run(self):
         self.assertFalse(cms.run(today=date(2026, 11, 8), calendar={})["due"])

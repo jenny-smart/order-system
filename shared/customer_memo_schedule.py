@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""客人備註非空白（雲端排程，上班日 08:40，區間截到 08:30）。
+"""客人備註非空白（雲端排程，上班日 08:30，區間截到 08:00，和儲值金客服備註同一區間）。
 
 更新記錄：
 2026-11-11
@@ -12,7 +12,7 @@
 - 修正行事曆 404：服務帳號沒有 jenny@hers.com.tw 行事曆的寫入權，改優先用 Jenny 本人授權
   （GOOGLE_HERS_CALENDAR_REFRESH_TOKEN＋GOOGLE_OAUTH_CLIENT_ID／SECRET，與 tool-system 相同）。
 - 「客服備註」分頁改寫「訂單客服備註」頁面的①②③三區結果（同一套查詢：購買日期＝前一上班日～
-  今天、付款狀態全部，再依訂購時間篩前一上班日 08:30～今天 08:30）：
+  今天、付款狀態全部，再依訂購時間篩前一上班日 08:00～今天 08:00）：
   異動（最前方）／分類／訂單編號／客戶／客人電話（搜尋連結）／地址／服務日期／付款狀態／狀態／
   參照訂單／服務項目（前次→本次）／服務時間（前次→本次）／客服備註（將寫入）。
   只寫工作表，不改後台客服備註（寫入仍在訂單客服備註頁面勾選執行）。
@@ -26,7 +26,7 @@
 
 規則：
 - 只在上班日執行（config/taiwan_work_calendar.json；週六日＋國定假日不跑，補班日照跑）。
-- 查詢區間＝前一上班日 08:30 ～ 今天 08:30（依訂購時間；週一會涵蓋週五 08:30 起整個週末；截止時間＝RUN_AT）。
+- 查詢區間＝前一上班日 08:00 ～ 今天 08:00（依訂購時間；週一會涵蓋週五 08:00 起整個週末；截止時間＝RUN_AT）。
 - 台北／台中各用自己的後台帳號查：全部付款狀態、排除代客預訂、客人備註非空白
   （function/customer_memo_query.search_customer_memo_orders，與「客人備註查詢」頁面相同）。
 - 貼到該區「內勤工作表單」的「客人備註」分頁最下方：
@@ -53,7 +53,7 @@ from zoneinfo import ZoneInfo
 
 TOOL_NAME = "客人備註非空白：自動排程"
 TZ = ZoneInfo("Asia/Taipei")
-RUN_AT = time(8, 30)  # 2026-11-12 起：主控表「排程設定」customer_memo_daily 排 08:40，區間截到 08:30
+RUN_AT = time(8, 0)  # 2026-11-12 起：和儲值金客服備註（stored_value_notice，CUTOFF 08:00、08:20 跑）同一區間；排程設定 customer_memo_daily 排 08:30
 REGIONS = ("台北", "台中")
 SHEET_CATEGORY = "內勤工作表單"
 TAB_TITLE = "客人備註"
@@ -86,7 +86,7 @@ def previous_workday(day: date, calendar: dict) -> date:
 
 
 def query_window(today: date, calendar: dict) -> tuple[datetime, datetime]:
-    """前一上班日 RUN_AT ～ 今天 RUN_AT（目前 08:30，naive，台北時間）。"""
+    """前一上班日 RUN_AT ～ 今天 RUN_AT（目前 08:00，naive，台北時間）。"""
     start_day = previous_workday(today, calendar)
     return datetime.combine(start_day, RUN_AT), datetime.combine(today, RUN_AT)
 
