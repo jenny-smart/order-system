@@ -91,6 +91,21 @@ class OccupiedStaffLookupTests(unittest.TestCase):
 
 
 class AssignmentOccupancyGuardTests(unittest.TestCase):
+    def test_target_order_without_staff_is_found(self):
+        html = """
+        <table>
+          <tr><td>TT00220173</td><td>2026-11-13 (五) 09:00 - 16:00</td></tr>
+          <tr><td>TT00220100</td><td>2026-11-13 (五) 09:00 - 16:00
+            <a href="/schedule/edit?date=2026-11-13&purchase_id=220100">檸檬人1(0)</a>
+          </td></tr>
+        </table>
+        """
+        occupied = q._get_occupied_staff_for_period(
+            _Session(html), "https://backend.lemonclean.com.tw",
+            "2026-11-13", "09:00-16:00", exclude_purchase_id="220173",
+        )
+        self.assertEqual(occupied, {"檸檬人1"})
+
     def test_conversion_skips_staff_owned_by_other_orders(self):
         session = _Session("")
         slots = [
