@@ -52,9 +52,20 @@ class LazyDiscountCodeTest(unittest.TestCase):
 
 class CouponTitleTest(unittest.TestCase):
     def test_title_is_customer_name(self):
-        self.assertEqual(q._coupon_title({"member": {"name": "吳惠盟"}}, "LC00216063"), "吳惠盟6063")
-        self.assertEqual(q._coupon_title({"member": {"name": "吳惠盟"}}, "LC00216063", amount=8400), "吳惠盟6063-8400")
-        self.assertEqual(q._coupon_title({"name": "陳佳吟"}, "", "0910828425"), "陳佳吟8425")
+        self.assertEqual(q._coupon_title({"member": {"name": "吳惠盟"}}, "LC00216063", amount=8400), "吳惠盟8400")
+        self.assertEqual(q._coupon_title({"name": "陳佳吟"}, "", "0910828425", 500), "陳佳吟500")
+
+    def test_prefix_by_region_and_order_date(self):
+        from unittest.mock import patch
+        from datetime import datetime as real_dt
+        class FakeDT(real_dt):
+            @classmethod
+            def now(cls, tz=None):
+                return real_dt(2026, 11, 11, 9, 0, tzinfo=tz)
+        with patch.object(q, "datetime", FakeDT):
+            self.assertEqual(q._coupon_prefix("台北", "x"), "tpe1111")
+            self.assertEqual(q._coupon_prefix("台中", "x"), "tai1111")
+            self.assertEqual(q._coupon_prefix("桃園", "x"), "x")
 
     def test_title_without_name_uses_tail_only(self):
         self.assertEqual(q._coupon_title({"member": {}}, "TT00217663"), "7663")

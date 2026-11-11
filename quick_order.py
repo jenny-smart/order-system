@@ -9,6 +9,7 @@
 #   600／700，造成訂單轉換大掃除期間優惠券以 600 計）。
 # - 訂單轉換第二段：優惠券與新單用同一計價等級。
 # - 服務金額設定畫面改以「每2人1小時」輸入（內部仍存每人時單價）。
+# - 折價券標題改為訂購人姓名＋金額；編碼前綴台北 tpe＋MMDD、台中 tai＋MMDD（訂購日）。
 # - 儲值金補價差第二段（客付補差價單）：年節期間（服務金額設定的大掃除
 #   PART1／PART2）總金額一律以一般客（非VIP）單價計，例：2026 第二階段
 #   VIP 4275、一般客 4650 → 補差價單以 4650 計。第一段儲值金清零單不變。
@@ -1228,14 +1229,27 @@ def _quick_create_order_impl(
 
 
 def _coupon_title(member_or_payload, order_no="", fallback="", amount=""):
-    """優惠券標題＝訂購人姓名＋原訂單末4碼－面額；沒有原訂單時用 fallback（手機）末4碼。"""
+    """優惠券標題＝訂購人姓名＋金額（例：劉子菊9000）；查無姓名時用原訂單／手機末4碼－金額。"""
     data = member_or_payload or {}
     member = data.get("member", data) if isinstance(data, dict) else {}
     name = str((member or {}).get("name") or "").strip()
-    tail = str(order_no or fallback or "").strip()[-4:]
-    title = f"{name}{tail}" if name else tail
     amount_text = str(amount if amount not in (None, "") else "").strip()
-    return f"{title}-{amount_text}" if amount_text else title
+    if name:
+        return f"{name}{amount_text}"
+    tail = str(order_no or fallback or "").strip()[-4:]
+    return f"{tail}-{amount_text}" if amount_text else tail
+
+
+_COUPON_REGION_PREFIX = {"台北": "tpe", "台中": "tai"}
+
+
+def _coupon_prefix(region, fallback):
+    """折價券編碼前綴：台北 tpe＋MMDD、台中 tai＋MMDD（MMDD＝訂購日，台灣時間）；其他地區沿用 fallback。"""
+    head = _COUPON_REGION_PREFIX.get(str(region or "").strip())
+    if not head:
+        return fallback
+    from zoneinfo import ZoneInfo
+    return head + datetime.now(ZoneInfo("Asia/Taipei")).strftime("%m%d")
 
 
 # =========================================================
@@ -1934,7 +1948,7 @@ def convert_order(
     if not address_a:
         raise Exception(f"訂單 {order_no_a} 無法取得服務地址")
     today_str = date.today().strftime("%Y-%m-%d")
-    coupon_prefix = order_no_a[-4:]
+    coupon_prefix = _coupon_prefix(region_a, order_no_a[-4:])
     coupon_discount = int(float(str(service_amount_a).replace(",", "")))
     token_booking = get_csrf_token(session)
     member_payload = get_member(session, phone_a, token_booking, clean_type_id)
@@ -2159,7 +2173,7 @@ def convert_order_stage2_create_new_orders(stage1_result, new_orders):
             if price_with_tax <= 0 and payway_a != "儲值金":
                 raise Exception(f"金額計算為 0（{new_person}人{new_hour}小時），請確認設定")
 
-            coupon_prefix = f"c{order_no_a[-3:]}{idx+1}{datetime.now().strftime('%H%M%S')}"
+            coupon_prefix = _coupon_prefix(region_a, f"c{order_no_a[-3:]}{idx+1}{datetime.now().strftime('%H%M%S')}")
             coupon_discount = min(price_with_tax, remaining_coupon_budget)
             coupon_code = ""
 
@@ -3643,7 +3657,7 @@ def _stored_value_makeup_context(
     today_str = date.today().strftime("%Y-%m-%d")
     date_e = (date.today() + timedelta(days=int(coupon_valid_days))).strftime("%Y-%m-%d")
     suffix = str(coupon_prefix_base or phone)[-4:]
-    return {"balance": sv, "plan": plan, "lookup": lookup, "member": member, "address": selected_address, "region": selected_region, "day_type": day_type, "today_str": today_str, "date_e": date_e, "prefix_a": f"svA{suffix}", "prefix_b": f"svB{suffix}"}
+    return {"balance": sv, "plan": plan, "lookup": lookup, "member": member, "address": selected_address, "region": selected_region, "day_type": day_type, "today_str": today_str, "date_e": date_e, "prefix_a": _coupon_prefix(selected_region, f"svA{suffix}"), "prefix_b": _coupon_prefix(selected_region, f"svB{suffix}")}
 
 
 def stored_value_makeup_create_stored_order(
