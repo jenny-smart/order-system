@@ -1,0 +1,46 @@
+# 評價預約成單：把內勤工作表單「評價預約」分頁的指定列約成訂單（由功能選單「評價預約成單」啟動）。
+# 規則見 shared/rating_booking_order.py：F／G 欄拆成日期（各約一單／擇一），沒寫的沿用同地址上一張已付款訂單；
+# 成單後 A 欄寫訂單編號、L 欄寫成單日期時段或無法成單原因。env=dev 在測試機成單、不寫回工作表。
+#
+# 需要的 Secrets：GOOGLE_SERVICE_ACCOUNT_JSON、TAIPEI_EMAIL／PASSWORD
+name: Rating Booking Order
+run-name: Rating Booking Order (${{ inputs.env || 'prod' }}) ${{ inputs.region }} ${{ inputs.rows }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      region: {description: 地區, required: false, default: "台北", type: string}
+      rows: {description: "執行列號（例 226-254 或 230,233,240-245）", required: true, type: string}
+      allow_auto_lemon: {description: 查無時段時補勾檸檬人, required: false, default: false, type: boolean}
+      dry_run: {description: 試跑：只判讀，不成單、不寫回工作表, required: false, default: false, type: boolean}
+      pricing_json: {description: 服務金額設定（由畫面帶入）, required: false, default: "", type: string}
+      env: {description: prod / dev, required: false, default: "prod", type: string}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rating-booking-order-${{ inputs.env == 'dev' && 'dev' || 'prod' }}
+  cancel-in-progress: false
+
+jobs:
+  booking:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12", cache: pip}
+      - run: pip install -r requirements.txt
+      - name: Rating booking order
+        env:
+          SERVICE_PRICING_JSON: ${{ inputs.pricing_json }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          TAIPEI_EMAIL: ${{ secrets.TAIPEI_EMAIL }}
+          TAIPEI_PASSWORD: ${{ secrets.TAIPEI_PASSWORD }}
+          RUN_REGION: ${{ inputs.region || '台北' }}
+          RUN_ROWS: ${{ inputs.rows }}
+          RUN_ENV: ${{ inputs.env || 'prod' }}
+          ALLOW_LEMON: ${{ inputs.allow_auto_lemon && '--allow-auto-lemon' || '' }}
+          DRY_RUN: ${{ inputs.dry_run && '--dry-run' || '' }}
+        run: python -u -m shared.rating_booking_order --region "$RUN_REGION" --rows "$RUN_ROWS" --env "$RUN_ENV" $ALLOW_LEMON $DRY_RUN
