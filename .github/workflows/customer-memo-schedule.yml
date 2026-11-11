@@ -1,8 +1,8 @@
-# 客人備註非空白：上班日 10:00 貼到台北／台中內勤工作表單「客人備註」分頁＋記行事曆
+# 客人備註非空白：上班日 08:40 貼到台北／台中內勤工作表單「客人備註」分頁＋記行事曆
 #
 # 由 tool-system 的 Cloud Schedule Router 依主控表「排程設定」（功能代號 customer_memo_daily）
 # 派送過來（不用 GitHub cron：新加的 GitHub 排程常延遲或不跑）。也可以在這裡手動執行。
-# 規則見 shared/customer_memo_schedule.py：區間＝前一上班日 10:00～今天 10:00（訂購時間），
+# 規則見 shared/customer_memo_schedule.py：區間＝前一上班日 08:30～今天 08:30（訂購時間），
 # 全部付款狀態、排除代客預訂、客人備註非空白；非上班日直接結束。
 #
 # 需要的 Secrets：GOOGLE_SERVICE_ACCOUNT_JSON、GOOGLE_HERS_CALENDAR_REFRESH_TOKEN＋GOOGLE_OAUTH_CLIENT_ID／SECRET（行事曆）、TAIPEI_EMAIL／PASSWORD、TAICHUNG_EMAIL／PASSWORD
