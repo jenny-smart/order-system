@@ -81,3 +81,32 @@ class MergeNoteTest(unittest.TestCase):
         self.assertEqual(q.add_lemon_keep("**VIP**\n**2-4**請帶工具"), "**VIP**\n**2-4**檸檬人勿動請帶工具")
         self.assertEqual(q.add_lemon_keep("**2-4**檸檬人勿動"), "**2-4**檸檬人勿動")
         self.assertEqual(q.add_lemon_keep(""), "檸檬人勿動")
+
+
+class SettleZeroDueTest(unittest.TestCase):
+    def test_zero_due_sets_invoice_then_paid_and_verifies(self):
+        from unittest.mock import patch
+        calls = []
+        block = {"lines": ["總金額：0", "付款狀態：已付款", "發票：不開立發票"]}
+        with patch.object(q, "_service_due_after_fare", return_value=0), \
+             patch.object(q, "_update_order_invoice_no_text", side_effect=lambda *a: calls.append("invoice") or (True, "ok")), \
+             patch.object(q, "_mark_order_as_paid", side_effect=lambda *a: calls.append("paid") or (True, "ok")), \
+             patch.object(q, "_fetch_purchase_block_for_order_no", return_value=block):
+            due, paid_ok, _, inv_ok, _ = q.settle_zero_due_order(None, "", "LC1")
+        self.assertEqual((due, paid_ok, inv_ok, calls), (0, True, True, ["invoice", "paid"]))
+
+    def test_zero_due_reports_when_backend_did_not_apply(self):
+        from unittest.mock import patch
+        with patch.object(q, "_service_due_after_fare", return_value=0), \
+             patch.object(q, "_update_order_invoice_no_text", return_value=(True, "ok")), \
+             patch.object(q, "_mark_order_as_paid", return_value=(True, "ok")), \
+             patch.object(q, "_fetch_purchase_block_for_order_no", return_value={"lines": ["付款狀態：待付款"]}):
+            _, paid_ok, _, inv_ok, _ = q.settle_zero_due_order(None, "", "LC1")
+        self.assertEqual((paid_ok, inv_ok), (False, False))
+
+    def test_nonzero_due_does_nothing(self):
+        from unittest.mock import patch
+        with patch.object(q, "_service_due_after_fare", return_value=1800), \
+             patch.object(q, "_mark_order_as_paid") as paid:
+            self.assertIsNone(q.settle_zero_due_order(None, "", "LC1")[1])
+            paid.assert_not_called()
