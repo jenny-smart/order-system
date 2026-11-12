@@ -7,7 +7,7 @@
 - 「訂購人」改為 HYPERLINK 到客戶 LINE 聊天（沒有 LINE 連結時照舊寫姓名）。
 2026-11-11
 - 欄位改成內勤工作表單上 Jenny 訂的標題，兩個分頁 A 欄都是「備註日期時間」（排程寫入時間）：
-  客人備註：備註日期時間／訂單編號／訂購人／電話號碼／預約日期／客人備註／客服備註
+  客人備註：備註日期時間／標記／訂單編號／訂購人／電話號碼／地址／服務日期／付款狀態／客人備註／客服備註（前 8 欄同客服備註；每批依訂購人、訂單編號排序）
   客服備註：備註日期時間／標記／訂單編號／訂購人／電話號碼／地址／服務日期／付款狀態／
             異動單號／異動項目／異動時數／異動客服備註／異動註記
   標記＝異動類別（⚠️ 付款／項目／時間／N→O），沒有異動時寫分類（①②③）。
@@ -60,8 +60,13 @@ RUN_AT = time(8, 0)  # 2026-11-12 起：和儲值金客服備註（stored_value_
 REGIONS = ("台北", "台中")
 SHEET_CATEGORY = "內勤工作表單"
 TAB_TITLE = "客人備註"
-HEADER = ["備註日期時間", "訂單編號", "訂購人", "電話號碼", "預約日期", "客人備註", "客服備註"]
-KEY_COL = 2  # 「客人備註」分頁的訂單編號在 B 欄
+# 「客人備註」分頁前 8 欄和「客服備註」分頁相同，後面接客人備註、客服備註
+HEADER = ["備註日期時間", "標記", "訂單編號", "訂購人", "電話號碼", "地址", "服務日期", "付款狀態",
+          "客人備註", "客服備註"]
+KEY_COL = 3  # 「客人備註」分頁的訂單編號在 C 欄
+LEGACY_HEADER = ["備註日期時間", "訂單編號", "訂購人", "電話號碼", "預約日期", "客人備註", "客服備註"]
+# 舊版 → 新版：依序在第 2、6、8 欄（0 起算 1、5、7）插入空白欄（標記、地址、付款狀態）
+LEGACY_INSERT_COLUMNS = (1, 5, 7)
 NOTICE_TAB_TITLE = "客服備註"
 NOTICE_HEADER = ["備註日期時間", "標記", "訂單編號", "訂購人", "電話號碼", "地址", "服務日期", "付款狀態",
                  "異動單號", "異動項目", "異動時數", "異動客服備註", "異動註記"]
@@ -131,13 +136,17 @@ def name_cell(name: str, line_url: str) -> str:
 
 
 def build_sheet_rows(rows: list[dict], base_url: str, stamp: str = "") -> list[list[str]]:
-    """「客人備註」分頁的列。"""
+    """「客人備註」分頁的列（依訂購人、訂單編號排序）。"""
+    rows = sorted(rows, key=lambda r: (str(r.get("客人姓名", "") or ""), str(r.get("訂單號碼", "") or "")))
     return [[
         stamp,
+        "",                                                       # 標記
         str(r.get("訂單號碼", "") or ""),
         name_cell(r.get("客人姓名", ""), r.get("LINE", "")),
         phone_cell(base_url, r.get("電話", "")),
+        str(r.get("地址", "") or ""),
         str(r.get("服務日期", "") or ""),
+        str(r.get("付款狀態", "") or ""),
         str(r.get("客人備註", "") or ""),
         str(r.get("客服備註", "") or ""),
     ] for r in rows]
@@ -183,10 +192,7 @@ def section_rows_in_window(rows: list[dict], window: tuple[datetime, datetime]) 
             continue
         if window[0] <= created < window[1]:
             out.append(r)
-    order = {"③": 0, "①": 1, "②": 2}
-    from memo_system import memo
-    out.sort(key=lambda r: (0 if r.get("service_change") else 1,
-                            order.get(memo.preview_section_label(r)[:1], 9), str(r.get("order_id", ""))))
+    out.sort(key=lambda r: (str(r.get("customer_name", "") or ""), str(r.get("order_id", "") or "")))
     return out
 
 
@@ -219,10 +225,35 @@ def get_tab(region: str, title: str = TAB_TITLE, header: list[str] = HEADER, spr
             first = with_retry(ws.row_values, 1)
             if not any(str(v).strip() for v in first):  # 分頁在但沒有標題列 → 補寫
                 with_retry(ws.update, values=[header], range_name=f"A1:{_col_letter(len(header))}1")
+            elif header == HEADER and _trimmed(first) == LEGACY_HEADER:
+                migrate_legacy_tab(spreadsheet, ws)
             return spreadsheet, ws
     ws = with_retry(spreadsheet.add_worksheet, title=title, rows=1000, cols=len(header))
     with_retry(ws.update, values=[header], range_name=f"A1:{_col_letter(len(header))}1")
     return spreadsheet, ws
+
+
+def _trimmed(values: list) -> list[str]:
+    out = [str(v).strip() for v in values]
+    while out and not out[-1]:
+        out.pop()
+    return out
+
+
+def legacy_migration_requests(sheet_id: int) -> list[dict]:
+    """舊「客人備註」分頁插入標記／地址／付款狀態三欄（既有列的超連結公式跟著移動）。"""
+    return [{"insertDimension": {
+        "range": {"sheetId": sheet_id, "dimension": "COLUMNS", "startIndex": i, "endIndex": i + 1},
+        "inheritFromBefore": False,
+    }} for i in LEGACY_INSERT_COLUMNS]
+
+
+def migrate_legacy_tab(spreadsheet, ws) -> None:
+    from memo_system.memo import with_retry
+
+    with_retry(spreadsheet.batch_update, {"requests": legacy_migration_requests(ws.id)})
+    with_retry(ws.update, values=[HEADER], range_name=f"A1:{_col_letter(len(HEADER))}1")
+    print(f"MIGRATE {spreadsheet.title}「{ws.title}」欄位改為與客服備註相同", flush=True)
 
 
 def append_rows(ws, sheet_rows: list[list[str]], width: int = len(HEADER), key_col: int = 1) -> int:

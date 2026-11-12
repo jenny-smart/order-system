@@ -18,7 +18,7 @@ from shared.execution_log_service import log_execution
 def render(backend_email, backend_password, env):
     step("3", "週末服務 LINE 提醒")
     info_panel("建議流程", [
-        "在畫面顯示的『建議執行日』查詢名單；系統只列服務日期區間內的已付款訂單。",
+        "在畫面顯示的『建議執行日』查詢名單；系統列出服務日期區間內的待付款／已付款訂單（追蹤表以付款狀態欄區分）。",
         "名單中的『新增』代表尚未寫入追蹤表；『已存在』代表訂單編號已記錄。",
         "勾選後按『儲存勾選名單』，只會寫入 Google Sheet，不會發送 LINE。",
         "需要通知時請開啟 LINE、複製訊息並由客服人工送出。",
@@ -44,7 +44,7 @@ def render(backend_email, backend_password, env):
         if _next:
             _run_day, _blocks = _next
             _ranges = "、".join(f"{s}～{e}" for s, e in _blocks)
-            st.caption(f"⏰ 自動排程：{_run_day} 11:00 會自動把服務 {_ranges} 的已付款名單新增到追蹤表（不發送 LINE）。")
+            st.caption(f"⏰ 自動排程：{_run_day} 11:00 會自動把服務 {_ranges} 的待付款／已付款名單新增到追蹤表（不發送 LINE）。")
     except Exception:
         pass
 
@@ -61,14 +61,14 @@ def render(backend_email, backend_password, env):
         help="勾選後，LINE 文案會加入人事行政局公告放假時取消服務的提醒。",
     )
 
-    if st.button("🔍 查詢已付款名單", use_container_width=True, type="primary", key="wr_search"):
+    if st.button("🔍 查詢待付款／已付款名單", use_container_width=True, type="primary", key="wr_search"):
         if not backend_email.strip() or not backend_password.strip():
             st.error("請先在上方輸入後台帳號密碼")
         elif wr_date_s > wr_date_e:
             st.error("服務日期起日不可晚於迄日")
         else:
             try:
-                with st.spinner("登入後台並查詢已付款訂單…"):
+                with st.spinner("登入後台並查詢待付款／已付款訂單…"):
                     _orders, _debug = find_paid_weekend_orders(
                         env, backend_email.strip(), backend_password.strip(),
                         wr_date_s.strftime("%Y-%m-%d"), wr_date_e.strftime("%Y-%m-%d"),
@@ -84,11 +84,11 @@ def render(backend_email, backend_password, env):
     wr_rows = st.session_state.get("wr_rows")
     if wr_rows is not None:
         _debug = st.session_state.get("wr_debug", {})
-        st.caption(f"後台：{_debug.get('base_url', '')}｜找到 {len(wr_rows)} 筆已付款服務")
+        st.caption(f"後台：{_debug.get('base_url', '')}｜找到 {len(wr_rows)} 筆待付款／已付款服務")
         if _debug.get("hit_page_limit"):
             st.warning("查詢已達 20 頁上限，請縮小日期範圍後再查，避免漏單。")
         if not wr_rows:
-            st.success("此服務日期區間沒有已付款訂單。")
+            st.success("此服務日期區間沒有待付款／已付款訂單。")
         else:
             wr_select_all = st.checkbox(
                 "全選名單（取消勾選可全部取消）",
@@ -108,18 +108,19 @@ def render(backend_email, backend_password, env):
             _edited = st.data_editor(
                 _editable, use_container_width=True, hide_index=True, key="wr_editor",
                 column_order=[
-                    "選取", "資料狀態", "訂單編號", "服務日期", "姓名",
+                    "選取", "資料狀態", "訂單編號", "服務日期", "姓名", "訂單狀態",
                     "通知狀態", "通知時間",
                     "回覆狀態", "回覆時間", "LINE",
                     "服務時間", "電話", "地址",
                     "回覆備註", "發送錯誤", "最後更新",
                 ],
                 disabled=[
-                    "訂單編號", "服務日期", "服務時間", "姓名", "電話", "地址",
+                    "訂單狀態", "訂單編號", "服務日期", "服務時間", "姓名", "電話", "地址",
                     "LINE", "資料狀態", "通知時間", "回覆時間",
                     "發送錯誤", "最後更新",
                 ],
                 column_config={
+                    "訂單狀態": st.column_config.TextColumn("付款狀態"),
                     "選取": st.column_config.CheckboxColumn("儲存", help="只儲存勾選訂單，不會發送 LINE"),
                     "資料狀態": st.column_config.TextColumn(
                         "資料狀態", help="新增＝Google Sheet 尚無此訂單編號＋服務日期（改期後的新日期也算新增）；已存在＝將更新原列，不會重複新增。",
@@ -167,7 +168,7 @@ def render(backend_email, backend_password, env):
                         st.success(
                             f"已儲存 {len(_selected)} 筆：新增 {_new_count} 筆、"
                             f"更新 {_updated_count} 筆；同訂單編號＋服務日期不會重複，"
-                            "新增列已先插入內勤工作表單「週末提醒」。"
+                            "內勤工作表單「週末提醒」已同步（新增列排在該日最下方）。"
                         )
                         log_execution(
                             function_name="週末服務提醒：儲存勾選名單", status="成功",

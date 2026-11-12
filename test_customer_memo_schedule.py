@@ -40,19 +40,41 @@ class WindowTest(unittest.TestCase):
 
 class SheetTest(unittest.TestCase):
     def test_phone_is_hyperlink_to_backend_search(self):
-        rows = cms.build_sheet_rows([{"訂單號碼": "LC1", "客人姓名": "王", "電話": "0987652932",
-                                      "服務日期": "2026/11/15", "客人備註": "帶拖鞋", "客服備註": ""}],
+        rows = cms.build_sheet_rows([{"訂單號碼": "LC1", "客人姓名": "王", "電話": "0987652932", "地址": "台北市A",
+                                      "付款狀態": "已付款", "服務日期": "2026/11/15", "客人備註": "帶拖鞋", "客服備註": ""}],
                                     "https://backend.lemonclean.com.tw", "2026/11/11 10:30")
-        self.assertEqual(cms.HEADER, ["備註日期時間", "訂單編號", "訂購人", "電話號碼", "預約日期", "客人備註", "客服備註"])
-        self.assertEqual(rows[0][:2], ["2026/11/11 10:30", "LC1"])
-        self.assertTrue(rows[0][3].startswith('=HYPERLINK("https://backend.lemonclean.com.tw/purchase?keyword=&name=&phone=0987652932&'))
-        self.assertTrue(rows[0][3].endswith(',"0987652932")'))
-        self.assertEqual(rows[0][4:], ["2026/11/15", "帶拖鞋", ""])
+        self.assertEqual(cms.HEADER[:8], cms.NOTICE_HEADER[:8])  # 前 8 欄同客服備註
+        self.assertEqual(cms.HEADER[8:], ["客人備註", "客服備註"])
+        self.assertEqual(len(rows[0]), len(cms.HEADER))
+        self.assertEqual(rows[0][:3], ["2026/11/11 10:30", "", "LC1"])
+        self.assertTrue(rows[0][4].startswith('=HYPERLINK("https://backend.lemonclean.com.tw/purchase?keyword=&name=&phone=0987652932&'))
+        self.assertTrue(rows[0][4].endswith(',"0987652932")'))
+        self.assertEqual(rows[0][5:], ["台北市A", "2026/11/15", "已付款", "帶拖鞋", ""])
+
+    def test_customer_rows_sorted_by_name_then_order(self):
+        rows = cms.build_sheet_rows([{"訂單號碼": "LC3", "客人姓名": "林"}, {"訂單號碼": "LC2", "客人姓名": "王"},
+                                     {"訂單號碼": "LC1", "客人姓名": "林"}], "https://b")
+        self.assertEqual([r[2] for r in rows], ["LC1", "LC3", "LC2"] if "林" < "王" else ["LC2", "LC1", "LC3"])
+
+    def test_legacy_tab_migrates_columns(self):
+        ws = MagicMock(title="客人備註", id=7)
+        ws.row_values.return_value = list(cms.LEGACY_HEADER)
+        sp = MagicMock()
+        sp.worksheets.return_value = [ws]
+        cms.get_tab("台北", spreadsheet=sp)
+        reqs = sp.batch_update.call_args.args[0]["requests"]
+        self.assertEqual([r["insertDimension"]["range"]["startIndex"] for r in reqs], [1, 5, 7])
+        self.assertEqual(ws.update.call_args.kwargs["values"], [cms.HEADER])
+        # 舊欄位依序插入後的位置要和新標題相符
+        cols = list(cms.LEGACY_HEADER)
+        for i, name in zip(cms.LEGACY_INSERT_COLUMNS, ["標記", "地址", "付款狀態"]):
+            cols.insert(i, name)
+        self.assertEqual([("服務日期" if c == "預約日期" else c) for c in cols], cms.HEADER)
 
     def test_append_skips_existing_and_writes_after_last_row(self):
         ws = MagicMock(row_count=1000)
         ws.col_values.return_value = ["訂單編號", "LC1", "LC2", "", ""]
-        saved = cms.append_rows(ws, [["LC2", "", "", "", "", "", ""], ["LC3", "", "", "", "", "", ""]])
+        saved = cms.append_rows(ws, [["LC2", "", "", "", "", "", ""], ["LC3", "", "", "", "", "", ""]], width=7)
         self.assertEqual(saved, 1)
         kwargs = ws.update.call_args.kwargs
         self.assertEqual(kwargs["range_name"], "A4:G4")
@@ -140,7 +162,16 @@ class NoticeFlagTest(unittest.TestCase):
                  "has_history": False},
                 {"order_id": "D", "created_at": ""}]
         out = cms.section_rows_in_window(rows, (datetime(2026, 11, 9, 10), datetime(2026, 11, 10, 10)))
-        self.assertEqual([r["order_id"] for r in out], ["C", "B"])  # 有異動排前面
+        self.assertEqual([r["order_id"] for r in out], ["B", "C"])  # 依訂購人、訂單編號
+
+    def test_section_rows_sorted_by_customer_then_order(self):
+        win = (datetime(2026, 11, 9, 10), datetime(2026, 11, 10, 10))
+        rows = [{"order_id": "LC3", "customer_name": "乙", "created_at": "2026-11-09 11:00:00", "service_change": "x"},
+                {"order_id": "LC2", "customer_name": "甲", "created_at": "2026-11-09 11:00:00"},
+                {"order_id": "LC1", "customer_name": "乙", "created_at": "2026-11-09 11:00:00"}]
+        out = cms.section_rows_in_window(rows, win)
+        self.assertEqual([r["order_id"] for r in out], sorted(["LC1", "LC2", "LC3"], key=lambda o: (
+            {"LC1": "乙", "LC2": "甲", "LC3": "乙"}[o], o)))
 
     def test_append_notice_tab_dedupes_by_order_column_c(self):
         ws = MagicMock(row_count=1000)
@@ -161,7 +192,7 @@ class TabHeaderTest(unittest.TestCase):
         sp.worksheets.return_value = [ws]
         cms.get_tab("台中", spreadsheet=sp)
         self.assertEqual(ws.update.call_args.kwargs["values"], [cms.HEADER])
-        self.assertEqual(ws.update.call_args.kwargs["range_name"], "A1:G1")
+        self.assertEqual(ws.update.call_args.kwargs["range_name"], "A1:J1")
 
     def test_existing_header_untouched(self):
         ws = MagicMock(title="客人備註")
@@ -211,7 +242,7 @@ class NameLineCancelTest(unittest.TestCase):
         self.assertEqual(cms.name_cell("王", ""), "王")
         rows = cms.build_sheet_rows([{"訂單號碼": "LC3", "客人姓名": "王", "電話": "0912", "LINE": "https://chat.line.biz/x"}],
                                     "https://b", "t")
-        self.assertTrue(rows[0][2].startswith('=HYPERLINK("https://chat.line.biz/x"'))
+        self.assertTrue(rows[0][3].startswith('=HYPERLINK("https://chat.line.biz/x"'))
 
 
 class CalendarTest(unittest.TestCase):

@@ -9,7 +9,7 @@
 - 名單範圍＝整個休假區段（例：週五國定假日＋週末 → 週三執行，查週五～週日）。
 
 GitHub Actions 每天台北時間 11:00 呼叫一次（.github/workflows/weekend-reminder-schedule.yml），
-不是執行日就直接結束。只把已付款訂單寫入「週末服務提醒」追蹤表（含內勤工作表單插列），
+不是執行日就直接結束。只把待付款／已付款訂單寫入「週末服務提醒」追蹤表（並同步內勤工作表單「週末提醒」），
 不發送 LINE，與「週末服務 LINE 提醒」頁面手動儲存的結果相同。
 """
 from __future__ import annotations
@@ -124,14 +124,14 @@ def run(env="prod", today=None, regions=("台北",), dry_run=False, calendar=Non
             if debug.get("hit_page_limit"):
                 warnings.append(f"{region} {start}～{end} 查詢達 20 頁上限，可能漏單")
             order_rows.extend(rows)
-            print(f"QUERY {region} {start}～{end} 已付款 {debug.get('paid', 0)} 筆", flush=True)
+            print(f"QUERY {region} {start}～{end} 已付款 {debug.get('paid', 0)} 筆、待付款 {debug.get('pending', 0)} 筆", flush=True)
 
     merged = merge_tracking_rows(order_rows, load_tracking_rows())
     new_rows = [row for row in merged if row.get("資料狀態") == "新增"]
     saved = 0 if dry_run or not new_rows else save_tracking_rows(new_rows)
     date_text = "、".join(f"{start}～{end}" for start, end in blocks)
     message = (
-        f"服務 {date_text}：已付款 {len(merged)} 筆，新增 {len(new_rows)} 筆"
+        f"服務 {date_text}：待付款／已付款 {len(merged)} 筆，新增 {len(new_rows)} 筆"
         + ("（試跑，未寫入）" if dry_run else f"，已寫入 {saved} 筆")
         + ("；" + "；".join(warnings) if warnings else "")
     )
