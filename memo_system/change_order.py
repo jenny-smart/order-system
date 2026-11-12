@@ -1,11 +1,15 @@
 # ============================================================
 # 檔名：change_order.py
-# 版本：v3.5
+# 版本：v3.7
 # 模組：清潔異動模組：車馬費 / 異動服務收款 / 異動服務退款
 # 建立日期：2026-06-22
-# 最後更新：2026-11-12
+# 最後更新：2026-11-13
 #
 # Change Log
+# v3.7（2026-11-13）
+# - 訂單編號查詢仍取不到會員電話時：改用姓名連結的 keyword 到後台會員頁查手機
+#   （唯一一筆才採用）；訂購資訊欄也接受 +886／886 開頭手機。
+# - 仍查不到時，試算不再直接中斷，改由畫面讓專員手動輸入會員電話。
 # v3.6（2026-11-12）
 # - 修正用「訂單編號」查詢後試算出現「此訂單查無會員電話」：原本只從姓名連結
 #   /member?keyword=… 取電話，會員以 email 等非手機當 keyword 時就拿不到。
@@ -558,8 +562,42 @@ def _phone_from_info_cell(row) -> str:
     tds = row.select("td")
     cell = tds[1] if len(tds) > 1 else row
     text = cell.get_text("\n", strip=True)
-    m = re.search(r"(?<!\d)(09\d{8})(?!\d)", re.sub(r"[\s-]", "", text))
-    return m.group(1) if m else ""
+    return normalize_mobile(text)
+
+
+def normalize_mobile(text) -> str:
+    """從文字取出台灣手機號碼，+886／886 開頭轉成 09 開頭；找不到回傳空字串。"""
+    compact = re.sub(r"[\s\-()（）]", "", str(text or ""))
+    m = re.search(r"(?<!\d)(?:\+?886|0)(9\d{8})(?!\d)", compact)
+    return f"0{m.group(1)}" if m else ""
+
+
+def _member_keyword_from_link(tag) -> str:
+    from urllib.parse import urlparse, parse_qs
+    if tag is None:
+        return ""
+    return parse_qs(urlparse(tag.get("href", "")).query).get("keyword", [""])[0].strip()
+
+
+def lookup_phone_by_member_keyword(keyword: str, session: requests.Session, log=None) -> str:
+    """用姓名連結的 keyword（可能是 email 等）查後台會員頁；只有唯一一筆且有手機才採用。"""
+    if not keyword:
+        return ""
+    try:
+        from shared.member_phone_lookup import parse_member_page
+        resp = session.get(f"{BASE_URL}/member", params={"keyword": keyword}, timeout=20)
+        resp.raise_for_status()
+        members, _ = parse_member_page(resp.text)
+    except Exception as exc:
+        if log:
+            log(f"⚠️ 會員頁查電話失敗：{exc}")
+        return ""
+    phones = {normalize_mobile(m.get("phone")) for m in members} - {""}
+    if len(phones) == 1:
+        return phones.pop()
+    if log:
+        log(f"⚠️ 會員頁 keyword={keyword} 找到 {len(members)} 筆會員、{len(phones)} 支手機，無法自動判斷")
+    return ""
 
 
 def _parse_order_row(row) -> dict:
@@ -620,6 +658,7 @@ def _parse_order_row(row) -> dict:
         "order_no": order_no,
         "customer_name": customer_name,
         "phone": _member_phone_from_link(name_tag) or _phone_from_info_cell(row),
+        "member_keyword": _member_keyword_from_link(name_tag),
         "line_url": line_url,
         "period_text": period_text,
         "service_hours": _parse_period_hours(period_text),
@@ -690,6 +729,12 @@ def fetch_order_basic(keyword: str, session: requests.Session, ui_logger=None, b
         log("⚠️ 查無資料")
         return None
     _fill_cleaner_count(result, session, log)
+    if not result.get("phone"):
+        result["phone"] = lookup_phone_by_member_keyword(result.get("member_keyword"), session, log)
+        if result["phone"]:
+            log(f"ℹ️ 訂單列表沒有手機，改由會員頁查到：{result['phone']}")
+        else:
+            log("⚠️ 此訂單查不到會員手機，試算前請手動輸入會員電話")
 
     log(f"✅ 查到訂單 {result['order_no']}，總金額 {result['total']}，"
         f"{result['cleaner_count']} 人，{result['period_text']}")
@@ -986,7 +1031,7 @@ def refresh_pricing_balance(order, session):
         return
     phone = order.get('phone', '')
     if not phone:
-        raise ValueError('此訂單查無會員電話，請改用電話查詢後試算')
+        raise ValueError(f"{order.get('order_no', '此訂單')} 查無會員電話，請在上方「會員電話」欄手動輸入後再試算")
     order['pricing_balance'] = str(fetch_member_balance(phone, session))
 
 

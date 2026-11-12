@@ -1757,6 +1757,17 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         if not selected_orders:
             st.info("請至少勾選一筆訂單再繼續。"); return
 
+        # 用訂單編號查詢時，後台訂單列表與會員頁都可能抓不到手機：讓專員手動補上，避免試算時卡住
+        for o in selected_orders:
+            if o.get("phone"):
+                continue
+            typed = st.text_input(f"會員電話｜{o['order_no']}（系統查不到，請手動輸入）",
+                                  placeholder="例：0912345678", key=f"co_manual_phone_{o['order_no']}")
+            phone = change_order.normalize_mobile(typed)
+            if typed and not phone:
+                st.warning("請輸入 09 開頭 10 碼手機（可含 +886）")
+            o["phone"] = phone
+
         st.markdown("---"); step("6", "選擇異動情境")
         c1, c2 = st.columns([1, 1.5])
         with c1:
