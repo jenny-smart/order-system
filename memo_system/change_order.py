@@ -3,9 +3,13 @@
 # 版本：v3.5
 # 模組：清潔異動模組：車馬費 / 異動服務收款 / 異動服務退款
 # 建立日期：2026-06-22
-# 最後更新：2026-11-09
+# 最後更新：2026-11-12
 #
 # Change Log
+# v3.6（2026-11-12）
+# - 修正用「訂單編號」查詢後試算出現「此訂單查無會員電話」：原本只從姓名連結
+#   /member?keyword=… 取電話，會員以 email 等非手機當 keyword 時就拿不到。
+#   改為取不到時讀「訂購資訊」欄的手機號碼（09 開頭 10 碼）。
 # v3.5（2026-11-09）
 # - 階段 A 建立「待退款」且退款方式（R 欄）為 ATM 時，同步新增至同地區 ATM
 #   工作表待配對區，做法同待收款（G 公式、I/N/O 下拉選單），L 欄金額為負數
@@ -549,6 +553,15 @@ def _member_phone_from_link(tag):
     return keyword if re.fullmatch(r'0[0-9]{8,9}', keyword) else ''
 
 
+def _phone_from_info_cell(row) -> str:
+    """「訂購資訊」欄（第 2 欄）裡的手機號碼；姓名連結 keyword 不是電話時的備援。"""
+    tds = row.select("td")
+    cell = tds[1] if len(tds) > 1 else row
+    text = cell.get_text("\n", strip=True)
+    m = re.search(r"(?<!\d)(09\d{8})(?!\d)", re.sub(r"[\s-]", "", text))
+    return m.group(1) if m else ""
+
+
 def _parse_order_row(row) -> dict:
     """ 解析 /purchase 查詢結果頁裡的單一筆 <tr>，回傳訂單基本資料 dict（找不到訂單編號則回傳 None） """
     checkbox = row.select_one('input[name="purchase_id[]"]')
@@ -606,7 +619,7 @@ def _parse_order_row(row) -> dict:
         "purchase_id": purchase_id,
         "order_no": order_no,
         "customer_name": customer_name,
-        "phone": _member_phone_from_link(name_tag),
+        "phone": _member_phone_from_link(name_tag) or _phone_from_info_cell(row),
         "line_url": line_url,
         "period_text": period_text,
         "service_hours": _parse_period_hours(period_text),
