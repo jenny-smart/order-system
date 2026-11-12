@@ -2,6 +2,9 @@
 """客人備註非空白（雲端排程，上班日 08:30，區間截到 08:00，和儲值金客服備註同一區間）。
 
 更新記錄：
+2026-11-12
+- 兩個分頁都排除取消訂單／已退款。
+- 「訂購人」改為 HYPERLINK 到客戶 LINE 聊天（沒有 LINE 連結時照舊寫姓名）。
 2026-11-11
 - 欄位改成內勤工作表單上 Jenny 訂的標題，兩個分頁 A 欄都是「備註日期時間」（排程寫入時間）：
   客人備註：備註日期時間／訂單編號／訂購人／電話號碼／預約日期／客人備註／客服備註
@@ -118,12 +121,21 @@ def stamp_text(now: datetime | None = None) -> str:
     return (now or datetime.now(TZ)).astimezone(TZ).strftime("%Y/%m/%d %H:%M")
 
 
+def name_cell(name: str, line_url: str) -> str:
+    """訂購人：有 LINE 聊天連結就做成超連結。"""
+    name = str(name or "")
+    url = str(line_url or "").strip()
+    if not url or not name:
+        return name
+    return f'=HYPERLINK("{_formula_text(url)}","{_formula_text(name)}")'
+
+
 def build_sheet_rows(rows: list[dict], base_url: str, stamp: str = "") -> list[list[str]]:
     """「客人備註」分頁的列。"""
     return [[
         stamp,
         str(r.get("訂單號碼", "") or ""),
-        str(r.get("客人姓名", "") or ""),
+        name_cell(r.get("客人姓名", ""), r.get("LINE", "")),
         phone_cell(base_url, r.get("電話", "")),
         str(r.get("服務日期", "") or ""),
         str(r.get("客人備註", "") or ""),
@@ -144,7 +156,7 @@ def build_notice_sheet_rows(rows: list[dict], base_url: str, stamp: str = "") ->
             stamp,
             memo.preview_change_kinds(r) or memo.preview_section_label(r),          # 標記
             str(r.get("order_id", "") or ""),                                        # 訂單編號
-            str(r.get("customer_name", "") or ""),                                   # 訂購人
+            name_cell(r.get("customer_name", ""), r.get("line_url", "")),           # 訂購人（LINE 連結）
             phone_cell(base_url, r.get("phone", "")),                                # 電話號碼
             str(r.get("address", "") or ""),                                         # 地址
             str(r.get("service_date", "") or ""),                                    # 服務日期
@@ -162,6 +174,8 @@ def section_rows_in_window(rows: list[dict], window: tuple[datetime, datetime]) 
     """訂單客服備註預覽列中，訂購時間在 [window) 內的（沒有訂購時間的是代客預訂，略過）。"""
     out = []
     for r in rows:
+        if r.get("purchase_status_name") in ("取消訂單", "已退款"):
+            continue
         text = str(r.get("created_at", "") or "")
         try:
             created = datetime.strptime(text[:16], "%Y-%m-%d %H:%M")

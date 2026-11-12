@@ -6,6 +6,9 @@
 #   列出客人備註非空白的訂單：訂單號碼／客人姓名／電話／地址／
 #   付款狀態／客人備註／客服備註。只查詢，不修改後台。
 # 更新記錄：
+# 2026-11-12
+# - 排除取消訂單／已退款（客人備註、客服備註需註記都排除）。
+# - 結果帶 LINE 連結（line_url）；頁面表格加「LINE」連結欄。
 # 2026-11-10
 # - ② 客服備註需註記：「註記」欄放最前方（與排程「客服備註」分頁相同）。
 # - 頁面：電話改為後台訂單管理電話搜尋連結；查詢結果分兩區，與每日 08:30 排程相同：
@@ -97,9 +100,19 @@ def fetch_window_orders(date_start: str, date_end: str, log, session,
     return _memo.enrich_items_from_detail(session, candidates, log=log, context_label="讀取訂單明細")
 
 
+CANCELLED_STATUS = ("2", "3")  # 取消訂單、已退款
+
+
+def is_cancelled(item: Dict) -> bool:
+    return (item.get("purchase_status") in CANCELLED_STATUS
+            or item.get("purchase_status_name") in ("取消訂單", "已退款"))
+
+
 def customer_memo_rows(candidates: List[Dict]) -> List[Dict]:
     result = []
     for x in candidates:
+        if is_cancelled(x):
+            continue
         memo_text = str(x.get("customer_memo", "") or "").strip()
         if not memo_text or is_proxy_order(x, memo_text):
             continue
@@ -110,6 +123,7 @@ def customer_memo_rows(candidates: List[Dict]) -> List[Dict]:
             "地址": x.get("address", ""),
             "付款狀態": x.get("purchase_status_name", ""),
             "服務日期": _memo.display_service_date(x),
+            "LINE": x.get("line_url", ""),
             "客人備註": memo_text,
             "客服備註": str(x.get("notice", "") or "").strip(),
         })
@@ -151,6 +165,8 @@ def find_notice_flag_orders(candidates: List[Dict], session, log=None) -> List[D
     history_cache: Dict = {}
     result = []
     for x in candidates:
+        if is_cancelled(x):
+            continue
         own = _memo.strip_change_block(x.get("notice", ""))
         if not own:
             continue
@@ -169,6 +185,7 @@ def find_notice_flag_orders(candidates: List[Dict], session, log=None) -> List[D
             "電話": x.get("phone", ""),
             "服務日期": _memo.display_service_date(x),
             "付款方式": x.get("payway", ""),
+            "LINE": x.get("line_url", ""),
             "客服備註": own,
         })
     result.sort(key=lambda r: r["訂單號碼"])
@@ -210,7 +227,8 @@ def _show_table(rows: List[Dict]):
     data = [{**r, "電話": phone_search_url(r.get("電話", ""))} for r in rows]
     st.dataframe(
         data, use_container_width=True, hide_index=True,
-        column_config={"電話": st.column_config.LinkColumn("電話", display_text=r"phone=(\d+)")},
+        column_config={"電話": st.column_config.LinkColumn("電話", display_text=r"phone=(\d+)"),
+                       "LINE": st.column_config.LinkColumn("LINE", display_text="LINE")},
     )
 
 
