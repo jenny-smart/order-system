@@ -53,6 +53,18 @@ VIP提前異動費目前保留每2人1小時200／300元，待確認是否改為
 - 工作表「代客保留」打勾的列改用檸檬保留帳號建單，客人備註寫「代客保留：客人姓名」（`shared/proxy_reserve.py`）。
 - 回填時沿用排程既有短欄名（沒班表日／餘額不足／日曆改色內容），不再另開欄位。
 
+## 週末提醒「確認收到」連結
+
+- 提醒訊息結尾改為「請回覆『已收到』，或點以下連結確認」，附每張訂單專屬連結（`shared/reminder_confirm.py`）。
+  客服照常在 chat.line.biz 發送；客人點開後按「確認收到」，由 line-lemonsystem Worker 記錄。
+  沒設定 `LINE_REMINDER_API_KEY` 時不附連結，訊息維持原樣。合併提醒只附主單的連結。
+- `shared/weekend_reminder_confirm_sync.py`（功能代號 `weekend_reminder_confirm_sync`，
+  `.github/workflows/weekend-reminder-confirm-sync.yml`）：查詢已確認的訂單，追蹤表「回覆狀態」改「已回覆」並填時間、
+  備註加「連結確認」；內勤工作表單「週末提醒」I 欄空白時填 OK、K 欄填「連結確認 MM/DD HH:MM」，I 欄已有內容不覆蓋。
+- 只記錄點連結的客人；直接打字回覆「已收到」的仍由內勤人工填寫，已讀狀態無法取得。
+- 設定：`LINE_REMINDER_API_KEY`（GitHub Secret 與 Streamlit Secrets，值與 Worker 的 `REMINDER_API_KEY` 相同）；
+  Worker 網址不是預設值時另設 `LINE_REMINDER_API_URL`。
+
 ## 代客預訂 LINE 比對
 
 「D. 稽核比對工具 → 代客預訂LINE比對」（`function/line_compare_page.py`＋`shared/line_compare_sheet.py`）。

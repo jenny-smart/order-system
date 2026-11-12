@@ -286,13 +286,27 @@ def _when_text(service_date_text, service_time=""):
     return f"{when} {service_time}" if service_time else when
 
 
-def _reminder_text(detail, typhoon_reminder=False):
+def _confirm_url(order_no, service_date):
+    """訂單的「確認收到」連結；未設定 LINE_REMINDER_API_KEY 時為空字串（訊息維持原樣）。"""
+    try:
+        from shared.reminder_confirm import confirm_url
+
+        return confirm_url(order_no, service_date)
+    except Exception:
+        return ""
+
+
+def _reminder_text(detail, typhoon_reminder=False, confirm_url=""):
+    confirm_line = (
+        f"為確認您已收到提醒，請回覆「已收到」，或點以下連結確認：\n{confirm_url}\n謝謝您。"
+        if confirm_url else "為確認您已收到提醒，請回覆「已收到」，謝謝您。"
+    )
     message = (
         f"您好，這是週末/例假日的清潔服務提醒：\n\n"
         f"{detail}\n\n"
         "專員會在服務前5-10分鐘，以電話／門鈴／透過管理員等方式與您聯繫，"
         "煩請留意聯繫訊息。\n\n"
-        "為確認您已收到提醒，請回覆「已收到」，謝謝您。"
+        f"{confirm_line}"
     )
     if typhoon_reminder:
         return (
@@ -313,7 +327,7 @@ def _reminder_text(detail, typhoon_reminder=False):
 def build_reminder_message(row, typhoon_reminder=False):
     address_line = f"\n服務地址：{row['address']}" if row.get("address") else ""
     detail = f"服務時間：{_when_text(row['service_date'], row.get('service_time', ''))}{address_line}"
-    return _reminder_text(detail, typhoon_reminder)
+    return _reminder_text(detail, typhoon_reminder, _confirm_url(row.get("order_no"), row["service_date"]))
 
 
 def build_combined_reminder_message(rows, typhoon_reminder=False):
@@ -330,7 +344,8 @@ def build_combined_reminder_message(rows, typhoon_reminder=False):
             for item in rows
         ]
         detail = "服務時間及地址：\n" + "\n".join(lines)
-    return _reminder_text(detail, typhoon_reminder)
+    # 合併提醒只附主單（最早那筆）的連結；被併入的訂單由同步程式跟著主單記為已回覆。
+    return _reminder_text(detail, typhoon_reminder, _confirm_url(rows[0].get("order_no"), rows[0]["service_date"]))
 
 
 def _compact(value):
@@ -616,6 +631,7 @@ def _tracking_message(raw, old):
         return ""
     try:
         return build_reminder_message({
+            "order_no": str(raw.get("訂單編號") or old.get("訂單編號") or "").strip(),
             "service_date": service_date,
             "service_time": str(raw.get("服務時間") or old.get("服務時間") or "").strip(),
             "address": str(raw.get("地址") or old.get("地址") or "").strip(),

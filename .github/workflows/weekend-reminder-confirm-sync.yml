@@ -1,0 +1,39 @@
+# 週末提醒回覆同步：把客人點「確認收到」連結的結果寫回追蹤表與內勤工作表單
+#
+# 由 tool-system 的 Cloud Schedule Router 依主控表「排程設定」（功能代號 weekend_reminder_confirm_sync）
+# 派送過來，建議提醒發送日 10:00 起每小時一次。shared/weekend_reminder_confirm_sync.py 只處理服務日期在
+# 今天前 2 天～後 14 天、尚未回覆的已付款提醒；沒有就直接結束。也可以在這裡手動執行（指定日期、只查不寫）。
+#
+# 需要的 Secrets：GOOGLE_SERVICE_ACCOUNT_JSON、LINE_REMINDER_API_KEY（與 line-lemonsystem Worker 的
+# REMINDER_API_KEY 相同）。Worker 網址不是預設值時，另設 Variables：LINE_REMINDER_API_URL。
+name: Weekend Reminder Confirm Sync
+run-name: ${{ inputs.scheduled_slot && format('cloud-{0}', inputs.scheduled_slot) || format('Weekend Reminder Confirm Sync {0}', inputs.date) }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      date: {description: "以這天當作今天（YYYY-MM-DD，空白＝今天）", required: false, default: "", type: string}
+      dry_run: {description: 只查詢不寫入, required: false, default: false, type: boolean}
+      scheduled_slot: {description: 排程設定派送時段（手動執行請留空）, required: false, default: "", type: string}
+
+concurrency:
+  group: weekend-reminder-confirm-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12", cache: pip}
+      - run: pip install -r requirements.txt
+      - name: Sync reminder confirmations
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          LINE_REMINDER_API_KEY: ${{ secrets.LINE_REMINDER_API_KEY }}
+          LINE_REMINDER_API_URL: ${{ vars.LINE_REMINDER_API_URL }}
+          RUN_DATE: ${{ inputs.date }}
+          DRY_RUN: ${{ inputs.dry_run && '--dry-run' || '' }}
+        run: python -m shared.weekend_reminder_confirm_sync --date "$RUN_DATE" $DRY_RUN
