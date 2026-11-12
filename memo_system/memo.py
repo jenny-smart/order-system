@@ -2,6 +2,11 @@
 # -*- coding: utf-8 -*-
 # ============================================================
 # 更新記錄：
+# 2026-11-12
+# - 修正訂購人姓名抓錯（例：LC00220267／LC00220310／LC00220316 抓成「清掃坪數」「居家清潔」）：
+#   原本取整列文字第一個 2～4 字中文行，姓名不是 2～4 字中文就會抓到服務項目。
+#   改為讀「訂購資訊」欄的會員姓名連結（/member?keyword=），讀明細時不再蓋掉。
+# - 列表另外讀客戶 LINE 聊天連結（chat.line.biz）存 line_url。
 # 2026-11-11
 # - preview row 新增 created_at（訂購時間）；新增 preview_section_label／preview_status_text／
 #   preview_change_kinds，給 10:30 排程把①②③寫進「客服備註」分頁用（與畫面相同文字）。
@@ -631,6 +636,11 @@ def parse_purchase_list_page(html: str) -> List[Dict]:
 
         tds = tr.find_all("td", recursive=False)
         info_td = tds[1] if len(tds) > 1 else tr
+        name_tag = info_td.select_one('a[href*="/member?keyword"]') or tr.select_one('a[href*="/member?keyword"]')
+        if name_tag and name_tag.get_text(strip=True):
+            row_data["name"] = name_tag.get_text(strip=True)
+        line_tag = tr.select_one('a[href*="chat.line.biz"]')
+        row_data["line_url"] = line_tag.get("href", "").strip() if line_tag else ""
         row_data["service_items"] = [li.get_text(" ", strip=True) for li in info_td.find_all("li")]
         if len(tds) > 2:
             m_sd = re.search(r"\d{4}-\d{2}-\d{2}", tds[2].get_text(" ", strip=True))
@@ -1216,7 +1226,7 @@ def enrich_item_from_detail(session, item: Dict, phone="") -> Dict:
     item["service_date"] = detail.get("service_date", "") or item.get("service_date", "")
     item["service_date_obj"] = detail.get("service_date_obj") or item.get("service_date_obj")
     item["phone"] = detail.get("phone", "") or item.get("phone", "")
-    item["name"] = detail.get("customer_name", "") or item.get("name", "")
+    item["name"] = item.get("name", "") or detail.get("customer_name", "")  # 列表姓名連結較準
     item["address"] = detail.get("address", "") or item.get("address", "")
     item["purchase_status_name"] = detail.get("purchase_status_name", "") or item.get("purchase_status_name", "")
     item["purchase_status"] = detail.get("purchase_status", "") or item.get("purchase_status", "")
@@ -1401,6 +1411,7 @@ def build_preview_row(target: Dict, history_items: List[Dict]) -> Dict:
         "created_at": order_created_at_text(target),
         "order_id": target.get("order_no", ""),
         "customer_name": target.get("name", ""),
+        "line_url": target.get("line_url", ""),
         "phone": target.get("phone", ""),
         "address": target.get("address", ""),
         "service_date": display_service_date(target),

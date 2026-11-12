@@ -7,6 +7,8 @@
 # - 服務異動新增「階段 C：自後台補齊＋同步 ATM 工作表」（memo_system/change_order_fill.py）：
 #   清潔異動缺的資料（ATM 退款 P／Q 除外）自檸檬後台補空白格，ATM 待退款／待收款同步 ATM 工作表；
 #   先按「預覽」只列出不寫入，確認後再按「執行」。
+# 2026-11-12
+# - ①②③列表加「LINE」欄（客戶 LINE 聊天連結）。
 # 2026-11-10
 # - 新增③「已處理但客服備註需註記」：同條件內已處理、客服備註本來就有內容的訂單，標示 VIP
 #   但非儲值金付款或 **N- 已非首次服務，可勾選批次執行（保留原備註＋註記）。
@@ -541,6 +543,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                 row.update({
                     "訂單號碼": r.get("order_id", ""),
                     "客戶": r.get("customer_name", ""),
+                    "LINE": r.get("line_url", ""),
                     "電話": phone_search_url(r.get("phone", "")),
                     "地址": r.get("address", ""),
                     "服務日期": r.get("service_date", ""),
@@ -566,6 +569,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                 column_config={
                     "選取": st.column_config.CheckboxColumn("選取", width="small"),
                     "電話": st.column_config.LinkColumn("電話", display_text=r"phone=(\d+)"),
+                    "LINE": st.column_config.LinkColumn("LINE", display_text="LINE"),
                     "客服備註（將寫入）": st.column_config.TextColumn("客服備註（將寫入）", width="large"),
                 },
             )

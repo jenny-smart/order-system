@@ -172,6 +172,48 @@ class TabHeaderTest(unittest.TestCase):
         ws.update.assert_not_called()
 
 
+class NameLineCancelTest(unittest.TestCase):
+    ROW = """<table><tbody><tr><td><label>LC00220267</label></td>
+<td><a href="/member?keyword=0912345678">Amy Chen 陳</a><br>0912345678<br>
+<a href="https://chat.line.biz/U1/chat/abc">LINE</a><br>台北市大安區和平東路一段1號<br>2026-11-11 09:00:00<br>
+<span>居家清潔</span><ul><li>清掃坪數 21~40</li></ul></td>
+<td>2026-11-20 (五)<br>09:00 - 12:00</td><td>付款狀態：{status}</td><td>未處理</td>
+<td><a href="/purchase/edit/1">修改</a></td></tr></tbody></table>"""
+
+    def test_name_from_member_link_and_line_url(self):
+        from memo_system import memo
+        item = memo.parse_purchase_list_page(self.ROW.format(status="已付款"))[0]
+        self.assertEqual(item["name"], "Amy Chen 陳")
+        self.assertEqual(item["line_url"], "https://chat.line.biz/U1/chat/abc")
+
+    def test_detail_does_not_override_list_name(self):
+        from memo_system import memo
+        item = {"name": "Amy Chen 陳", "edit_url": "x"}
+        with patch.object(memo, "parse_edit_page", return_value={"customer_name": "清掃坪數"}):
+            memo.enrich_item_from_detail(None, item)
+        self.assertEqual(item["name"], "Amy Chen 陳")
+
+    def test_cancelled_excluded(self):
+        rows = cmq.customer_memo_rows([
+            {"order_no": "LC1", "customer_memo": "a", "purchase_status": "2", "purchase_status_name": "取消訂單"},
+            {"order_no": "LC2", "customer_memo": "b", "purchase_status": "3"},
+            {"order_no": "LC3", "customer_memo": "c", "purchase_status": "1", "line_url": "https://chat.line.biz/x"},
+        ])
+        self.assertEqual([r["訂單號碼"] for r in rows], ["LC3"])
+        win = (datetime(2026, 11, 9, 10), datetime(2026, 11, 10, 10))
+        out = cms.section_rows_in_window([
+            {"order_id": "A", "created_at": "2026-11-09 12:00:00", "purchase_status_name": "取消訂單"},
+            {"order_id": "B", "created_at": "2026-11-09 12:00:00", "purchase_status_name": "已付款"}], win)
+        self.assertEqual([r["order_id"] for r in out], ["B"])
+
+    def test_name_cell_line_hyperlink(self):
+        self.assertEqual(cms.name_cell("王", "https://chat.line.biz/x"), '=HYPERLINK("https://chat.line.biz/x","王")')
+        self.assertEqual(cms.name_cell("王", ""), "王")
+        rows = cms.build_sheet_rows([{"訂單號碼": "LC3", "客人姓名": "王", "電話": "0912", "LINE": "https://chat.line.biz/x"}],
+                                    "https://b", "t")
+        self.assertTrue(rows[0][2].startswith('=HYPERLINK("https://chat.line.biz/x"'))
+
+
 class CalendarTest(unittest.TestCase):
     def test_event_summary_includes_notice_count(self):
         result = {"台北": {"saved": 1, "rows": [], "notice_saved": 2, "notice_rows": [
