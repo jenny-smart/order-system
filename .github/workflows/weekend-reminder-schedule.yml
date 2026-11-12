@@ -7,6 +7,7 @@
 # 新增到「週末服務提醒」追蹤表，不發送 LINE。也可以在這裡手動執行（指定日期、只查不寫）。
 #
 # 需要的 Secrets（與雲端批次成單相同）：GOOGLE_SERVICE_ACCOUNT_JSON、TAIPEI_EMAIL、TAIPEI_PASSWORD
+# 選用：LINE_REMINDER_API_KEY（有設定時，提醒訊息會附每張訂單的「確認收到」連結）
 name: Weekend Reminder Schedule
 run-name: ${{ inputs.scheduled_slot && format('cloud-{0}', inputs.scheduled_slot) || format('Weekend Reminder Schedule {0}', inputs.date) }}
 
@@ -36,6 +37,9 @@ jobs:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           TAIPEI_EMAIL: ${{ secrets.TAIPEI_EMAIL }}
           TAIPEI_PASSWORD: ${{ secrets.TAIPEI_PASSWORD }}
+          # 提醒訊息的「確認收到」連結；沒設定時訊息不附連結
+          LINE_REMINDER_API_KEY: ${{ secrets.LINE_REMINDER_API_KEY }}
+          LINE_REMINDER_API_URL: ${{ vars.LINE_REMINDER_API_URL }}
           RUN_DATE: ${{ inputs.date }}
           RUN_ENV: ${{ inputs.env || 'prod' }}
           DRY_RUN: ${{ inputs.dry_run && '--dry-run' || '' }}
