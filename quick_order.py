@@ -2329,6 +2329,73 @@ def convert_order_stage1_reassign_original(
     }
 
 
+def _append_conversion_change_order(stage1_result, all_nos_str, refund_amount, charge_amount):
+    """v8.73：訂單轉換完要退款或加收時，直接新增一筆清潔異動到該地區「清潔異動」工作表。
+
+    - 退款（新訂單合計少於原訂單A）：異動服務退款，狀態待退款（VIP 待返儲值金），
+      S 欄＝退款金額，R 欄依原訂單付款方式（ATM 會同步 ATM 工作表負數）。
+    - 加收（新訂單合計超過原訂單A）：異動服務收款，狀態待收款（VIP 待扣儲值金），
+      N 欄＝加收金額。
+    訂單編號（G 欄）都寫原訂單A，備註（J 欄）寫轉換的合併單號與金額。
+    """
+    from memo_system import change_order as co
+
+    refund_amount = max(int(refund_amount or 0), 0)
+    charge_amount = max(int(charge_amount or 0), 0)
+    if not refund_amount and not charge_amount:
+        return {"ok": True, "skipped": True, "message": "金額一致，不需新增清潔異動"}
+    order_no_a = stage1_result["order_no_a"]
+    session = stage1_result["session"]
+    region = stage1_result.get("region_a") or "台北"
+    if region not in co.supported_regions():
+        return {"ok": False, "message": f"清潔異動工作表不支援地區「{region}」，請手動新增"}
+    co.set_env(stage1_result.get("env_name") or "prod")
+    order = co.fetch_order_basic(order_no_a, session) or {}
+    if not order:
+        return {"ok": False, "message": f"查不到原訂單 {order_no_a}，請手動新增清潔異動"}
+    order.setdefault("payway", stage1_result.get("payway_a", ""))
+    # VIP 判斷與第二段新單同一計價等級；讀不到會員餘額時改看原訂單付款方式。
+    try:
+        is_vip = (customer_tier("existing", account_balance(stage1_result.get("member_payload"))) == "vip"
+                  if load_config()["enabled"] else normalize_booking_payway(order.get("payway")) == "儲值金")
+    except Exception:
+        is_vip = "儲值金" in str(order.get("payway") or stage1_result.get("payway_a") or "")
+    customer_type = "VIP" if is_vip else "一般客"
+    target = stage1_result.get("target_date_a") or stage1_result.get("service_date_a")
+    try:
+        service_date = datetime.strptime(str(target)[:10], "%Y-%m-%d").date()
+    except Exception:
+        service_date = None
+    base = {
+        "A": "清潔", "D": order.get("line_url", ""), "E": co._today_taipei_str(),
+        "F": customer_type, "G": order_no_a,
+        "H": order.get("customer_name", ""),
+        "I": co._format_service_datetime(service_date, order.get("period_text", "")) if service_date else "",
+    }
+    if refund_amount:
+        row = {**base,
+               "B": "待返儲值金" if is_vip else co.STATUS_PENDING_REFUND, "C": co.TYPE_REFUND,
+               "J": co._with_change_date(f"訂單轉換 {all_nos_str} 合併服務，新訂單合計少於原訂單，退費 ${refund_amount}"),
+               "R": co._refund_payway(order), "S": refund_amount,
+               "X": order.get("invoice_no", ""),
+               "Y": "三聯" if order.get("carrier_type") == "三聯式" else "二聯"}
+        kind = f"待退款 {refund_amount} 元"
+    else:
+        row = {**base,
+               "B": "待扣儲值金" if is_vip else co.STATUS_PENDING_CHARGE, "C": co.TYPE_CHARGE,
+               "J": co._with_change_date(f"訂單轉換 {all_nos_str} 合併服務，新訂單合計超過原訂單，加收 ${charge_amount}"),
+               "N": charge_amount,
+               "R": "儲值金" if is_vip else ""}
+        kind = f"待收款 {charge_amount} 元"
+    res = co.append_rows_to_sheet(region, [row])
+    if res.get("written"):
+        msg = f"已新增清潔異動（{region}，第 {res.get('start_row')} 列）：{row['B']}／{kind}"
+        if res.get("errors"):
+            msg += "；⚠️ " + "；".join(res["errors"])
+        return {"ok": True, "message": msg, "row": row, "sheet_row": res.get("start_row")}
+    return {"ok": False, "message": "清潔異動寫入失敗：" + "；".join(res.get("errors") or ["未知原因"])}
+
+
 def convert_order_stage2_create_new_orders(stage1_result, new_orders):
     """
     v2026.07.10：訂單轉換第二階段（跟儲值金補價差的分階段介面一致）——用
@@ -2564,8 +2631,25 @@ def convert_order_stage2_create_new_orders(stage1_result, new_orders):
             f"請確認是否需要補建新訂單。"
         )
 
+    # v8.73：轉換後有差額 → 直接新增一筆清潔異動（退款或加收）。
+    # 有新單建立失敗時不寫，避免金額未定就先記帳。
+    change_order_result = None
+    fail_n = len([r for r in new_order_results if not r.get("order_no")])
+    if b_nos and service_amount_a_int > 0:
+        refund_due = max(service_amount_a_int - coupon_discount_total, 0) if new_amount_total < service_amount_a_int else 0
+        charge_due = sum(int(r.get("customer_due", 0) or 0) for r in new_order_results if r.get("order_no"))
+        if fail_n:
+            if refund_due or charge_due:
+                change_order_result = {"ok": False, "message": f"有 {fail_n} 筆新訂單建立失敗，金額未定，未新增清潔異動，請補建後手動新增。"}
+        else:
+            try:
+                change_order_result = _append_conversion_change_order(stage1_result, all_nos_str, refund_due, charge_due)
+            except Exception as exc:
+                change_order_result = {"ok": False, "message": f"新增清潔異動失敗：{exc}，請手動新增。"}
+
     return {
         "order_no_a": order_no_a,
+        "change_order_result": change_order_result,
         "new_order_results": new_order_results,
         "lemon_result_a": lemon_result_a,
         "note": note_text, "note_a": note_a,
