@@ -45,6 +45,18 @@ class OccupiedStaffLookupTests(unittest.TestCase):
         self.assertEqual(parsed["count"], 3)
         self.assertEqual(parsed["names"], {"檸檬人4", "汪才開", "游宜璙"})
 
+    def test_empty_period_cell_means_zero_unassigned(self):
+        html = """
+        <table>
+          <tr><th>日期</th><th>09:00-16:00</th><th>14:00-17:00</th></tr>
+          <tr><td>12-10（四）</td><td></td>
+          <td><p style="background:#616161"><span>未配班 1 人</span><span>4陳宜芝2</span></p></td></tr>
+        </table>
+        """
+        parsed = q._parse_schedule_unassigned_staff(html, "2026-12-10", "09:00-16:00")
+        self.assertEqual((parsed["count"], parsed["names"]), (0, set()))
+        self.assertIsNone(q._parse_schedule_unassigned_staff(html, "2026-12-11", "09:00-16:00"))
+
     def test_finds_only_overlapping_other_order_staff(self):
         html = """
         <table>

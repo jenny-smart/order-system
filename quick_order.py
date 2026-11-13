@@ -8,6 +8,10 @@
 # - 訂單轉換第二段完成後有差額：新訂單合計少於原訂單A → 新增「異動服務退款」
 #   （待退款／VIP 待返儲值金）；超過 → 新增「異動服務收款」（待收款／VIP 待扣
 #   儲值金），直接寫入該地區清潔異動工作表，G 欄為原訂單A。有新單失敗時不寫。
+# v8.72
+# - 修正：班表該日該時段格子是空的（沒有灰底未配班區塊）時，視為未配班 0 人，
+#   不再當成讀取失敗。原本訂單轉換第一段（改日期＋全部換檸檬人）遇到空白時段
+#   會顯示「班表找不到…的未配班區塊」而停止，現在會照常去補勾檸檬人再換班。
 # v8.71
 # - 服務金額設定改存 Google Sheet「_服務金額設定」，重新部署不再遺失（原本退回
 #   600／700，造成訂單轉換大掃除期間優惠券以 600 計）。
@@ -693,6 +697,7 @@ def _parse_schedule_unassigned_staff(html_text, service_date, period_s):
     soup = BeautifulSoup(html_text or "", "html.parser")
     target_period = str(period_s or "").replace(" ", "")
     target_mmdd = str(service_date or "")[5:]
+    found_cell = False
     for table in soup.find_all("table"):
         rows = table.find_all("tr")
         if not rows:
@@ -709,6 +714,8 @@ def _parse_schedule_unassigned_staff(html_text, service_date, period_s):
             if target_mmdd and target_mmdd not in row_text and str(service_date) not in row_text:
                 continue
             for index, cell in enumerate(cells):
+                if index < len(periods) and periods[index] == target_period:
+                    found_cell = True
                 if index >= len(periods) or periods[index] != target_period:
                     continue
                 grey_blocks = cell.select('p[style*="616161"], div[style*="616161"]')
@@ -728,6 +735,10 @@ def _parse_schedule_unassigned_staff(html_text, service_date, period_s):
                         if name:
                             names.add(_staff_name_key(name))
                     return {"count": expected_count, "names": names, "raw_text": block_text}
+    # v8.72：找得到該日該時段的格子、只是沒有灰底區塊＝這個時段沒有人未配班（0 人），
+    # 不是讀取失敗。舊版回傳 None，讓訂單轉換第一段在空白時段直接停止、不去補檸檬人。
+    if found_cell:
+        return {"count": 0, "names": set(), "raw_text": ""}
     return None
 
 
