@@ -138,3 +138,46 @@ def test_search_skips_status_zero_with_paid_date():
             patch.object(atm, "extract_purchase_list_json", return_value=payload):
         rows = atm.search_atm_unpaid_orders(Mock(), date_until="2026-11-05")
     assert [row["order_no"] for row in rows] == ["LC00219999"]
+
+
+def _paste_region(region, values, rows):
+    ws = Mock()
+    ws.get_all_values.return_value = values
+    ws.row_count = 100
+    with patch.object(atm, "get_atm_worksheet", return_value=ws), \
+            patch.object(atm, "normalize_atm_rows", Mock(return_value={})), \
+            patch.object(atm.memo, "with_retry", side_effect=lambda fn, *a, **k: fn(*a, **k)):
+        return atm.paste_atm_unpaid_list(region, rows), ws
+
+
+def _full_item(no, name):
+    return {"year_month": "2026.11", "order_no": no, "name": name, "net_amount": 4800,
+            "line_url": "https://line.example/x", "last_code": "12345"}
+
+
+def test_backfill_fills_blank_h_i_k_o_on_bank_rows_with_existing_order():
+    sheet = [
+        _row(a="日期"),
+        _row(a="11/02", j="LC00219518"),                         # A 有值、J 有訂單、其餘空白 → 補齊
+        _row(a="11/03", j="LC00219600", k="人工姓名", l="4800"),  # 已有 K/L → 不覆蓋
+        _row(j="LC00219397"),                                    # A 空白 → 不補
+    ]
+    rows = [_full_item("LC00219518", "張美鳳"), _full_item("LC00219600", "後台姓名"), _full_item("LC00219397", "黃妙禎")]
+    for region in ("台中", "桃園", "新竹"):
+        result, ws = _paste_region(region, sheet, rows)
+        assert result["pasted"] == 0 and result["skipped_duplicates"] == 3
+        updates = {u["range"]: u["values"][0][0] for u in ws.batch_update.call_args_list[0].args[0]}
+        assert updates == {
+            "H2": "https://line.example/x", "I2": "2026.11", "K2": "張美鳳", "L2": 4800,
+            "M2": "12345", "N2": "清潔", "O2": "服務費用",
+            "H3": "https://line.example/x", "I3": "2026.11", "M3": "12345", "N3": "清潔", "O3": "服務費用",
+        }
+        assert result["backfilled"] == len(updates)
+
+
+def test_backfill_not_applied_to_taipei_or_kaohsiung():
+    sheet = [_row(a="日期"), _row(a="11/02", j="LC00219518")]
+    for region in ("台北", "高雄"):
+        result, ws = _paste_region(region, sheet, [_full_item("LC00219518", "張美鳳")])
+        assert result["backfilled"] == 0
+        ws.batch_update.assert_not_called()
