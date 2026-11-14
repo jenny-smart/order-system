@@ -280,13 +280,14 @@ def _secret_text(key: str) -> str:
     return str(os.getenv(key, "") or "").strip()
 
 
-# 分頁依名稱找：「ATM」，沒有時用「富邦ATM」（桃園／新竹／高雄的支出明細檔）
+# 分頁依名稱找：「ATM」，沒有時用「富邦ATM」（桃園／新竹的支出明細檔）
 ATM_TAB_TITLES = ("ATM", "富邦ATM")
 
 
 def _atm_root_rule(region: str):
-    """桃園／新竹／高雄的 ATM 在「名冊薪資」第 2 個檔（支出明細），台北／台中在「內勤工作表單」。"""
-    return ("名冊薪資", 1) if region in ("桃園", "新竹", "高雄") else ("內勤工作表單", 0)
+    """桃園／新竹的 ATM 在「名冊薪資」第 2 個檔（支出明細）；台北／台中／高雄在「內勤工作表單」
+    （高雄的內勤工作表單放在承攬費根目錄／{YYYY}專員承攬服務費／05.高雄專員）。"""
+    return ("名冊薪資", 1) if region in ("桃園", "新竹") else ("內勤工作表單", 0)
 
 
 def _atm_sheet_config(region: str) -> Dict:

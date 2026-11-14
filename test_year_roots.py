@@ -17,7 +17,7 @@ def test_compare_mode_keeps_configured(monkeypatch):
 def test_routes_categories():
     from memo_system import atm
     assert atm._atm_root_rule("新竹") == ("名冊薪資", 1)
-    assert atm._atm_root_rule("高雄") == ("名冊薪資", 1)
+    assert atm._atm_root_rule("高雄") == ("內勤工作表單", 0)
     assert change_order._change_root_category("桃園") == "服務異動"
     assert change_order._change_root_category("台北") == "內勤工作表單"
 
