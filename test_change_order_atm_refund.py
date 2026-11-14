@@ -35,3 +35,20 @@ def test_append_refund_row_negative_and_refund_fee(monkeypatch):
     data = dict(ws.updates)
     assert data["I6:L7"] == [["2026.11", "LC1", "甲", 400], ["2026.11", "LC2", "乙", -4800]]
     assert data["N6:O7"] == [["清潔", "異動費"], ["清潔", "退款"]]
+
+
+def test_is_atm_pending_charge():
+    assert change_order._is_atm_pending_charge({"B": "待收款", "R": "ATM"})
+    assert change_order._is_atm_pending_charge({"B": "待收款", "R": "藍新ATM"})
+    assert change_order._is_atm_pending_charge({"B": "待收款", "R": ""})  # 未填維持舊行為
+    assert not change_order._is_atm_pending_charge({"B": "待收款", "R": "信用卡"})
+    assert not change_order._is_atm_pending_charge({"B": "待扣儲值金", "R": "儲值金"})
+    assert not change_order._is_atm_pending_charge({"B": "待退款", "R": "ATM"})
+
+
+def test_should_sync_atm():
+    assert change_order._should_sync_atm({"B": "待收款", "R": "ATM"})
+    assert change_order._should_sync_atm({"B": "待退款", "R": "ATM"})
+    assert not change_order._should_sync_atm({"B": "待收款", "R": "信用卡"})
+    assert not change_order._should_sync_atm({"B": "待退款", "R": "信用卡"})
+    assert not change_order._should_sync_atm({"B": "待返儲值金", "R": "ATM"})

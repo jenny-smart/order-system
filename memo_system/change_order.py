@@ -1,11 +1,15 @@
 # ============================================================
 # 檔名：change_order.py
-# 版本：v3.7
+# 版本：v3.8
 # 模組：清潔異動模組：車馬費 / 異動服務收款 / 異動服務退款
 # 建立日期：2026-06-22
-# 最後更新：2026-11-13
+# 最後更新：2026-11-15
 #
 # Change Log
+# v3.8（2026-11-15）
+# - 清潔異動同步 ATM 工作表的條件統一為「付款方式（待收款）或退款方式（待退款）
+#   是 ATM」：待收款若 R 欄明確寫了信用卡等非 ATM 付款方式就不再同步；R 欄留空
+#   （人工建單未填）維持原行為照常同步。
 # v3.7（2026-11-13）
 # - 訂單編號查詢仍取不到會員電話時：改用姓名連結的 keyword 到後台會員頁查手機
 #   （唯一一筆才採用）；訂購資訊欄也接受 +886／886 開頭手機。
@@ -1336,6 +1340,21 @@ def _is_atm_pending_refund(row: dict) -> bool:
     return row.get("B") == STATUS_PENDING_REFUND and "ATM" in str(row.get("R", "")).upper()
 
 
+def _is_atm_pending_charge(row: dict) -> bool:
+    """待收款且付款方式（R 欄）是 ATM／藍新ATM → 同步 ATM 工作表（正數）。
+    R 欄留空＝未指定付款方式，維持舊行為照常同步；明確寫信用卡等非 ATM 則不同步。
+    VIP 待扣儲值金不算。"""
+    if row.get("B") != STATUS_PENDING_CHARGE:
+        return False
+    payway = str(row.get("R", "") or "").strip()
+    return not payway or "ATM" in payway.upper()
+
+
+def _should_sync_atm(row: dict) -> bool:
+    """清潔異動付款方式（收款）或退款方式（退款）是 ATM → 要新增至 ATM 工作表。"""
+    return _is_atm_pending_refund(row) or _is_atm_pending_charge(row)
+
+
 def _atm_amount(value) -> int:
     try:
         return int(round(float(str(value or 0).replace(",", "").replace("$", ""))))
@@ -1386,7 +1405,7 @@ def append_rows_to_sheet(region: str, rows: list, ui_logger=None):
             ws.update_acell(f"AD{target_row}", datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d %H:%M:%S"))
             ws.update_acell(f"AE{target_row}", "建立異動")
             written += 1
-            if row.get("B") == STATUS_PENDING_CHARGE or _is_atm_pending_refund(row):
+            if _should_sync_atm(row):
                 written_pending_charges.append(row)
             log(f"✅ 已寫入第 {target_row} 列：{row.get('G', '')}")
         except Exception as e:

@@ -1,9 +1,13 @@
 # ============================================================
 # 檔名：quick_order.py
-# 版本：v8.73
-# 最後更新：2026-11-13
+# 版本：v8.74
+# 最後更新：2026-11-15
 #
 # Change Log
+# v8.74
+# - 訂單轉換有差額新增的清潔異動：加收列 R 欄（付款方式）改依原訂單付款方式
+#   填入（ATM／信用卡；VIP 仍為儲值金）。付款方式（加收）或退款方式（退款）
+#   是 ATM 時同步新增至同地區 ATM 工作表；非 ATM 不同步。
 # v8.73
 # - 訂單轉換第二段完成後有差額：新訂單合計少於原訂單A → 新增「異動服務退款」
 #   （待退款／VIP 待返儲值金）；超過 → 新增「異動服務收款」（待收款／VIP 待扣
@@ -2350,7 +2354,7 @@ def _append_conversion_change_order(stage1_result, all_nos_str, refund_amount, c
     - 退款（新訂單合計少於原訂單A）：異動服務退款，狀態待退款（VIP 待返儲值金），
       S 欄＝退款金額，R 欄依原訂單付款方式（ATM 會同步 ATM 工作表負數）。
     - 加收（新訂單合計超過原訂單A）：異動服務收款，狀態待收款（VIP 待扣儲值金），
-      N 欄＝加收金額。
+      N 欄＝加收金額，R 欄依原訂單付款方式（ATM 會同步 ATM 工作表正數）。
     訂單編號（G 欄）都寫原訂單A，備註（J 欄）寫轉換的合併單號與金額。
     """
     from memo_system import change_order as co
@@ -2400,7 +2404,8 @@ def _append_conversion_change_order(stage1_result, all_nos_str, refund_amount, c
                "B": "待扣儲值金" if is_vip else co.STATUS_PENDING_CHARGE, "C": co.TYPE_CHARGE,
                "J": co._with_change_date(f"訂單轉換 {all_nos_str} 合併服務，新訂單合計超過原訂單，加收 ${charge_amount}"),
                "N": charge_amount,
-               "R": "儲值金" if is_vip else ""}
+               # 付款方式依原訂單；ATM 會同步新增至 ATM 工作表（正數）
+               "R": "儲值金" if is_vip else co._refund_payway(order)}
         kind = f"待收款 {charge_amount} 元"
     res = co.append_rows_to_sheet(region, [row])
     if res.get("written"):
