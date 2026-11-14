@@ -221,6 +221,17 @@ class YearRoots:
             self._drive = self._drive_factory()
         return self._drive
 
+    def _resolve(self, rule: Rule, year: int, area: str, file_index: int) -> Tuple[str, str]:
+        """閒置太久的 Drive 連線會斷（Broken pipe／連線重設）：重建連線後再試一次。"""
+        try:
+            return resolve(self.drive, rule, year, area, file_index)
+        except (OSError, ConnectionError) as exc:
+            if isinstance(exc, FileNotFoundError):
+                raise
+            self._log(f"⚠ Drive 連線中斷（{exc}），重新連線再試一次")
+            self._drive = None
+            return resolve(self.drive, rule, year, area, file_index)
+
     def _report(self, rule: Rule, text: str) -> None:
         """text 以「地區 年度」開頭；同一列每個地區保留一行，寫回 L 欄。"""
         key = (rule.row, text)
@@ -248,7 +259,7 @@ class YearRoots:
         key = (rule.row, year, area, file_index)
         try:
             if key not in self._resolved:
-                self._resolved[key] = resolve(self.drive, rule, year, area, file_index)
+                self._resolved[key] = self._resolve(rule, year, area, file_index)
             found, path = self._resolved[key]
         except Exception as exc:
             if rule.mode == MODE_ROOT:
@@ -277,7 +288,7 @@ class YearRoots:
         key = (rule.row, year, area, file_index)
         try:
             if key not in self._resolved:
-                self._resolved[key] = resolve(self.drive, rule, year, area, file_index)
+                self._resolved[key] = self._resolve(rule, year, area, file_index)
         except Exception as exc:
             self._report(rule, f"{label} 找不到：{exc}")
             raise FileNotFoundError(f"年度根目錄找不到「{category}／{area or '共用'}」{year} 年度檔：{exc}") from exc

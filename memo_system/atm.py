@@ -1864,6 +1864,42 @@ def _auto_normalize(region: str, ws, log, result: Dict) -> None:
         result["errors"].append(f"整理 ATM 分頁 G:O 失敗：{exc}")
 
 
+# 2026-11-15 Jenny：台中／桃園／新竹匯入待付款清單時，A 欄有資料的列若 J 欄已填
+# 訂單編號且在這次匯入的資料裡，把該列 H:I、K:O 的空白格補齊（不覆蓋已有內容）。
+BACKFILL_REGIONS = ("台中", "桃園", "新竹")
+
+
+def _backfill_values(item: Dict) -> Dict[int, object]:
+    """欄號（1 起算）→ 要補的值；H:I、K:O，跳過 J（訂單編號本身）。"""
+    return {
+        8: item.get("line_url", ""),             # H
+        COL_I_MONTH: item.get("year_month", ""),  # I
+        COL_CUSTOMER_NAME: item.get("name", ""),  # K
+        COL_ORDER_AMOUNT: item.get("net_amount", ""),  # L
+        13: item.get("last_code", ""),           # M
+        COL_N_SERVICE: UNPAID_SERVICE_FEE[0],    # N
+        COL_O_FEE: UNPAID_SERVICE_FEE[1],        # O
+    }
+
+
+def backfill_bank_rows(all_values: List[List[str]], rows: List[Dict]) -> List[Dict]:
+    """回傳 batch_update 用的更新清單：只補 A 欄非空白、J 欄訂單在匯入資料中的列的空白格。"""
+    by_order = {str(r.get("order_no") or "").strip(): r for r in rows if str(r.get("order_no") or "").strip()}
+    updates = []
+    for idx, row in enumerate(all_values, start=1):
+        if not (row and str(row[0]).strip()):
+            continue
+        order_no = memo.safe_cell(row, COL_ORDER_NO)
+        item = by_order.get(order_no)
+        if not item:
+            continue
+        for col, value in _backfill_values(item).items():
+            if value in (None, "") or memo.safe_cell(row, col):
+                continue
+            updates.append({"range": gspread.utils.rowcol_to_a1(idx, col), "values": [[value]]})
+    return updates
+
+
 def paste_atm_unpaid_list(region: str, rows: List[Dict], ui_logger=None) -> Dict:
     """新增未出現的待付款訂單並回填 P/T。
 
@@ -1871,7 +1907,7 @@ def paste_atm_unpaid_list(region: str, rows: List[Dict], ui_logger=None) -> Dict
     （2026-11：原本只檢查 A 欄最後一筆以下，A 欄往下補資料後，11/02 已列過的待付款訂單又被重列。）
     """
     log = make_logger(ui_logger)
-    result = {"pasted": 0, "skipped_duplicates": 0, "start_row": None, "errors": []}
+    result = {"pasted": 0, "skipped_duplicates": 0, "start_row": None, "backfilled": 0, "errors": []}
 
     if not rows:
         log("沒有資料可以貼")
@@ -1879,6 +1915,13 @@ def paste_atm_unpaid_list(region: str, rows: List[Dict], ui_logger=None) -> Dict
 
     ws = get_atm_worksheet(region)
     all_values = memo.with_retry(ws.get_all_values)
+
+    if region in BACKFILL_REGIONS:
+        backfill = backfill_bank_rows(all_values, rows)
+        if backfill:
+            memo.with_retry(ws.batch_update, backfill, value_input_option="RAW")
+            result["backfilled"] = len(backfill)
+            log(f"✅ A 欄有資料且 J 欄訂單已存在的列：補齊 H:I、K:O 共 {len(backfill)} 格")
 
     # 新增位置以 A 欄最後一筆＋5 列定位；去重檢查整欄 J。
     last_a_row = max(

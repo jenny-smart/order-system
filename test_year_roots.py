@@ -69,3 +69,41 @@ def test_workday_uses_calendar_then_builtin(monkeypatch):
     assert not change_order._is_workday(date(2027, 1, 5))
     assert change_order._is_workday(date(2027, 1, 6))
     assert not change_order._is_workday(date(2026, 9, 25))  # 抓不到 2026 日曆時用內建清單
+
+
+def test_locate_reconnects_once_after_broken_pipe():
+    from year_roots import YearRoots
+
+    values = [[], [], ["類別"], ["內勤工作表單", "高雄", "ROOT", "", "{YYYY}專員承攬服務費", "05.高雄專員",
+                                 "{YYYY}高雄內勤工作表單", "2026", "", "", "根目錄"]]
+    tree = {"ROOT": [{"id": "Y", "name": "2026專員承攬服務費", "mimeType": "application/vnd.google-apps.folder"}],
+            "Y": [{"id": "K", "name": "05.高雄專員", "mimeType": "application/vnd.google-apps.folder"}],
+            "K": [{"id": "F", "name": "2026高雄內勤工作表單", "mimeType": "application/vnd.google-apps.spreadsheet"}]}
+
+    class Drive:
+        def __init__(self, broken):
+            self.broken = broken
+
+        def files(self):
+            return self
+
+        def list(self, q, **_):
+            parent = q.split("'")[1]
+            broken = self.broken
+
+            class Req:
+                def execute(self_inner):
+                    if broken:
+                        raise BrokenPipeError(32, "Broken pipe")
+                    return {"files": tree.get(parent, [])}
+            return Req()
+
+    made = []
+
+    def factory():
+        made.append(1)
+        return Drive(broken=len(made) == 1)
+
+    roots = YearRoots(values, factory, log=lambda *_: None)
+    assert roots.locate("內勤工作表單", "高雄", 2026) == "F"
+    assert len(made) == 2
