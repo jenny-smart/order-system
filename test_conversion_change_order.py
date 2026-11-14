@@ -34,6 +34,18 @@ class ConversionChangeOrderTest(unittest.TestCase):
         self.assertEqual((row["B"], row["C"], row["N"]), ("待收款", co.TYPE_CHARGE, 700))
         self.assertIn("第 88 列", res["message"])
 
+    def test_charge_row_records_atm_payway(self):
+        self.run_append(0, 700)
+        res, app = self.run_append(0, 700)
+        self.assertEqual(app.call_args.args[1][0]["R"], "ATM")
+
+    def test_charge_row_records_credit_card_payway(self):
+        with patch.object(co, "fetch_order_basic", return_value=dict(ORDER, payway="信用卡")), \
+             patch.object(q, "load_config", return_value={"enabled": False}), \
+             patch.object(co, "append_rows_to_sheet", return_value={"written": 1, "errors": [], "start_row": 9}) as app:
+            q._append_conversion_change_order(STAGE1, "A+B", 0, 700)
+        self.assertEqual(app.call_args.args[1][0]["R"], "信用卡")
+
     def test_vip_uses_stored_value_status(self):
         with patch.object(co, "fetch_order_basic", return_value=dict(ORDER, payway="儲值金")), \
              patch.object(q, "load_config", return_value={"enabled": False}), \
