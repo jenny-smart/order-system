@@ -107,3 +107,50 @@ def test_locate_reconnects_once_after_broken_pipe():
     roots = YearRoots(values, factory, log=lambda *_: None)
     assert roots.locate("內勤工作表單", "高雄", 2026) == "F"
     assert len(made) == 2
+
+
+def test_locate_finds_year_folder_shared_directly_when_root_not_visible():
+    from year_roots import YearRoots
+
+    values = [[], [], ["類別"], ["內勤工作表單", "高雄", "ROOT", "", "{YYYY}專員承攬服務費", "05.高雄專員",
+                                 "{YYYY}高雄內勤工作表單", "2026", "", "", "根目錄"]]
+    folder = "application/vnd.google-apps.folder"
+    # 服務帳號看不到 ROOT：列 ROOT 底下回空；但 2026 資料夾有直接分享給它
+    tree = {"ROOT": [],
+            "Y": [{"id": "K", "name": "05.高雄專員", "mimeType": folder}],
+            "K": [{"id": "F", "name": "2026高雄內勤工作表單", "mimeType": "application/vnd.google-apps.spreadsheet"}]}
+    shared = [{"id": "Y", "name": "2026專員承攬服務費", "parents": ["ROOT"]},
+              {"id": "OTHER", "name": "2026專員承攬服務費", "parents": ["ELSEWHERE"]}]
+
+    class Drive:
+        def files(self):
+            return self
+
+        def list(self, q, **_):
+            class Req:
+                def execute(self_inner):
+                    if q.startswith("name = "):
+                        return {"files": shared}
+                    return {"files": tree.get(q.split("'")[1], [])}
+            return Req()
+
+    roots = YearRoots(values, Drive, log=lambda *_: None)
+    assert roots.locate("內勤工作表單", "高雄", 2026) == "F"
+
+
+def test_shared_folder_fallback_rejects_ambiguous_names():
+    import pytest
+    from year_roots import _find_shared_folder
+
+    class Drive:
+        def files(self):
+            return self
+
+        def list(self, **_):
+            class Req:
+                def execute(self_inner):
+                    return {"files": [{"id": "A", "name": "2026專員承攬服務費"}, {"id": "B", "name": "2026專員承攬服務費"}]}
+            return Req()
+
+    with pytest.raises(FileNotFoundError):
+        _find_shared_folder(Drive(), "ROOT", "2026專員承攬服務費")
