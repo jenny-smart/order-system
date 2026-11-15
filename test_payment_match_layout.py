@@ -63,7 +63,7 @@ def test_existing_j_row_is_overwritten_from_ks_by_order_no():
     result, updates, _ = _run("高雄", _sheet())
     assert result["updated_by_order"] == 1
     assert updates["I2"] == ["2026.11"]
-    assert updates["K2:O2"] == ["黃裕玲", 18900, "", "居家清潔", "清潔服務"]
+    assert updates["K2:O2"] == ["黃裕玲", 18900, "", "清潔", "服務費用"]  # 高雄維持清潔／服務費用
     assert updates["K12:S12"] == [""] * 9  # 已用的候選從 K:S 移除
 
 
@@ -99,3 +99,10 @@ def test_continuation_rows_missing_marks_review():
     sheet[3] = _bank("2026/10/09 09:00:00", "500", "別人", region="高雄")  # 續列被別的銀行列佔用
     result, updates, _ = _run("高雄", sheet)
     assert updates["P3"][0].startswith("待確認：5 筆訂單加總，但下方列非空")
+
+
+def test_taoyuan_keeps_backend_category_and_detail():
+    sheet = [_bank(region="桃園"), _bank("2026/10/16 12:11:02", "9,600", "傅以如", region="桃園"),
+             [""] * 20, _cand("2026.11", "LC00217496", "傅以如", 9600, "2026-10-16 13:00")]
+    _, updates, _ = _run("桃園", sheet)
+    assert updates["K2:O2"][3:] == ["居家清潔", "清潔服務"]

@@ -316,11 +316,19 @@ def _values(row: Dict) -> List:
     )]
 
 
-def _sheet_values(row: Dict) -> Dict[str, List]:
+# 高雄 N/O 維持下拉選單的寫法（2026-11-15 Jenny）：清潔／服務費用；家電訂單 N 為「家電」
+KAOHSIUNG_CATEGORY = {"居家清潔": "清潔", "家電清潔": "家電", "水洗清潔": "水洗"}
+KAOHSIUNG_FEE = "服務費用"
+
+
+def _sheet_values(row: Dict, region: str = "") -> Dict[str, List]:
     """依訂單編號覆蓋銀行列：I 與 K:O。"""
+    category, detail = row["service_category"], row["service_detail"]
+    if region == "高雄":
+        category, detail = KAOHSIUNG_CATEGORY.get(category, "清潔"), KAOHSIUNG_FEE
     return {
         "I": [row["service_month"]],
-        "K:O": [row["name"], row["net_amount"], row["last5"], row["service_category"], row["service_detail"]],
+        "K:O": [row["name"], row["net_amount"], row["last5"], category, detail],
     }
 
 
@@ -427,7 +435,7 @@ def match_bank_rows(region: str, ui_logger=None) -> Dict:
     result = {"updated_by_order": 0, "matched_orders": 0, "matched_bank_rows": 0, "review": 0, "review_rows": []}
 
     def write_order(target: int, candidate: Dict):
-        vals = _sheet_values(candidate)
+        vals = _sheet_values(candidate, region)
         updates.append({"range": f"I{target}", "values": [vals["I"]]})
         updates.append({"range": f"J{target}", "values": [[candidate["order_no"]]]})
         updates.append({"range": f"K{target}:O{target}", "values": [vals["K:O"]]})
