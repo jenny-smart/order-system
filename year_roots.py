@@ -172,6 +172,25 @@ def _child(drive, parent_id: str, name: str, folder: bool) -> Dict:
     return hits[0]
 
 
+def _find_shared_folder(drive, parent_id: str, name: str) -> Dict:
+    """根目錄沒分享給服務帳號時列不出子項目；改用名稱直接找已分享給它的資料夾。
+    只接受「上層就是 parent_id，或上層看不到」且唯一的一個，避免抓到別處同名資料夾。"""
+    target = _norm(name)
+    escaped = name.replace("\\", "\\\\").replace("'", "\\'")
+    res = drive.files().list(
+        q=f"name = '{escaped}' and mimeType = '{FOLDER_MIME}' and trashed = false",
+        fields="files(id,name,parents)", pageSize=50,
+        supportsAllDrives=True, includeItemsFromAllDrives=True,
+    ).execute()
+    hits = [f for f in res.get("files", [])
+            if _norm(f.get("name")) == target and (not f.get("parents") or parent_id in f["parents"])]
+    exact = [f for f in hits if parent_id in (f.get("parents") or [])]
+    hits = exact or hits
+    if len(hits) != 1:
+        raise FileNotFoundError(f"找不到「{name}」" if not hits else f"「{name}」有 {len(hits)} 個同名資料夾")
+    return hits[0]
+
+
 def resolve(drive, rule: Rule, year: int, area: str = "", file_index: int = 0) -> Tuple[str, str]:
     """依規則找出 year 年度的檔案，回傳 (檔案ID, 路徑說明)。"""
     if not rule.file_names or rule.file_names[0].startswith("工作表"):
@@ -183,7 +202,10 @@ def resolve(drive, rule: Rule, year: int, area: str = "", file_index: int = 0) -
         if not template:
             continue
         name = _fill(template, year, area)
-        node = _child(drive, node, name, folder=True)["id"]
+        try:
+            node = _child(drive, node, name, folder=True)["id"]
+        except FileNotFoundError:
+            node = _find_shared_folder(drive, node, name)["id"]
         path.append(name)
     entry = rule.file_names[min(file_index, len(rule.file_names) - 1)]
     # 同一個檔可登記多種寫法，用「｜」分隔，依序找（例如 2027 起改名的新檔名｜2026 的舊檔名）
