@@ -1244,8 +1244,9 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
             try:
                 result = payment_match.match_bank_rows(region, ui_logger=payment_log, rows=st.session_state.get("payment_match_rows") or [])
                 st.success(
-                    f"完成：依 J 欄更新 {result['updated_by_order']} 列；新配對 {result['matched_orders']} 筆訂單；"
-                    f"待人工確認 {result['review']} 列（P 欄已標「待確認：原因」）。"
+                    f"完成：① J 欄有訂單編號、已補齊 I、K:O：{result['updated_by_order']} 列；"
+                    f"② J 欄空白的收入列，新配對到訂單：{result['matched_orders']} 筆；"
+                    f"③ 配不到、待人工確認：{result['review']} 列（P 欄已標「待確認：原因」）。"
                 )
                 if result.get("review_rows"):
                     st.dataframe(
