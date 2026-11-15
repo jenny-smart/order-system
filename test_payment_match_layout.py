@@ -106,3 +106,19 @@ def test_taoyuan_keeps_backend_category_and_detail():
              [""] * 20, _cand("2026.11", "LC00217496", "傅以如", 9600, "2026-10-16 13:00")]
     _, updates, _ = _run("桃園", sheet)
     assert updates["K2:O2"][3:] == ["居家清潔", "清潔服務"]
+
+
+def test_search_results_used_without_pasting_to_ks():
+    sheet = [_bank(), _bank("2026/10/04 19:55:46", "3,300", "012-0000660168171480\n１０２１家事清潔", j="LC00216873", l="3300")]
+    ws = Mock()
+    ws.get_all_values.return_value = sheet
+    rows = [{"service_month": "2026.10", "order_no": "LC00216873", "name": "魏佑寧", "service_date": "2026-10-21",
+             "net_amount": 3300, "last5": "", "service_category": "居家清潔", "service_detail": "清潔服務",
+             "paid_at": "2026-10-04 22:32"}]
+    with patch.object(pm, "get_worksheet", return_value=ws), \
+            patch.object(pm.memo, "with_retry", side_effect=lambda fn, *a, **k: fn(*a, **k)):
+        result = pm.match_bank_rows("高雄", rows=rows)
+    updates = {u["range"]: u["values"][0] for u in ws.batch_update.call_args.args[0]}
+    assert result["updated_by_order"] == 1
+    assert updates["I2"] == ["2026.10"] and updates["K2:O2"] == ["魏佑寧", 3300, "", "清潔", "服務費用"]
+    assert not any(r.startswith("K") and r.endswith(":S") for r in updates)
