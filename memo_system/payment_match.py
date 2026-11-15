@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import unicodedata
 from datetime import datetime
 from itertools import combinations
 from typing import Callable, Dict, List, Optional
@@ -277,15 +278,54 @@ def search_orders(session, paid_start: str, paid_end: str, payment_status: str,
     return output
 
 
+# -----------------------------------------------------------------------------
+# 工作表欄位（2026-11-15 Jenny：照「富邦ATM」／高雄「ATM」分頁實際欄位）
+#   E＝存入金額；桃園／新竹 B＝交易時間、F＝附註；高雄 A＝交易時間、G＝帳號／備註
+#   I＝服務年月 J＝訂單編號 K＝姓名 L＝金額 M＝後5碼 N＝服務類別 O＝服務細項／費用
+#   查詢結果維持貼在銀行明細下方 K:S（K 年月 L 訂單編號 M 姓名 N 服務日期 O 金額
+#   P 後5碼 Q 類別 R 細項 S 付款時間）；銀行列依 J 欄訂單編號對應 K:S 的 L 欄
+#   P＝銀行列配不到時寫「待確認：原因」
+# -----------------------------------------------------------------------------
+COL_INCOME = 5   # E
+COL_I = 9        # I
+COL_J = 10       # J
+COL_REVIEW = 16  # P
+REVIEW_PREFIX = "待確認："
+
+
+def _bank_columns(region: str) -> Dict[str, int]:
+    if region == "高雄":
+        return {"time": 1, "note": 7}
+    return {"time": 2, "note": 6}
+
+
+def _cell(row: List, col: int) -> str:
+    return str(row[col - 1]).strip() if len(row) >= col else ""
+
+
+def _last_bank_row(sheet: List[List]) -> int:
+    """銀行明細最後一列：A 或 B 欄有資料（下方 G/I 欄可能有空公式，不算）。"""
+    return max((i for i, row in enumerate(sheet, 1) if _cell(row, 1) or _cell(row, 2)), default=1)
+
+
 def _values(row: Dict) -> List:
+    """貼到待比對區 K:S 的值。"""
     return [row[key] for key in (
         "service_month", "order_no", "name", "service_date", "net_amount",
         "last5", "service_category", "service_detail", "paid_at",
     )]
 
 
+def _sheet_values(row: Dict) -> Dict[str, List]:
+    """依訂單編號覆蓋銀行列：I 與 K:O。"""
+    return {
+        "I": [row["service_month"]],
+        "K:O": [row["name"], row["net_amount"], row["last5"], row["service_category"], row["service_detail"]],
+    }
+
+
 def paste_orders(region: str, rows: List[Dict], ui_logger=None) -> Dict:
-    """從銀行 B 欄最後資料列下方 5 列開始，獨立貼至 K:S。"""
+    """從銀行明細最後一列下方 5 列開始，貼到 K:S 待比對區。"""
     log = _logger(ui_logger)
     rows = [row for row in rows if _money(row.get("net_amount")) != 0]
     if not rows:
@@ -293,14 +333,15 @@ def paste_orders(region: str, rows: List[Dict], ui_logger=None) -> Dict:
         return {"pasted": 0, "start_row": None}
     ws = get_worksheet(region)
     values = memo.with_retry(ws.get_all_values)
-    last_bank_row = max((i for i, row in enumerate(values, 1)
-                         if len(row) >= 2 and str(row[1]).strip()), default=1)
-    start = last_bank_row + 5
+    start = _last_bank_row(values) + 5
     while start <= len(values) and any(str(v).strip() for v in values[start - 1][10:19]):
-        start += 5
+        start += 1
     payload = [_values(row) for row in rows]
-    memo.with_retry(ws.update, f"K{start}:S{start + len(payload) - 1}", payload, value_input_option="RAW")
-    log(f"已貼上 {len(payload)} 筆至 K{start}:S{start + len(payload) - 1}")
+    end = start + len(payload) - 1
+    if end > int(getattr(ws, "row_count", 0) or len(values)):
+        memo.with_retry(ws.add_rows, end - int(getattr(ws, "row_count", 0) or len(values)))
+    memo.with_retry(ws.update, f"K{start}:S{end}", payload, value_input_option="RAW")
+    log(f"已貼上 {len(payload)} 筆至 K{start}:S{end}")
     return {"pasted": len(payload), "start_row": start}
 
 
@@ -313,89 +354,136 @@ def _amount(value) -> Optional[int]:
 
 
 def _date(value: str) -> Optional[datetime]:
-    digits = re.sub(r"\D", "", str(value or ""))
-    for size, fmt in ((14, "%Y%m%d%H%M%S"), (12, "%Y%m%d%H%M"), (8, "%Y%m%d")):
-        if len(digits) >= size:
-            try:
-                return datetime.strptime(digits[:size], fmt)
-            except ValueError:
-                pass
-    return None
+    """支援「2026/11/9 23:02:12」「2026-11-05 15:05」等不補零格式。"""
+    m = re.search(r"(\d{4})\D(\d{1,2})\D(\d{1,2})(?:\D+(\d{1,2}):(\d{2})(?::(\d{2}))?)?", str(value or ""))
+    if not m:
+        return None
+    try:
+        return datetime(*(int(g) for g in m.groups(default="0")))
+    except ValueError:
+        return None
+
+
+def _norm_note(note: str) -> str:
+    return re.sub(r"\s", "", unicodedata.normalize("NFKC", str(note or "")))
 
 
 def _identity_match(note: str, row: Dict) -> bool:
-    compact = re.sub(r"\s", "", str(note or ""))
+    compact = _norm_note(note)
     code = re.sub(r"\D", "", row.get("last5", ""))
     return bool((code and re.sub(r"\D", "", compact).endswith(code))
                 or (row["name"] and row["name"] in compact)
                 or row["name"] == STAR_CLINIC and STAR_CLINIC in compact)
 
 
-def _find_group(income: int, note: str, bank_time: str, candidates: List[Dict]) -> List[Dict]:
+def _find_group(income: int, note: str, bank_time: str, candidates: List[Dict]):
+    """回傳 (符合的訂單, 配不到的原因)。"""
     bank_dt = _date(bank_time)
     eligible = []
     for row in candidates:
         if not _identity_match(note, row):
             continue
         paid_dt = _date(row["paid_at"])
-        if bank_dt and paid_dt and paid_dt < bank_dt:
+        if bank_dt and paid_dt and paid_dt < bank_dt.replace(second=0):
             continue
         eligible.append(row)
+    if not eligible:
+        return [], "備註沒有姓名或後5碼"
     eligible.sort(key=lambda row: (_date(row["paid_at"]) or datetime.max, row["order_no"]))
     for size in range(1, min(8, len(eligible)) + 1):
         groups = [group for group in combinations(eligible, size)
                   if sum(row["net_amount"] for row in group) == income]
         if len(groups) == 1:
-            return list(groups[0])
+            return list(groups[0]), ""
         if len(groups) > 1:
-            return []
-    return []
+            return [], "多組金額相同"
+    names = "、".join(sorted({row["name"] for row in eligible}))
+    return [], f"姓名／後5碼相符（{names}），但金額加總不符"
 
 
 def match_bank_rows(region: str, ui_logger=None) -> Dict:
-    """以 F 欄收入、H 欄備註、B 欄日期，比對 K:S；支援多單金額加總。"""
+    """① J 欄已有訂單編號的列：依 J 對應下方 K:S（L 欄訂單編號），一律覆蓋 I、K:O。
+    ② J 欄空白、E 欄有收入的列：以收入金額＋備註（姓名／後5碼）＋時間比對，支援多單加總。
+    配不到的列在執行紀錄逐列寫原因，並在 P 欄標「待確認：原因」。"""
     log = _logger(ui_logger)
+    cols = _bank_columns(region)
     ws = get_worksheet(region)
     sheet = memo.with_retry(ws.get_all_values)
-    last_bank_row = max((i for i, row in enumerate(sheet, 1)
-                         if len(row) >= 2 and str(row[1]).strip()), default=1)
-    candidates = []
+    last_bank_row = _last_bank_row(sheet)
+    candidates = {}
     for i, raw in enumerate(sheet, 1):
-        if i <= last_bank_row or len(raw) < 19 or not str(raw[11]).strip():
+        order_no = _cell(raw, 12)  # K:S 的 L 欄
+        if i <= last_bank_row or not order_no or order_no in candidates:
             continue
-        candidates.append({
-            "source_row": i, "service_month": raw[10], "order_no": raw[11],
-            "name": raw[12], "service_date": raw[13], "net_amount": _amount(raw[14]) or 0,
-            "last5": raw[15], "service_category": raw[16], "service_detail": raw[17],
-            "paid_at": raw[18],
-        })
-    used, updates, matched, matched_banks, review = set(), [], 0, 0, 0
+        candidates[order_no] = {
+            "source_row": i, "service_month": _cell(raw, 11), "order_no": order_no,
+            "name": _cell(raw, 13), "service_date": _cell(raw, 14),
+            "net_amount": _amount(_cell(raw, 15)) or 0, "last5": _cell(raw, 16),
+            "service_category": _cell(raw, 17), "service_detail": _cell(raw, 18), "paid_at": _cell(raw, 19),
+        }
+    log(f"銀行明細到第 {last_bank_row} 列；待比對訂單 {len(candidates)} 筆")
+
+    used, updates = set(), []
+    result = {"updated_by_order": 0, "matched_orders": 0, "matched_bank_rows": 0, "review": 0, "review_rows": []}
+
+    def write_order(target: int, candidate: Dict):
+        vals = _sheet_values(candidate)
+        updates.append({"range": f"I{target}", "values": [vals["I"]]})
+        updates.append({"range": f"J{target}", "values": [[candidate["order_no"]]]})
+        updates.append({"range": f"K{target}:O{target}", "values": [vals["K:O"]]})
+        if _cell(sheet[target - 1], COL_REVIEW).startswith(REVIEW_PREFIX):
+            updates.append({"range": f"P{target}", "values": [[""]]})
+        used.add(candidate["order_no"])
+
+    # ① 依 J 欄訂單編號覆蓋
+    for bank_row in range(2, last_bank_row + 1):
+        order_no = _cell(sheet[bank_row - 1], COL_J)
+        if not order_no:
+            continue
+        candidate = candidates.get(order_no)
+        if not candidate:
+            continue
+        write_order(bank_row, candidate)
+        result["updated_by_order"] += 1
+    if result["updated_by_order"]:
+        log(f"依 J 欄訂單編號覆蓋 I、K:O：{result['updated_by_order']} 列")
+
+    # ② J 欄空白的收入列
     for bank_row in range(2, last_bank_row + 1):
         raw = sheet[bank_row - 1]
-        income = _amount(raw[5] if len(raw) > 5 else "")  # F
-        note = raw[7] if len(raw) > 7 else ""              # H
-        bank_time = raw[1] if len(raw) > 1 else ""         # B
-        if not income or (len(raw) > 11 and str(raw[11]).strip()):
+        income = _amount(_cell(raw, COL_INCOME))
+        if not income or income <= 0 or _cell(raw, COL_J):
             continue
-        group = _find_group(income, note, bank_time, [c for c in candidates if c["order_no"] not in used])
+        note = _cell(raw, cols["note"])
+        bank_time = _cell(raw, cols["time"])
+        group, reason = _find_group(income, note, bank_time,
+                                    [c for c in candidates.values() if c["order_no"] not in used])
+        if group:
+            target_rows = list(range(bank_row, bank_row + len(group)))
+            for r in target_rows[1:]:
+                below = sheet[r - 1] if r <= len(sheet) else []
+                if (r > last_bank_row or _cell(below, COL_J) or _cell(below, COL_INCOME)
+                        or _cell(below, cols["time"]) != bank_time):
+                    reason = f"{len(group)} 筆訂單加總，但下方列非空（需 {len(group) - 1} 列同時間、無收入的續列）"
+                    group = []
+                    break
         if not group:
-            review += 1
-            continue
-        target_rows = list(range(bank_row, bank_row + len(group)))
-        if any(r <= len(sheet) and any(str(v).strip() for v in sheet[r - 1][10:19]) for r in target_rows):
-            review += 1
-            continue
-        if any(r != bank_row and r <= last_bank_row and any(str(v).strip() for v in sheet[r - 1][1:8]) for r in target_rows):
-            review += 1
-            log(f"第 {bank_row} 列為多訂單，但下方銀行列非空，留待人工確認")
+            text = f"{REVIEW_PREFIX}{reason}"
+            log(f"第 {bank_row} 列｜{income:,}｜{note.replace(chr(10), ' ')}｜{reason}")
+            updates.append({"range": f"P{bank_row}", "values": [[text]]})
+            result["review"] += 1
+            result["review_rows"].append({"row": bank_row, "amount": income, "note": note, "reason": reason})
             continue
         for target, candidate in zip(target_rows, group):
-            updates.append({"range": f"K{target}:S{target}", "values": [[*_values(candidate)]]})
+            write_order(target, candidate)
+            result["matched_orders"] += 1
+        result["matched_bank_rows"] += 1
+        log(f"第 {bank_row} 列配對 {len(group)} 筆，合計 {income:,}")
+
+    # 已寫到銀行列的訂單，從下方待比對區移除
+    for candidate in candidates.values():
+        if candidate["order_no"] in used:
             updates.append({"range": f"K{candidate['source_row']}:S{candidate['source_row']}", "values": [[""] * 9]})
-            used.add(candidate["order_no"])
-            matched += 1
-        matched_banks += 1
-        log(f"第 {bank_row} 列配對 {len(group)} 筆，合計 {income}")
     if updates:
         memo.with_retry(ws.batch_update, updates, value_input_option="RAW")
-    return {"matched_orders": matched, "matched_bank_rows": matched_banks, "review": review}
+    return result

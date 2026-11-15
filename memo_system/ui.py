@@ -1240,10 +1240,19 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                     except Exception as exc:
                         st.error(f"貼上失敗：{exc}")
 
-        if st.button("🔗 比對銀行 B:H 與訂單 K:S", use_container_width=True, key="payment_match_run"):
+        if st.button("🔗 比對銀行明細與訂單 K:S（依 J 欄訂單編號）", use_container_width=True, key="payment_match_run"):
             try:
                 result = payment_match.match_bank_rows(region, ui_logger=payment_log)
-                st.success(f"完成：配對 {result['matched_orders']} 筆訂單；待人工確認 {result['review']} 列。")
+                st.success(
+                    f"完成：依 J 欄更新 {result['updated_by_order']} 列；新配對 {result['matched_orders']} 筆訂單；"
+                    f"待人工確認 {result['review']} 列（P 欄已標「待確認：原因」）。"
+                )
+                if result.get("review_rows"):
+                    st.dataframe(
+                        [{"列": r["row"], "金額": r["amount"], "備註": r["note"], "原因": r["reason"]}
+                         for r in result["review_rows"]],
+                        use_container_width=True, hide_index=True,
+                    )
             except Exception as exc:
                 st.error(f"比對失敗：{exc}")
 
