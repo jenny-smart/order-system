@@ -409,7 +409,7 @@ def _find_group(income: int, note: str, bank_time: str, candidates: List[Dict]):
     return [], f"姓名／後5碼相符（{names}），但金額加總不符"
 
 
-def match_bank_rows(region: str, ui_logger=None) -> Dict:
+def match_bank_rows(region: str, ui_logger=None, rows: Optional[List[Dict]] = None) -> Dict:
     """① J 欄已有訂單編號的列：依 J 對應下方 K:S（L 欄訂單編號），一律覆蓋 I、K:O。
     ② J 欄空白、E 欄有收入的列：以收入金額＋備註（姓名／後5碼）＋時間比對，支援多單加總。
     配不到的列在執行紀錄逐列寫原因，並在 P 欄標「待確認：原因」。"""
@@ -429,7 +429,24 @@ def match_bank_rows(region: str, ui_logger=None) -> Dict:
             "net_amount": _amount(_cell(raw, 15)) or 0, "last5": _cell(raw, 16),
             "service_category": _cell(raw, 17), "service_detail": _cell(raw, 18), "paid_at": _cell(raw, 19),
         }
-    log(f"銀行明細到第 {last_bank_row} 列；待比對訂單 {len(candidates)} 筆")
+    # 畫面上剛查到的訂單也直接當候選（不必先貼到 K:S）；同一訂單以 K:S 已貼的為準
+    from_search = 0
+    for row in rows or []:
+        order_no = str(row.get("order_no") or "").strip()
+        if not order_no or order_no in candidates or _money(row.get("net_amount")) == 0:
+            continue
+        candidates[order_no] = {
+            "source_row": None, "service_month": row.get("service_month", ""), "order_no": order_no,
+            "name": row.get("name", ""), "service_date": row.get("service_date", ""),
+            "net_amount": _money(row.get("net_amount")), "last5": str(row.get("last5") or ""),
+            "service_category": row.get("service_category", ""), "service_detail": row.get("service_detail", ""),
+            "paid_at": row.get("paid_at", ""),
+        }
+        from_search += 1
+    log(f"銀行明細到第 {last_bank_row} 列；待比對訂單 {len(candidates)} 筆"
+        f"（K:S {len(candidates) - from_search} 筆、畫面查詢結果 {from_search} 筆）")
+    if not candidates:
+        log("⚠️ 沒有待比對訂單：請先搜尋付款訂單（或貼到 K:S）再比對")
 
     used, updates = set(), []
     result = {"updated_by_order": 0, "matched_orders": 0, "matched_bank_rows": 0, "review": 0, "review_rows": []}
@@ -490,7 +507,7 @@ def match_bank_rows(region: str, ui_logger=None) -> Dict:
 
     # 已寫到銀行列的訂單，從下方待比對區移除
     for candidate in candidates.values():
-        if candidate["order_no"] in used:
+        if candidate["order_no"] in used and candidate["source_row"]:
             updates.append({"range": f"K{candidate['source_row']}:S{candidate['source_row']}", "values": [[""] * 9]})
     if updates:
         memo.with_retry(ws.batch_update, updates, value_input_option="RAW")
