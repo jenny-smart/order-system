@@ -1194,7 +1194,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
 
     def render_payment_match_mode():
         step("3", "付款後5碼及星和診所比對（獨立功能）")
-        st.caption("固定付款方式 ATM；查詢結果寫入 K:S，不使用原 ATM 待付款清單。")
+        st.caption("固定付款方式 ATM。搜尋後直接按「依 J 欄補齊」：J 欄有訂單編號的列補 I、K:O；J 欄空白的收入列依金額＋備註配對。不必先貼上。")
         today = date.today()
         c1, c2, c3, c4 = st.columns(4)
         with c1: region = st.selectbox("地區", ["台北", "台中", "桃園", "新竹", "高雄"], key="payment_match_region")
@@ -1233,14 +1233,14 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
             st.metric("查到筆數", len(rows))
             if rows:
                 st.dataframe(rows, use_container_width=True, hide_index=True)
-                if st.button("📥 貼到 K:S 待比對區", type="primary", use_container_width=True, key="payment_match_paste"):
+                if st.button("（選用）📥 查詢結果另存到下方 K:S", use_container_width=True, key="payment_match_paste"):
                     try:
                         result = payment_match.paste_orders(region, rows, ui_logger=payment_log)
                         st.success(f"已從第 {result['start_row']} 列貼上 {result['pasted']} 筆。")
                     except Exception as exc:
                         st.error(f"貼上失敗：{exc}")
 
-        if st.button("🔗 比對銀行明細與訂單 K:S（依 J 欄訂單編號）", use_container_width=True, key="payment_match_run"):
+        if st.button("🔗 依 J 欄補齊 I、K:O＋配對 J 欄空白的收入", type="primary", use_container_width=True, key="payment_match_run"):
             try:
                 result = payment_match.match_bank_rows(region, ui_logger=payment_log, rows=st.session_state.get("payment_match_rows") or [])
                 st.success(
