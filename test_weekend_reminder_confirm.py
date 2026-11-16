@@ -3,7 +3,7 @@
 import hashlib
 import hmac
 import unittest
-from datetime import date
+from datetime import date, datetime
 from unittest.mock import patch
 
 from function import weekend_reminders as wr
@@ -131,6 +131,35 @@ class SyncTest(unittest.TestCase):
             sync.run(today=self.TODAY, dry_run=True)
         save.assert_not_called()
         staff.assert_not_called()
+
+
+class ConfirmSyncRunWindowTest(unittest.TestCase):
+    @staticmethod
+    def _workday(day):
+        return day.weekday() < 5 and day != date(2026, 12, 25)
+
+    def _ok(self, text):
+        return sync.in_run_window(datetime.fromisoformat(text), self._workday)
+
+    def test_runs_on_day_before_weekend_until_three_pm(self):
+        self.assertTrue(self._ok("2026-11-13 10:00"))
+        self.assertTrue(self._ok("2026-11-13 15:05"))
+        self.assertFalse(self._ok("2026-11-13 16:00"))
+
+    def test_skips_other_days(self):
+        self.assertFalse(self._ok("2026-11-16 10:00"))  # 週一
+        self.assertFalse(self._ok("2026-11-14 10:00"))  # 週六
+
+    def test_runs_before_weekday_holiday(self):
+        self.assertTrue(self._ok("2026-12-24 11:00"))
+
+    def test_main_skips_outside_window_without_calling_worker(self):
+        with patch.object(sync, "in_run_window", return_value=False), \
+                patch.object(sync, "run") as run, patch.object(sync, "_log") as log, \
+                patch("sys.argv", ["sync"]):
+            sync.main()
+        run.assert_not_called()
+        log.assert_not_called()
 
 
 if __name__ == "__main__":

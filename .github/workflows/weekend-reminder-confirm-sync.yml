@@ -1,7 +1,7 @@
 # 週末提醒回覆同步：把客人點「確認收到」連結的結果寫回追蹤表與內勤工作表單
 #
 # 由 tool-system 的 Cloud Schedule Router 依主控表「排程設定」（功能代號 weekend_reminder_confirm_sync）
-# 派送過來，建議提醒發送日 10:00 起每小時一次。shared/weekend_reminder_confirm_sync.py 只處理服務日期在
+# 派送過來，建議提醒發送日 10:00 起每小時一次；程式只在放假前一天 15:00（含）以前執行，其餘時段直接略過。shared/weekend_reminder_confirm_sync.py 只處理服務日期在
 # 今天前 2 天～後 14 天、尚未回覆的已付款提醒；沒有就直接結束。也可以在這裡手動執行（指定日期、只查不寫）。
 #
 # 需要的 Secrets：GOOGLE_SERVICE_ACCOUNT_JSON、LINE_REMINDER_API_KEY（與 line-lemonsystem Worker 的
