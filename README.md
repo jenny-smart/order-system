@@ -61,7 +61,7 @@ VIP提前異動費目前保留每2人1小時200／300元，待確認是否改為
 - `shared/weekend_reminder_confirm_sync.py`（功能代號 `weekend_reminder_confirm_sync`，
   `.github/workflows/weekend-reminder-confirm-sync.yml`）：查詢已確認的訂單，追蹤表「回覆狀態」改「已回覆」並填時間、
   備註加「連結確認」；內勤工作表單「週末提醒」I 欄空白時填 OK、K 欄填「連結確認 MM/DD HH:MM」，I 欄已有內容不覆蓋。
-  排程只在放假前一天（今天工作天、明天放假）跑到 15:00 那一輪，其他時間直接略過；手動帶日期執行不受限。
+  排程只在提醒排程執行日（休假前 2 天）～放假前一天 15:00 那一輪之間執行，其他時間直接略過；手動帶日期執行不受限。
 - 只記錄點連結的客人；直接打字回覆「已收到」的仍由內勤人工填寫，已讀狀態無法取得。
 - 設定：`LINE_REMINDER_API_KEY`（GitHub Secret 與 Streamlit Secrets，值與 Worker 的 `REMINDER_API_KEY` 相同）；
   Worker 網址不是預設值時另設 `LINE_REMINDER_API_URL`。

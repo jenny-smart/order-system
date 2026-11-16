@@ -15,8 +15,9 @@
 - 只記錄點連結確認的客人；直接打字回覆「已收到」的仍由內勤人工填寫。不發送 LINE、不修改後台。
 
 2026-11-16（修改）
-- 排程只在「放假前一天」（今天是工作天、明天放假）跑到 15:00 那一輪；其他日子或 16:00 以後
-  直接結束，不呼叫 Worker、不寫執行 Log。手動帶 --date 執行不受此限制。
+- 排程只在「提醒排程執行日（休假前 2 天，與 weekend_reminder_schedule 相同）～放假前一天 15:00 那一輪」
+  執行；其他日子或放假前一天 16:00 以後直接結束，不呼叫 Worker、不寫執行 Log。
+  休假日依 config/taiwan_work_calendar.json 判斷。手動帶 --date 執行不受此限制。
 
 手動執行：
     python -m shared.weekend_reminder_confirm_sync --dry-run
@@ -52,16 +53,25 @@ def _in_window(row, today: date) -> bool:
     return today - timedelta(days=DAYS_BEFORE) <= service_date <= today + timedelta(days=DAYS_AFTER)
 
 
-def in_run_window(now: datetime, is_workday=None) -> bool:
-    """排程只在放假前一天（今天工作天、明天放假）的 15:00 那一輪（含）以前執行。"""
-    if is_workday is None:
-        from tw_holidays import is_workday
-    today = now.date()
-    return (
-        now.hour <= LAST_RUN_HOUR
-        and is_workday(today)
-        and not is_workday(today + timedelta(days=1))
+def in_run_window(now: datetime, calendar=None) -> bool:
+    """排程只在提醒排程執行日～放假前一天 15:00 那一輪（含）之間執行。"""
+    from shared.weekend_reminder_schedule import (
+        LOOKAHEAD_DAYS, is_off_day, load_work_calendar, off_block_from, run_day_for,
     )
+
+    calendar = load_work_calendar() if calendar is None else calendar
+    today = now.date()
+    if is_off_day(today, calendar):
+        return False
+    for offset in range(1, LOOKAHEAD_DAYS + 1):
+        block = off_block_from(today + timedelta(days=offset), calendar)
+        if not block:
+            continue
+        last_workday = block[0] - timedelta(days=1)
+        if not run_day_for(block[0], calendar) <= today:
+            return False
+        return today < last_workday or now.hour <= LAST_RUN_HOUR
+    return False
 
 
 def candidate_rows(rows, today: date) -> list[dict]:
@@ -210,7 +220,7 @@ def main():
     if today is None:
         now = datetime.now(TAIPEI)
         if not in_run_window(now):
-            print(f"SKIP {now:%Y-%m-%d %H:%M} 不是放假前一天 {LAST_RUN_HOUR}:00 以前，不執行", flush=True)
+            print(f"SKIP {now:%Y-%m-%d %H:%M} 不在提醒執行日～放假前一天 {LAST_RUN_HOUR}:00 之間，不執行", flush=True)
             return
     try:
         run(today=today, dry_run=args.dry_run)

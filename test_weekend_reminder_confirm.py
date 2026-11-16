@@ -134,24 +134,27 @@ class SyncTest(unittest.TestCase):
 
 
 class ConfirmSyncRunWindowTest(unittest.TestCase):
-    @staticmethod
-    def _workday(day):
-        return day.weekday() < 5 and day != date(2026, 12, 25)
+    CALENDAR = {date(2026, 12, 25): True}  # 週五國定假日 → 12/25～12/27 休假，週三 12/23 排程
 
     def _ok(self, text):
-        return sync.in_run_window(datetime.fromisoformat(text), self._workday)
+        return sync.in_run_window(datetime.fromisoformat(text), self.CALENDAR)
 
-    def test_runs_on_day_before_weekend_until_three_pm(self):
-        self.assertTrue(self._ok("2026-11-13 10:00"))
-        self.assertTrue(self._ok("2026-11-13 15:05"))
+    def test_runs_from_schedule_day_until_three_pm_before_weekend(self):
+        self.assertFalse(self._ok("2026-11-11 12:00"))  # 週三：還沒排程
+        self.assertTrue(self._ok("2026-11-12 12:00"))   # 週四：排程執行日
+        self.assertTrue(self._ok("2026-11-12 18:00"))
+        self.assertTrue(self._ok("2026-11-13 15:05"))   # 週五最後一輪
         self.assertFalse(self._ok("2026-11-13 16:00"))
 
-    def test_skips_other_days(self):
-        self.assertFalse(self._ok("2026-11-16 10:00"))  # 週一
+    def test_skips_off_days_and_start_of_week(self):
         self.assertFalse(self._ok("2026-11-14 10:00"))  # 週六
+        self.assertFalse(self._ok("2026-11-16 10:00"))  # 週一
 
-    def test_runs_before_weekday_holiday(self):
-        self.assertTrue(self._ok("2026-12-24 11:00"))
+    def test_follows_holiday_block(self):
+        self.assertFalse(self._ok("2026-12-22 12:00"))
+        self.assertTrue(self._ok("2026-12-23 12:00"))
+        self.assertTrue(self._ok("2026-12-24 15:00"))
+        self.assertFalse(self._ok("2026-12-24 16:00"))
 
     def test_main_skips_outside_window_without_calling_worker(self):
         with patch.object(sync, "in_run_window", return_value=False), \
