@@ -7,6 +7,9 @@
 - 執行日＝區段第一天往前 2 天（一般週末是週四）；若那天本身是休假日，
   再往前推到最近的上班日，讓客服在上班時間處理。
 - 名單範圍＝整個休假區段（例：週五國定假日＋週末 → 週三執行，查週五～週日）。
+- 補跑日＝放假前一天（區段第一天的前一個上班日）：再查一次，只新增還沒在追蹤表的訂單，
+  新增列填「補登時間」，內勤工作表單「週末提醒」以淺黃底色標示（待付款一律淺橘底色）。
+  排程設定請在補跑日 10:00 派送（同一天多派送幾次也不會重複新增）。
 
 GitHub Actions 每天台北時間 11:00 呼叫一次（.github/workflows/weekend-reminder-schedule.yml），
 不是執行日就直接結束。只把待付款／已付款訂單寫入「週末服務提醒」追蹤表（並同步內勤工作表單「週末提醒」），
@@ -73,6 +76,16 @@ def blocks_due(today, calendar, lookahead=LOOKAHEAD_DAYS):
     return due
 
 
+def blocks_rerun(today, calendar):
+    """today 是放假前一天（且不是原本的執行日）時，回傳要補跑的休假區段清單 [(起, 迄)]。"""
+    if is_off_day(today, calendar):
+        return []
+    block = off_block_from(today + timedelta(days=1), calendar)
+    if not block or run_day_for(block[0], calendar) == today:
+        return []
+    return [block]
+
+
 def next_run(today, calendar, lookahead=LOOKAHEAD_DAYS):
     """下一個執行日與其休假區段（含 today），找不到時回傳 None。"""
     for offset in range(0, lookahead + 1):
@@ -98,7 +111,7 @@ def _log(status, area, date_text, message, traceback_text=""):
 def run(env="prod", today=None, regions=("台北",), dry_run=False, calendar=None):
     from accounts import ACCOUNTS
     from function.weekend_reminders import (
-        find_paid_weekend_orders, load_tracking_rows, merge_tracking_rows, save_tracking_rows,
+        LATE_ADDED_HEADER, find_paid_weekend_orders, load_tracking_rows, merge_tracking_rows, save_tracking_rows,
     )
 
     calendar = load_work_calendar() if calendar is None else calendar
@@ -107,6 +120,9 @@ def run(env="prod", today=None, regions=("台北",), dry_run=False, calendar=Non
         print(f"WARN 辦公日曆沒有 {today.year} 年資料，只依週六日判斷；請更新 config/taiwan_work_calendar.json", flush=True)
 
     blocks = blocks_due(today, calendar)
+    rerun = not blocks
+    if rerun:
+        blocks = blocks_rerun(today, calendar)
     if not blocks:
         upcoming = next_run(today + timedelta(days=1), calendar)
         hint = f"；下次執行日 {upcoming[0]}（服務 {upcoming[1][0][0]}～{upcoming[1][0][1]}）" if upcoming else ""
@@ -128,17 +144,21 @@ def run(env="prod", today=None, regions=("台北",), dry_run=False, calendar=Non
 
     merged = merge_tracking_rows(order_rows, load_tracking_rows())
     new_rows = [row for row in merged if row.get("資料狀態") == "新增"]
+    if rerun:
+        stamp = datetime.now(TAIPEI).strftime("%Y-%m-%d %H:%M")
+        new_rows = [{**row, LATE_ADDED_HEADER: stamp} for row in new_rows]
     saved = 0 if dry_run or not new_rows else save_tracking_rows(new_rows)
     date_text = "、".join(f"{start}～{end}" for start, end in blocks)
     message = (
-        f"服務 {date_text}：待付款／已付款 {len(merged)} 筆，新增 {len(new_rows)} 筆"
+        ("放假前一天補跑，" if rerun else "")
+        + f"服務 {date_text}：待付款／已付款 {len(merged)} 筆，新增 {len(new_rows)} 筆"
         + ("（試跑，未寫入）" if dry_run else f"，已寫入 {saved} 筆")
         + ("；" + "；".join(warnings) if warnings else "")
     )
     print(f"FINISH {message}", flush=True)
     if not dry_run:
         _log("警告" if warnings else "成功", "、".join(regions), date_text, message)
-    return {"due": True, "blocks": blocks, "paid": len(merged), "new": len(new_rows), "saved": saved}
+    return {"due": True, "rerun": rerun, "blocks": blocks, "paid": len(merged), "new": len(new_rows), "saved": saved}
 
 
 def main():

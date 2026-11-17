@@ -80,3 +80,32 @@ def test_run_saves_only_new_paid_rows():
     assert query.call_args.args[3:] == ("2026-11-07", "2026-11-08")
     assert save.call_args.args[0] == [merged[0]]
     assert result["new"] == 1 and result["saved"] == 1
+
+
+def test_rerun_on_day_before_holiday_block():
+    cal = _calendar()
+    assert sched.blocks_rerun(date(2026, 11, 6), cal) == [(date(2026, 11, 7), date(2026, 11, 8))]
+    assert sched.blocks_rerun(date(2026, 11, 5), cal) == []   # 週四是原本的執行日
+    assert sched.blocks_rerun(date(2026, 11, 7), cal) == []   # 週六本身放假
+    holiday = _calendar(off_weekdays={date(2026, 12, 25)})
+    assert sched.blocks_rerun(date(2026, 12, 24), holiday) == [(date(2026, 12, 25), date(2026, 12, 27))]
+
+
+def test_rerun_marks_new_rows_as_late_added():
+    merged = [
+        {"資料狀態": "新增", "訂單編號": "LC2", "服務日期": "2026-11-08"},
+        {"資料狀態": "已存在", "訂單編號": "LC1", "服務日期": "2026-11-07"},
+    ]
+    accounts = {"台北": {"email": "a@example.com", "password": "pw"}}
+    with patch("accounts.ACCOUNTS", accounts), \
+            patch("function.weekend_reminders.find_paid_weekend_orders",
+                  return_value=([], {"paid": 0, "hit_page_limit": False})), \
+            patch("function.weekend_reminders.load_tracking_rows", return_value=[]), \
+            patch("function.weekend_reminders.merge_tracking_rows", return_value=merged), \
+            patch("function.weekend_reminders.save_tracking_rows", return_value=1) as save, \
+            patch.object(sched, "_log"):
+        result = sched.run(today=date(2026, 11, 6), calendar=_calendar())
+    saved = save.call_args.args[0]
+    assert result["rerun"] is True
+    assert [row["訂單編號"] for row in saved] == ["LC2"]
+    assert saved[0]["補登時間"]

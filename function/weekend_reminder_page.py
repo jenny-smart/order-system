@@ -44,7 +44,10 @@ def render(backend_email, backend_password, env):
         if _next:
             _run_day, _blocks = _next
             _ranges = "、".join(f"{s}～{e}" for s, e in _blocks)
-            st.caption(f"⏰ 自動排程：{_run_day} 11:00 會自動把服務 {_ranges} 的待付款／已付款名單新增到追蹤表（不發送 LINE）。")
+            st.caption(
+                f"⏰ 自動排程：{_run_day} 會自動把服務 {_ranges} 的待付款／已付款名單新增到追蹤表（不發送 LINE）；"
+                "放假前一天 10:00 再補跑一次，補登的列在內勤「週末提醒」標淺黃底色，待付款標淺橘底色。"
+            )
     except Exception:
         pass
 
@@ -168,7 +171,7 @@ def render(backend_email, backend_password, env):
                         st.success(
                             f"已儲存 {len(_selected)} 筆：新增 {_new_count} 筆、"
                             f"更新 {_updated_count} 筆；同訂單編號＋服務日期不會重複，"
-                            "內勤工作表單「週末提醒」已同步（新增列排在該日最下方）。"
+                            "內勤工作表單「週末提醒」已同步（同一位客人排在上下列）。"
                         )
                         log_execution(
                             function_name="週末服務提醒：儲存勾選名單", status="成功",

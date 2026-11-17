@@ -2,7 +2,7 @@
 """週末服務前 LINE 提醒：後台查詢、訊息產生與 Google Sheet 追蹤。"""
 
 import re
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from bs4 import BeautifulSoup
@@ -24,8 +24,10 @@ SCHEDULED_TRACKING_HEADERS = [
 TRACKING_HEADERS = [
     "訂單編號", "服務日期", "服務時間", "姓名", "電話", "地址", "LINE", "通知內容",
     "訂單狀態", "預約發送時間", "通知狀態", "通知時間", "回覆狀態", "回覆時間", "回覆備註",
-    "發送錯誤", "最後更新",
+    "發送錯誤", "最後更新", "補登時間",
 ]
+# 補登時間：放假前一天 10:00 補跑排程時才新增的列（內勤分頁會加底色提醒客服）
+LATE_ADDED_HEADER = "補登時間"
 NOTICE_STATUSES = ["待通知", "已排程", "已通知", "發送失敗"]
 REPLY_STATUSES = ["未回覆", "已回覆", "需追蹤"]
 TRACKED_ORDER_STATUSES = {"待付款", "已付款", "取消訂單", "已退款"}
@@ -38,6 +40,10 @@ STAFF_SHEET_CATEGORY = "內勤工作表單"
 STAFF_SHEET_AREA = "台北"
 STAFF_SHEET_TITLE = "週末提醒"
 STAFF_HEADERS = ["訂單編號", "服務日期", "服務時間", "訂購人", "電話", "地址", "付款狀態", "通知內容"]
+# 內勤「週末提醒」A:H 底色：待付款（不確定要不要通知）優先，其次是前一天補登的新增列
+STAFF_PENDING_COLOR = {"red": 0.988, "green": 0.898, "blue": 0.804}   # 淺橘 #FCE5CD
+STAFF_LATE_COLOR = {"red": 1.0, "green": 0.949, "blue": 0.8}          # 淺黃 #FFF2CC
+STAFF_PLAIN_COLOR = {"red": 1.0, "green": 1.0, "blue": 1.0}
 
 
 def upcoming_weekend(reference=None):
@@ -646,25 +652,65 @@ def _tracking_message(raw, old):
         return ""
 
 
-def _name_order(row):
-    return (str(row.get("姓名", "") or ""), str(row.get("訂單編號", "") or ""))
+def _customer_name(row):
+    """同一位客人＝同訂購人姓名；姓名空白時用訂單編號（不和別人併在一起）。"""
+    name = str(row.get("姓名", "") or "").strip()
+    return name or f"#{row.get('訂單編號', '')}"
 
 
-def order_tracking_rows(old_rows, new_rows, resort=False):
-    """服務日期新→舊；同一天內既有列維持原順序，新增列依訂購人、訂單編號排在該日最下方。
-    resort=True（第一次改版）時，同一天全部依訂購人、訂單編號重排。"""
+def _date_time_order(row):
+    return (str(row.get("服務日期", "") or ""), str(row.get("服務時間", "") or ""), str(row.get("訂單編號", "") or ""))
+
+
+def _group_by_customer(rows):
+    """同一位客人排在上下列：客人依最晚服務日新→舊、姓名排序；同一人內依服務日期、時間舊→新。"""
+    groups = {}
+    for row in rows:
+        groups.setdefault(_customer_name(row), []).append(row)
+    names = sorted(groups)
+    names.sort(key=lambda name: max(r.get("服務日期", "") for r in groups[name]), reverse=True)
+    return [row for name in names for row in sorted(groups[name], key=_date_time_order)]
+
+
+def _block_of(service_date, calendar):
+    """服務日期所屬的休假區段（連續非上班日）第一天；上班日或日期格式不對就是自己。"""
+    from shared.weekend_reminder_schedule import is_off_day
+
+    try:
+        day = date.fromisoformat(str(service_date).strip())
+    except ValueError:
+        return str(service_date or "")
+    if is_off_day(day, calendar):
+        while is_off_day(day - timedelta(days=1), calendar):
+            day -= timedelta(days=1)
+    return day.isoformat()
+
+
+def order_tracking_rows(old_rows, new_rows, resort=False, calendar=None):
+    """休假區段（同一批）新→舊；同一批內既有列維持原順序。
+    新增列：同一位客人已在該批時接在他最後一列下面，其餘依客人分組排在該批最下方。
+    resort=True（第一次改版）時，同一批全部依客人分組重排。"""
+    if calendar is None:
+        from shared.weekend_reminder_schedule import load_work_calendar
+
+        calendar = load_work_calendar()
     blocks = {}
     for row in old_rows:
-        blocks.setdefault(row.get("服務日期", ""), []).append(row)
+        blocks.setdefault(_block_of(row.get("服務日期", ""), calendar), []).append(row)
     if resort:
-        for rows in blocks.values():
-            rows.sort(key=_name_order)
-    for row in sorted(new_rows, key=_name_order):
-        blocks.setdefault(row.get("服務日期", ""), []).append(row)
-    return [row for day in sorted(blocks, reverse=True) for row in blocks[day]]
+        blocks = {key: _group_by_customer(rows) for key, rows in blocks.items()}
+    for row in _group_by_customer(new_rows):
+        rows = blocks.setdefault(_block_of(row.get("服務日期", ""), calendar), [])
+        name = _customer_name(row)
+        same = [i for i, other in enumerate(rows) if _customer_name(other) == name]
+        if same:
+            rows.insert(same[-1] + 1, row)
+        else:
+            rows.append(row)
+    return [row for key in sorted(blocks, reverse=True) for row in blocks[key]]
 
 
-def plan_tracking_rows(existing_rows, rows, now, resort=False):
+def plan_tracking_rows(existing_rows, rows, now, resort=False, calendar=None):
     """依訂單編號＋服務日期 upsert；回傳（排序後全部列, 新增列的工作表列號, 本次寫入筆數）。"""
     existing = {}
     for row in existing_rows:
@@ -679,6 +725,8 @@ def plan_tracking_rows(existing_rows, rows, now, resort=False):
             row["通知內容"] = _tracking_message(raw, old)
         if not row["訂單狀態"]:
             row["訂單狀態"] = str(raw.get("訂單狀態") or old.get("訂單狀態") or "已付款")
+        if LATE_ADDED_HEADER not in raw:  # 頁面／其他程式的列沒有這欄：保留原值
+            row[LATE_ADDED_HEADER] = str(old.get(LATE_ADDED_HEADER, "") or "")
         if row["通知狀態"] == "已通知" and not row["通知時間"]:
             row["通知時間"] = old.get("通知時間") or now
         if row["回覆狀態"] == "已回覆" and not row["回覆時間"]:
@@ -689,7 +737,7 @@ def plan_tracking_rows(existing_rows, rows, now, resort=False):
     old_keys = list(existing)
     existing.update(incoming)
     all_rows = order_tracking_rows(
-        [existing[key] for key in old_keys], [incoming[key] for key in new_keys], resort=resort,
+        [existing[key] for key in old_keys], [incoming[key] for key in new_keys], resort=resort, calendar=calendar,
     )
     new_set = set(new_keys)
     new_positions = [index + 2 for index, row in enumerate(all_rows) if reminder_key(row) in new_set]
@@ -793,7 +841,36 @@ def is_importrange_layout(raw):
     return first.lstrip().lower().startswith("=importrange")
 
 
-def write_staff_sheet(worksheet, matrix, old_row_count):
+def staff_row_color(row):
+    if str(row.get("訂單狀態", "") or "").strip() == "待付款":
+        return STAFF_PENDING_COLOR
+    if str(row.get(LATE_ADDED_HEADER, "") or "").strip():
+        return STAFF_LATE_COLOR
+    return STAFF_PLAIN_COLOR
+
+
+def staff_color_requests(sheet_id, tracking_rows, total_rows):
+    """A:H 底色：先全部清成白色，再依追蹤表列（第 2 列起）上待付款／補登底色，連續同色合併成一個請求。"""
+    def paint(start, end, color):
+        return {"repeatCell": {
+            "range": {"sheetId": sheet_id, "startRowIndex": start, "endRowIndex": end,
+                      "startColumnIndex": 0, "endColumnIndex": len(STAFF_HEADERS)},
+            "cell": {"userEnteredFormat": {"backgroundColor": color}},
+            "fields": "userEnteredFormat.backgroundColor",
+        }}
+
+    requests = [paint(1, max(total_rows, 2), STAFF_PLAIN_COLOR)]
+    run_start, run_color = None, None
+    for index, row in enumerate(list(tracking_rows) + [None], start=1):
+        color = staff_row_color(row) if row is not None else None
+        if color != run_color:
+            if run_color not in (None, STAFF_PLAIN_COLOR):
+                requests.append(paint(run_start, index, run_color))
+            run_start, run_color = index, color
+    return requests
+
+
+def write_staff_sheet(worksheet, matrix, old_row_count, tracking_rows=()):
     from gspread.utils import rowcol_to_a1
 
     width = max(len(row) for row in matrix)
@@ -805,6 +882,9 @@ def write_staff_sheet(worksheet, matrix, old_row_count):
     worksheet.update(range_name="A1", values=matrix, value_input_option="USER_ENTERED")
     if old_row_count > len(matrix):
         worksheet.batch_clear([f"A{len(matrix) + 1}:{rowcol_to_a1(old_row_count, width)}"])
+    worksheet.spreadsheet.batch_update({
+        "requests": staff_color_requests(worksheet.id, tracking_rows, max(len(matrix), old_row_count)),
+    })
 
 
 def save_tracking_rows(rows):
@@ -820,8 +900,10 @@ def save_tracking_rows(rows):
     old_row_count = len(worksheet.get_all_values())
     worksheet.update(range_name="A1", values=matrix)
     if old_row_count > len(matrix):
-        worksheet.batch_clear([f"A{len(matrix) + 1}:Q{old_row_count}"])
+        from gspread.utils import rowcol_to_a1
+
+        worksheet.batch_clear([f"A{len(matrix) + 1}:{rowcol_to_a1(old_row_count, len(TRACKING_HEADERS))}"])
     write_staff_sheet(
-        staff, plan_staff_sheet(formatted, raw, all_rows, orders.BASE_URL), max(len(formatted), len(raw)),
+        staff, plan_staff_sheet(formatted, raw, all_rows, orders.BASE_URL), max(len(formatted), len(raw)), all_rows,
     )
     return count

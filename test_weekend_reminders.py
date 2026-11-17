@@ -100,24 +100,55 @@ class WeekendReminderTrackingTest(unittest.TestCase):
         self.assertEqual(positions, [2, 3])
         self.assertEqual(count, 3)
 
-    def test_new_rows_go_to_bottom_of_their_day_sorted_by_name(self):
+    def test_new_rows_grouped_by_customer_at_bottom_of_weekend(self):
         def row(no, day, name):
             r = _tracked(no, day)
             r["姓名"] = name
             return r
         existing = [row("LC9", "2026-11-15", "王"), row("LC8", "2026-11-15", "林"), row("LC7", "2026-11-14", "陳")]
         incoming = [row("LC5", "2026-11-15", "B"), row("LC6", "2026-11-15", "A"), row("LC4", "2026-11-14", "A")]
-        all_rows, positions, _ = plan_tracking_rows(existing, incoming, "now")
-        self.assertEqual([r["訂單編號"] for r in all_rows], ["LC9", "LC8", "LC6", "LC5", "LC7", "LC4"])
-        self.assertEqual(positions, [4, 5, 7])
+        all_rows, positions, _ = plan_tracking_rows(existing, incoming, "now", calendar={})
+        # 週六日同一批；A 的週六、週日排在一起（日期舊→新）
+        self.assertEqual([r["訂單編號"] for r in all_rows], ["LC9", "LC8", "LC7", "LC4", "LC6", "LC5"])
+        self.assertEqual(positions, [5, 6, 7])
+
+    def test_new_row_joins_same_customer_already_listed(self):
+        def row(no, day, name):
+            r = _tracked(no, day)
+            r["姓名"] = name
+            return r
+        existing = [row("LC9", "2026-11-15", "王"), row("LC8", "2026-11-14", "林"), row("LC7", "2026-11-14", "陳")]
+        all_rows, positions, _ = plan_tracking_rows(existing, [row("LC5", "2026-11-15", "林")], "now", calendar={})
+        self.assertEqual([r["訂單編號"] for r in all_rows], ["LC9", "LC8", "LC5", "LC7"])
+        self.assertEqual(positions, [4])
+
+    def test_holiday_block_is_one_batch_and_blank_names_not_grouped(self):
+        calendar = {__import__("datetime").date(2026, 12, 25): True}
+        def row(no, day, name=""):
+            r = _tracked(no, day)
+            r["姓名"] = name
+            return r
+        incoming = [row("LC1", "2026-12-25", "A"), row("LC2", "2026-12-27", "A"),
+                    row("LC3", "2026-12-26"), row("LC4", "2026-12-26"), row("LC5", "2026-12-19", "A")]
+        all_rows, _, _ = plan_tracking_rows([], incoming, "now", calendar=calendar)
+        self.assertEqual([r["訂單編號"] for r in all_rows], ["LC1", "LC2", "LC3", "LC4", "LC5"])
 
     def test_first_switch_resorts_by_name(self):
         def row(no, name):
             r = _tracked(no, "2026-11-15")
             r["姓名"] = name
             return r
-        all_rows, _, _ = plan_tracking_rows([row("LC2", "B"), row("LC1", "A")], [row("LC3", "C")], "now", resort=True)
+        all_rows, _, _ = plan_tracking_rows(
+            [row("LC2", "B"), row("LC1", "A")], [row("LC3", "C")], "now", resort=True, calendar={},
+        )
         self.assertEqual([r["訂單編號"] for r in all_rows], ["LC1", "LC2", "LC3"])
+
+    def test_late_added_mark_kept_when_page_saves_row(self):
+        old = _tracked("LC1", "2026-11-15")
+        old["補登時間"] = "2026-11-13 10:00"
+        page_row = {k: v for k, v in _tracked("LC1", "2026-11-15", reply="已回覆").items()}
+        all_rows, _, _ = plan_tracking_rows([old], [page_row], "now", calendar={})
+        self.assertEqual(all_rows[0]["補登時間"], "2026-11-13 10:00")
 
     def test_pending_orders_are_listed_with_payment_status(self):
         orders = [{"order_no": "LC1", "service_date": "2026-11-15", "order_status": "待付款", "message": "m"},
@@ -152,6 +183,24 @@ class StaffSheetTest(unittest.TestCase):
         self.assertEqual(m[2][3], "'林")
         self.assertEqual(m[2][8:], ["'OK", "", "'已確認"])
         self.assertEqual(m[3][8], "'手動列")  # 追蹤表沒有的手動列保留
+
+    def test_staff_colors_pending_and_late_added_rows(self):
+        from function.weekend_reminders import (
+            STAFF_LATE_COLOR, STAFF_PENDING_COLOR, staff_color_requests,
+        )
+        rows = [
+            {"訂單狀態": "已付款"}, {"訂單狀態": "待付款"}, {"訂單狀態": "已付款", "補登時間": "x"},
+            {"訂單狀態": "已付款", "補登時間": "x"}, {"訂單狀態": "待付款", "補登時間": "x"},
+        ]
+        requests = staff_color_requests(7, rows, 8)
+        painted = [
+            (r["repeatCell"]["range"]["startRowIndex"], r["repeatCell"]["range"]["endRowIndex"],
+             r["repeatCell"]["cell"]["userEnteredFormat"]["backgroundColor"])
+            for r in requests
+        ]
+        self.assertEqual(painted[0][:2], (1, 8))  # 先清白 A2:H8
+        self.assertEqual(painted[1:], [(2, 3, STAFF_PENDING_COLOR), (3, 5, STAFF_LATE_COLOR), (5, 6, STAFF_PENDING_COLOR)])
+        self.assertEqual(requests[1]["repeatCell"]["range"]["endColumnIndex"], 8)
 
     def test_row_runs_groups_consecutive_positions(self):
         self.assertEqual(_row_runs([2, 3, 4, 7, 9, 10]), [(2, 3), (7, 1), (9, 2)])
