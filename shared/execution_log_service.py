@@ -1,8 +1,8 @@
 # ============================================================
 # 檔名：shared/execution_log_service.py
 # 功能：訂單系統各項「異動操作」（建立/取消訂單、寄信、同步日曆、
-#       儲存備註狀態…）統一寫入本專案自己的執行 Log 試算表。
-#       此 Log 完全獨立於其他系統，不與任何外部系統共用或同步。
+#       儲存備註狀態…）統一寫入主控表「order-system執行Log-年度」（shared/unified_log.py）。
+#       2026-11-17 起不再寫舊的「order-system」試算表（SPREADSHEET_ID 只留給 _append_row 相容用）。
 # 更新時間：2026-08-22
 # ============================================================
 # -*- coding: utf-8 -*-
@@ -84,21 +84,8 @@ def log_execution(
         unified_message = f"{unified_message}\n{traceback_text}".strip()
     unified_log.write(function=function_name, run_type=run_type, area=area, period=date, target=target,
                       status=_normalize_status(status), message=unified_message)
-    row = [
-        _now_tw(),
-        str(function_name or ""),
-        str(run_type or ""),
-        str(area or ""),
-        str(date or ""),
-        str(target or ""),
-        _normalize_status(status),
-        unified_message,
-    ]
-    # 在背景執行緒寫入，不讓畫面等 Google Sheets（非 daemon：命令列結束前會寫完）。
-    try:
-        threading.Thread(target=_append_row, args=(row,), name="execution-log", daemon=False).start()
-    except Exception:
-        _append_row(row)
+    # 2026-11-17 Jenny：執行 Log 只寫主控表「order-system執行Log-年度」（上面 unified_log），
+    # 不再另抄一份到舊的「order-system」試算表（服務帳號沒權限，每次都印 403 錯誤）。
 
 
 def _append_row(row: list) -> None:
