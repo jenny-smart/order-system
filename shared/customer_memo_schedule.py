@@ -313,6 +313,19 @@ def build_calendar_event(result: dict, window: tuple[datetime, datetime], now: d
     )
 
 
+def result_lines(result: dict) -> list[str]:
+    """每區、每種備註各一行（2026-11-17 Jenny：【排程】行事曆不要全擠在一行）。"""
+    lines = []
+    for region, item in result.items():
+        if item.get("error"):
+            lines.append(f"{region}／錯誤：{item['error']}")
+            continue
+        for label, found, saved in (("客人備註", len(item["rows"]), item["saved"]),
+                                    ("客服備註", len(item["notice_rows"]), item["notice_saved"])):
+            lines.append(f"{region}／{label}：貼入 {saved} 筆（符合 {found} 筆）" if found else f"{region}／{label}：沒有資料")
+    return lines
+
+
 def write_calendar(result: dict, window, now: datetime, service_factory=None) -> list[str]:
     """寫行事曆；失敗只回報，不影響貼表結果。"""
     from shared.atm_match_reconcile_schedule import _calendar_service, _insert_event, service_for
@@ -417,6 +430,8 @@ def run(env: str = "prod", today: date | None = None, regions=REGIONS, dry_run: 
     if errors:
         message += "；錯誤 " + "；".join(errors)
     print(f"FINISH {message}", flush=True)
+    for line in result_lines(result):
+        print(line, flush=True)
     if not dry_run:
         _log("失敗" if errors else "成功", message)
     if errors and len(errors) == len(result):

@@ -154,6 +154,12 @@ def run(env: str = "prod", today: date | None = None, regions=REGIONS, dry_run: 
     if errors:
         message += "；錯誤 " + "；".join(errors)
     print(f"FINISH {message}", flush=True)
+    for region, item in result.items():  # 每區一行（2026-11-17 Jenny）
+        if item["error"]:
+            print(f"{region}／儲值金客服備註空白：錯誤 {item['error']}", flush=True)
+        else:
+            print(f"{region}／儲值金客服備註空白：" + (f"已找到 {len(item['rows'])} 筆" if item["rows"] else "沒有資料"),
+                  flush=True)
     if not dry_run:
         _log("失敗" if errors else "成功", message)
     if errors and len(errors) == len(result):

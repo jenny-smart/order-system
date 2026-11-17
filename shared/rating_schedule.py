@@ -366,6 +366,22 @@ def build_calendar_event(job: str, result: dict, window, now: datetime) -> dict:
                 start=now, reminder_minutes=[0], replace_prefix=prefix)
 
 
+def result_lines(job: str, result: dict) -> list[str]:
+    """每區一行（2026-11-17 Jenny：【排程】行事曆不要全擠在一行）。"""
+    label = "清潔客訴" if job == "complaint" else "評價預約"
+    lines = []
+    for region, item in result.items():
+        if item.get("error"):
+            lines.append(f"{region}／{label}：錯誤 {item['error']}")
+        elif item.get("found"):
+            skipped = item["found"] - item.get("saved", 0)
+            lines.append(f"{region}／{label}：新增 {item.get('saved', 0)} 筆（符合 {item['found']} 筆"
+                         + (f"，已登記略過 {skipped} 筆" if skipped else "") + "）")
+        else:
+            lines.append(f"{region}／{label}：沒有資料")
+    return lines
+
+
 def write_calendar(job: str, result: dict, window, now: datetime, service_factory=None) -> list[str]:
     from shared.atm_match_reconcile_schedule import _calendar_service, _insert_event, service_for
 
@@ -537,6 +553,8 @@ def run(job: str, env: str = "prod", today: date | None = None, regions=REGIONS,
     if errors:
         message += "；錯誤 " + "；".join(errors)
     print(f"FINISH {message}", flush=True)
+    for line in result_lines(job, result):
+        print(line, flush=True)
     if not dry_run:
         _log(job, "失敗" if errors else "成功", message)
     if errors and len(errors) == len(result):

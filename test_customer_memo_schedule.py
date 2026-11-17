@@ -269,3 +269,11 @@ class CalendarTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_result_lines_one_line_per_region_and_memo():
+    from shared import customer_memo_schedule as cms
+    result = {"台北": {"rows": [1] * 6, "saved": 6, "notice_rows": [1] * 8, "notice_saved": 8, "error": ""},
+              "台中": {"rows": [1], "saved": 1, "notice_rows": [], "notice_saved": 0, "error": ""}}
+    assert cms.result_lines(result) == ["台北／客人備註：貼入 6 筆（符合 6 筆）", "台北／客服備註：貼入 8 筆（符合 8 筆）",
+                                        "台中／客人備註：貼入 1 筆（符合 1 筆）", "台中／客服備註：沒有資料"]

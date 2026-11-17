@@ -194,3 +194,11 @@ class RelinkTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_result_lines_one_line_per_region():
+    from shared import rating_schedule as rs
+    result = {"台北": {"found": 2, "saved": 1, "error": ""}, "台中": {"found": 0, "saved": 0, "error": ""}}
+    assert rs.result_lines("complaint", result) == ["台北／清潔客訴：新增 1 筆（符合 2 筆，已登記略過 1 筆）",
+                                                    "台中／清潔客訴：沒有資料"]
+    assert rs.result_lines("booking", {"台北": {"found": 0, "saved": 0, "error": "X: y"}}) == ["台北／評價預約：錯誤 X: y"]
