@@ -57,6 +57,22 @@ class OccupiedStaffLookupTests(unittest.TestCase):
         self.assertEqual((parsed["count"], parsed["names"]), (0, set()))
         self.assertIsNone(q._parse_schedule_unassigned_staff(html, "2026-12-11", "09:00-16:00"))
 
+    def test_partial_parse_does_not_stop(self):
+        html = """
+        <table>
+          <tr><th>日期</th><th>09:00-16:00</th></tr>
+          <tr><td>12-06（日）</td><td>
+            <p style="background:#616161"><span>未配班 3 人</span>
+              <span>6檸檬人40</span><span>48汪才開3</span><span>48 Mary2</span></p>
+          </td></tr>
+        </table>
+        """
+        resp = type("R", (), {"status_code": 200, "text": html, "url": "x/schedule"})()
+        session = type("S", (), {"get": lambda self, *a, **k: resp})()
+        parsed = q._get_unassigned_staff_for_period(session, "b", "2026-12-06", "09:00-16:00")
+        self.assertEqual(parsed["names"], {"檸檬人4", "汪才開"})
+        self.assertIn("只辨識到 2 人", parsed["warning"])
+
     def test_finds_only_overlapping_other_order_staff(self):
         html = """
         <table>
