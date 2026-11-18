@@ -1,9 +1,13 @@
 # ============================================================
 # 檔名：quick_order.py
-# 版本：v8.74
-# 最後更新：2026-11-15
+# 版本：v8.75
+# 最後更新：2026-11-18
 #
 # Change Log
+# v8.75
+# - 訂單轉換第一段：班表未配班名單少辨識到幾位時不再整個停止換班（名單是可用人員
+#   白名單，少辨識只會讓可用的人變少、不足時補勾檸檬人，不會動到其他客人的專員）；
+#   畫面列出未辨識的標籤。另外改用區塊文字逐詞補解析。解析人數比畫面多才停止。
 # v8.74
 # - 訂單轉換有差額新增的清潔異動：加收列 R 欄（付款方式）改依原訂單付款方式
 #   填入（ATM／信用卡；VIP 仍為儲值金）。付款方式（加收）或退款方式（退款）
@@ -730,15 +734,29 @@ def _parse_schedule_unassigned_staff(html_text, service_date, period_s):
                         continue
                     expected_count = int(count_match.group(1))
                     names = set()
+                    unparsed = []
                     leaf_spans = [
                         span for span in block.find_all("span")
                         if not span.find("span") and not span.find_parent("a")
                     ]
                     for span in leaf_spans:
-                        name = _unassigned_label_staff_name(span.get_text(" ", strip=True))
+                        label = span.get_text(" ", strip=True)
+                        name = _unassigned_label_staff_name(label)
                         if name:
                             names.add(_staff_name_key(name))
-                    return {"count": expected_count, "names": names, "raw_text": block_text}
+                        elif label and not re.search(r"未配班", label):
+                            unparsed.append(label)
+                    # v8.75：span 結構不同時（例如名字包在 <a> 或 <br> 分隔），改用區塊文字逐詞補解析。
+                    if len(names) < expected_count:
+                        tail = block_text[count_match.end():]
+                        for token in re.split(r"[\s,，、]+", tail):
+                            name = _unassigned_label_staff_name(token)
+                            if name:
+                                names.add(_staff_name_key(name))
+                            elif token and token not in unparsed:
+                                unparsed.append(token)
+                    return {"count": expected_count, "names": names, "raw_text": block_text,
+                            "unparsed": unparsed}
     # v8.72：找得到該日該時段的格子、只是沒有灰底區塊＝這個時段沒有人未配班（0 人），
     # 不是讀取失敗。舊版回傳 None，讓訂單轉換第一段在空白時段直接停止、不去補檸檬人。
     if found_cell:
@@ -766,10 +784,24 @@ def _get_unassigned_staff_for_period(session, base_url, service_date, period_s):
         raise RuntimeError(f"班表找不到 {service_date} {period_s} 的未配班區塊")
     expected_count = int(parsed.get("count") or 0)
     names = set(parsed.get("names") or set())
-    if len(names) != expected_count:
+    # v8.75：名單是「可以用的人」白名單，少解析到幾位只會讓可用的人變少（不足時會補勾
+    # 檸檬人），不會動到別人的專員，所以不再整個停止；改成記下警告讓畫面顯示。
+    # 解析到的人數比畫面多才代表解析錯誤，仍停止。
+    if len(names) > expected_count:
         raise RuntimeError(
-            f"未配班名單不完整：畫面顯示 {expected_count} 人，但只解析到 {len(names)} 人"
+            f"未配班名單解析異常：畫面顯示 {expected_count} 人，卻解析到 {len(names)} 人"
         )
+    if len(names) < expected_count:
+        missing = "、".join(parsed.get("unparsed") or []) or "（無法辨識）"
+        parsed["warning"] = (
+            f"未配班顯示 {expected_count} 人，只辨識到 {len(names)} 人"
+            f"（未辨識：{missing}），未辨識的人不會被使用"
+        )
+        try:
+            import streamlit as _st
+            _st.caption(f"ℹ️ {service_date} {period_s}：{parsed['warning']}")
+        except Exception:
+            pass
     return parsed
 
 
