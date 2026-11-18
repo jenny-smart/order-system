@@ -119,11 +119,18 @@ class WeekendReminderTrackingTest(unittest.TestCase):
         all_rows, _, _ = plan_tracking_rows([row("LC2", "B"), row("LC1", "A")], [row("LC3", "C")], "now", resort=True)
         self.assertEqual([r["訂單編號"] for r in all_rows], ["LC1", "LC2", "LC3"])
 
-    def test_pending_orders_are_listed_with_payment_status(self):
+    def test_only_paid_orders_are_listed(self):
+        # 2026-11-19 Jenny：待付款不放名單
         orders = [{"order_no": "LC1", "service_date": "2026-11-15", "order_status": "待付款", "message": "m"},
-                  {"order_no": "LC2", "service_date": "2026-11-15", "order_status": "取消訂單", "message": ""}]
+                  {"order_no": "LC2", "service_date": "2026-11-15", "order_status": "取消訂單", "message": ""},
+                  {"order_no": "LC3", "service_date": "2026-11-15", "order_status": "已付款", "message": "m3"}]
         merged = merge_tracking_rows(orders, [])
-        self.assertEqual([(r["訂單編號"], r["訂單狀態"]) for r in merged], [("LC1", "待付款")])
+        self.assertEqual([(r["訂單編號"], r["訂單狀態"]) for r in merged], [("LC3", "已付款")])
+
+    def test_existing_confirm_link_is_stripped(self):
+        from function.weekend_reminders import strip_confirm_link
+        old = "專員…\n\n為確認您已收到提醒，請回覆「已收到」，或點以下連結確認：\nhttps://x.workers.dev/c/LC1/20261122/abc\n謝謝您。\n\n💡 貼心提醒"
+        self.assertEqual(strip_confirm_link(old), "專員…\n\n為確認您已收到提醒，請回覆「已收到」，謝謝您。\n\n💡 貼心提醒")
 
 
 class StaffSheetTest(unittest.TestCase):
