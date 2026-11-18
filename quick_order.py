@@ -1,9 +1,12 @@
 # ============================================================
 # 檔名：quick_order.py
-# 版本：v8.77
+# 版本：v8.78
 # 最後更新：2026-11-18
 #
 # Change Log
+# v8.78
+# - 訂單轉換有差額：只有退款才新增清潔異動；需加收（新訂單超過原訂單）不放清潔異動，
+#   由新訂單直接向客人收款。
 # v8.77
 # - 舊客成單（既有地址）沒指定發票時，改沿用這支電話上一次訂單的發票設定（來源
 #   順序同儲值金購買：儲值金→VIP→專業清潔，已付款且信用卡／ATM 的最近一筆），
@@ -2393,19 +2396,21 @@ def convert_order_stage1_reassign_original(
 
 
 def _append_conversion_change_order(stage1_result, all_nos_str, refund_amount, charge_amount):
-    """v8.73：訂單轉換完要退款或加收時，直接新增一筆清潔異動到該地區「清潔異動」工作表。
+    """v8.73／v8.78：訂單轉換完要退款時，直接新增一筆清潔異動到該地區「清潔異動」工作表。
 
     - 退款（新訂單合計少於原訂單A）：異動服務退款，狀態待退款（VIP 待返儲值金），
       S 欄＝退款金額，R 欄依原訂單付款方式（ATM 會同步 ATM 工作表負數）。
-    - 加收（新訂單合計超過原訂單A）：異動服務收款，狀態待收款（VIP 待扣儲值金），
-      N 欄＝加收金額，R 欄依原訂單付款方式（ATM 會同步 ATM 工作表正數）。
-    訂單編號（G 欄）都寫原訂單A，備註（J 欄）寫轉換的合併單號與金額。
+    - 加收（新訂單合計超過原訂單A）：v8.78 起不放清潔異動，差額由新訂單直接向客人收款。
+    訂單編號（G 欄）寫原訂單A，備註（J 欄）寫轉換的合併單號與金額。
     """
     from memo_system import change_order as co
 
     refund_amount = max(int(refund_amount or 0), 0)
     charge_amount = max(int(charge_amount or 0), 0)
-    if not refund_amount and not charge_amount:
+    if not refund_amount:
+        if charge_amount:
+            return {"ok": True, "skipped": True,
+                    "message": f"新訂單超過原訂單，差額 {charge_amount} 元由新訂單向客人收款，不需新增清潔異動"}
         return {"ok": True, "skipped": True, "message": "金額一致，不需新增清潔異動"}
     order_no_a = stage1_result["order_no_a"]
     session = stage1_result["session"]
@@ -2435,22 +2440,13 @@ def _append_conversion_change_order(stage1_result, all_nos_str, refund_amount, c
         "H": order.get("customer_name", ""),
         "I": co._format_service_datetime(service_date, order.get("period_text", "")) if service_date else "",
     }
-    if refund_amount:
-        row = {**base,
-               "B": "待返儲值金" if is_vip else co.STATUS_PENDING_REFUND, "C": co.TYPE_REFUND,
-               "J": co._with_change_date(f"訂單轉換 {all_nos_str} 合併服務，新訂單合計少於原訂單，退費 ${refund_amount}"),
-               "R": co._refund_payway(order), "S": refund_amount,
-               "X": order.get("invoice_no", ""),
-               "Y": "三聯" if order.get("carrier_type") == "三聯式" else "二聯"}
-        kind = f"待退款 {refund_amount} 元"
-    else:
-        row = {**base,
-               "B": "待扣儲值金" if is_vip else co.STATUS_PENDING_CHARGE, "C": co.TYPE_CHARGE,
-               "J": co._with_change_date(f"訂單轉換 {all_nos_str} 合併服務，新訂單合計超過原訂單，加收 ${charge_amount}"),
-               "N": charge_amount,
-               # 付款方式依原訂單；ATM 會同步新增至 ATM 工作表（正數）
-               "R": "儲值金" if is_vip else co._refund_payway(order)}
-        kind = f"待收款 {charge_amount} 元"
+    row = {**base,
+           "B": "待返儲值金" if is_vip else co.STATUS_PENDING_REFUND, "C": co.TYPE_REFUND,
+           "J": co._with_change_date(f"訂單轉換 {all_nos_str} 合併服務，新訂單合計少於原訂單，退費 ${refund_amount}"),
+           "R": co._refund_payway(order), "S": refund_amount,
+           "X": order.get("invoice_no", ""),
+           "Y": "三聯" if order.get("carrier_type") == "三聯式" else "二聯"}
+    kind = f"待退款 {refund_amount} 元"
     res = co.append_rows_to_sheet(region, [row])
     if res.get("written"):
         msg = f"已新增清潔異動（{region}，第 {res.get('start_row')} 列）：{row['B']}／{kind}"

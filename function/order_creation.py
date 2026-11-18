@@ -1447,6 +1447,8 @@ def render_order_conversion(backend_email, backend_password, env):
         _co = conv_stage2.get("change_order_result")
         if _co and not _co.get("skipped"):
             (st.success if _co.get("ok") else st.error)(f"🧾 {_co.get('message', '')}")
+        elif _co and "向客人收款" in str(_co.get("message", "")):
+            st.info(f"💰 {_co['message']}")
         elif _orig_amount:
             st.success(f"✅ 金額比對：原訂單A {_orig_amount}元 ＝ 新訂單合計 {_new_amt_detail} = {_new_amount}元")
         else:
