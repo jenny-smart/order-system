@@ -37,7 +37,8 @@ REMINDER_ORDER_STATUSES = ("已付款",)
 STAFF_SHEET_CATEGORY = "內勤工作表單"
 STAFF_SHEET_AREA = "台北"
 STAFF_SHEET_TITLE = "週末提醒"
-STAFF_HEADERS = ["訂單編號", "服務日期", "服務時間", "訂購人", "電話", "地址", "付款狀態", "通知內容"]
+# 2026-11-19 Jenny：通知內容前加一欄 LINE 網址（純網址），發送時不用再從訂購人連結拆網址
+STAFF_HEADERS = ["訂單編號", "服務日期", "服務時間", "訂購人", "電話", "地址", "付款狀態", "LINE網址", "通知內容"]
 
 
 def upcoming_weekend(reference=None):
@@ -739,7 +740,7 @@ def _manual_cell(raw, formatted):
 
 
 def staff_data_cells(row, base_url):
-    """「週末提醒」A:H：訂購人連 LINE 聊天、電話連後台電話搜尋結果。"""
+    """「週末提醒」A:I：訂購人連 LINE 聊天、電話連後台電話搜尋結果、H 欄放純 LINE 網址。"""
     from shared.customer_memo_schedule import name_cell, phone_cell
 
     name = str(row.get("姓名", "") or "")
@@ -749,21 +750,28 @@ def staff_data_cells(row, base_url):
         _text_cell(row.get("訂單編號")), _text_cell(row.get("服務日期")), _text_cell(row.get("服務時間")),
         name_cell(name, line_url) if line_url and name else _text_cell(name),
         phone_cell(base_url, phone) if phone else "",
-        _text_cell(row.get("地址")), _text_cell(row.get("訂單狀態")), _text_cell(strip_confirm_link(row.get("通知內容"))),
+        _text_cell(row.get("地址")), _text_cell(row.get("訂單狀態")), _text_cell(line_url),
+        _text_cell(strip_confirm_link(row.get("通知內容"))),
     ]
 
 
 def plan_staff_sheet(formatted, raw, tracking_rows, base_url):
-    """內勤「週末提醒」整頁要寫入的值：A:H 依追蹤表重建，I 欄起依訂單編號＋服務日期對齊搬移。
+    """內勤「週末提醒」整頁要寫入的值：A:I 依追蹤表重建，J 欄起依訂單編號＋服務日期對齊搬移。
     只放付款狀態為「已付款」的列；分頁上有、追蹤表沒有的列（手動加的）保留在最下方，不會遺失。"""
     width = len(STAFF_HEADERS)
-    total = max([len(r) for r in formatted] + [len(r) for r in raw] + [width])
+    # 舊版分頁沒有「LINE網址」欄（通知內容在 H 欄）：手動欄從「通知內容」下一欄算起，改版時整批往右移一欄
+    header = [str(v).strip() for v in (formatted[0] if formatted else [])]
+    old_width = header.index("通知內容") + 1 if "通知內容" in header else width
+    legacy = old_width < width
+    total = max([len(r) for r in formatted] + [len(r) for r in raw] + [old_width])
 
     def cell(rows, i, j):
         return rows[i][j] if i < len(rows) and j < len(rows[i]) else ""
 
     def manual(i):
-        return [_manual_cell(cell(raw, i, j), cell(formatted, i, j)) for j in range(width, total)]
+        return [_manual_cell(cell(raw, i, j), cell(formatted, i, j)) for j in range(old_width, total)]
+
+    pad = total - old_width
 
     by_key, extras = {}, []
     for i in range(1, max(len(formatted), len(raw))):
@@ -784,10 +792,12 @@ def plan_staff_sheet(formatted, raw, tracking_rows, base_url):
         # 2026-11-19 Jenny：內勤名單只放已付款；待付款、已退款、取消的列整列移除（追蹤表仍保留紀錄）
         if str(row.get("訂單狀態") or "已付款").strip() != "已付款":
             continue
-        matrix.append(staff_data_cells(row, base_url) + (found[1] if found else [""] * (total - width)))
+        matrix.append(staff_data_cells(row, base_url) + (found[1] if found else [""] * pad))
     leftovers = [item for key, item in by_key.items() if key not in used] + extras
     for i, cells in sorted(leftovers):
-        data = [_manual_cell(cell(raw, i, j), cell(formatted, i, j)) for j in range(width)]
+        data = [_manual_cell(cell(raw, i, j), cell(formatted, i, j)) for j in range(old_width)]
+        if legacy:  # 舊版：在通知內容前補空白的 LINE網址 欄
+            data = data[:-1] + [""] * (width - old_width) + data[-1:]
         matrix.append(data + cells)
     return matrix
 
@@ -828,7 +838,7 @@ def write_staff_sheet(worksheet, matrix, old_row_count):
 
 def save_tracking_rows(rows):
     """依訂單編號＋服務日期 upsert；狀態首次改變時自動補台北時間。
-    寫入追蹤表後，同步重建內勤工作表單「週末提醒」A:H（I 欄起依訂單編號＋服務日期對齊）。"""
+    寫入追蹤表後，同步重建內勤工作表單「週末提醒」A:I（J 欄起依訂單編號＋服務日期對齊）。"""
     worksheet = _tracking_worksheet()
     existing_rows = load_tracking_rows()
     staff = _staff_worksheet()
