@@ -1,10 +1,14 @@
 # ============================================================
 # 檔名：orders.py
-# 版本：v2026.11.12-1
+# 版本：v2026.11.18-1
 # 模組：批次建單核心引擎（Google Sheet → 後台訂單，供 ordersapp.py 呼叫）
 # 最後更新：2026-10-17
 #
 # Change Log
+# v2026.11.18-1
+# - 修正 fetch_recent_service_records：「近 N 次服務紀錄」改以查詢日（台灣時間今天）
+#   為基準日，只取「查詢日當天及之前」的服務，不再把未來已排班的訂單算進來
+#   （原本只依日期排序取前 N 筆，會出現 2027 年等未來日期）。
 # v2026.11.12-1
 # - find_pending_stored_value_orders 新增 created_from／created_to（依訂購時間精確到分鐘篩選，
 #   給每日 08:20 儲值金客服備註空白排程 shared/stored_value_notice_schedule.py 使用），
@@ -724,13 +728,17 @@ def submit_member_preferences(session, member_id, edit_page, preferred_gender, l
     return True
 
 
-def fetch_recent_service_records(session, phone, name, n=5):
+def fetch_recent_service_records(session, phone, name, n=5, today=None):
     """
     v2026.07.07 新功能：查詢某會員近 N 筆「有實際排班」的服務紀錄
     （服務日期＋專員姓名），用於畫面上讓客服勾選要設定喜愛/不喜愛的專員。
     只抓有 shift（schedule/edit 連結）的訂單，儲值金購買/尚未排班的訂單
     沒有專員資訊，直接跳過。
+    v2026.11.18 修正：以查詢日（today，預設為台灣時間今天，格式 YYYY-MM-DD）為
+    基準日，只列出查詢日當天及之前的服務，未來已排班的訂單不算在「近 N 次」內。
     """
+    if not today:
+        today = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
     resp = session.get(
         f"{BASE_URL}/purchase",
         params={"phone": phone, "name": name},
@@ -770,6 +778,8 @@ def fetch_recent_service_records(session, phone, name, n=5):
             "cleaner_names": cleaner_names,
             "order_no": order_no_m.group(0) if order_no_m else "",
         })
+    # 只保留查詢日（含）以前的服務；日期抓不到的無法判斷，一併排除。
+    records = [r for r in records if r["date_clean"] and r["date_clean"] <= today]
     records.sort(key=lambda r: r["date_clean"], reverse=True)
     return records[:n]
 
