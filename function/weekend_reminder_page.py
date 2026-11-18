@@ -107,20 +107,22 @@ def render(backend_email, backend_password, env):
             ]
             _edited = st.data_editor(
                 _editable, use_container_width=True, hide_index=True, key="wr_editor",
+                # 2026-11-19 Jenny：欄位順序對齊內勤工作表單「週末提醒」A～H，進度欄放最後
                 column_order=[
-                    "選取", "資料狀態", "訂單編號", "服務日期", "姓名", "訂單狀態",
-                    "通知狀態", "通知時間",
-                    "回覆狀態", "回覆時間", "LINE",
-                    "服務時間", "電話", "地址",
+                    "選取", "資料狀態",
+                    "訂單編號", "服務日期", "服務時間", "姓名", "LINE", "電話", "地址", "訂單狀態", "通知內容",
+                    "通知狀態", "通知時間", "回覆狀態", "回覆時間",
                     "回覆備註", "發送錯誤", "最後更新",
                 ],
                 disabled=[
                     "訂單狀態", "訂單編號", "服務日期", "服務時間", "姓名", "電話", "地址",
-                    "LINE", "資料狀態", "通知時間", "回覆時間",
+                    "LINE", "通知內容", "資料狀態", "通知時間", "回覆時間",
                     "發送錯誤", "最後更新",
                 ],
                 column_config={
                     "訂單狀態": st.column_config.TextColumn("付款狀態"),
+                    "姓名": st.column_config.TextColumn("訂購人"),
+                    "通知內容": st.column_config.TextColumn("通知內容", width="medium"),
                     "選取": st.column_config.CheckboxColumn("儲存", help="只儲存勾選訂單，不會發送 LINE"),
                     "資料狀態": st.column_config.TextColumn(
                         "資料狀態", help="新增＝Google Sheet 尚無此訂單編號＋服務日期（改期後的新日期也算新增）；已存在＝將更新原列，不會重複新增。",
