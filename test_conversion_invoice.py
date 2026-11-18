@@ -31,3 +31,20 @@ def test_mobile_carrier_and_donate():
 def test_unparseable_or_incomplete_falls_back_to_default():
     assert q._invoice_kwargs_from_block(["發票：不開立發票"], "a@b.com") == {}
     assert q._invoice_kwargs_from_block(["三聯式：", "", ""], "a@b.com") == {}
+
+
+def test_last_order_invoice_fallback_uses_previous_order(monkeypatch):
+    q._LAST_INVOICE_CACHE.clear()
+    info = {"invoice_type": "3", "carrier_type_id": "", "carrier_info": "",
+            "company_title": "睦仁文化傳播股份有限公司", "company_no": "90030357", "donate_code": ""}
+    monkeypatch.setattr(q, "_find_payway_invoice_source_for_stored_value", lambda s, p: ({"payway": "信用卡"}, info, {}))
+    kw = q._last_order_invoice_kwargs(object(), "0965-182-387", "a@b.com")
+    assert kw["invoice_type_override"] == "3" and kw["company_no"] == "90030357"
+
+
+def test_last_order_invoice_fallback_errors_keep_default(monkeypatch):
+    q._LAST_INVOICE_CACHE.clear()
+    def boom(s, p):
+        raise RuntimeError("x")
+    monkeypatch.setattr(q, "_find_payway_invoice_source_for_stored_value", boom)
+    assert q._last_order_invoice_kwargs(object(), "0965182387", "a@b.com") == {}

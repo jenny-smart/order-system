@@ -1,9 +1,13 @@
 # ============================================================
 # 檔名：quick_order.py
-# 版本：v8.76
+# 版本：v8.77
 # 最後更新：2026-11-18
 #
 # Change Log
+# v8.77
+# - 舊客成單（既有地址）沒指定發票時，改沿用這支電話上一次訂單的發票設定（來源
+#   順序同儲值金購買：儲值金→VIP→專業清潔，已付款且信用卡／ATM 的最近一筆），
+#   不再落到預設二聯會員載具。查不到或出錯維持原預設；儲值金訂單不帶發票欄位。
 # v8.76
 # - 修正訂單轉換新單發票變成「二聯＋會員載具」：既有地址建單不會回傳上一張訂單
 #   的發票設定，沒指定時一律落到預設。轉換第一段改解析原訂單A卡片的發票設定
@@ -3157,10 +3161,10 @@ def _parse_invoice_details_from_block(lines):
     return _empty_invoice_info()
 
 
-def _invoice_kwargs_from_block(lines, member_email=""):
-    """訂單卡片的發票設定 → quick_create_order 的發票參數（沿用同一張發票設定）。
+def _invoice_kwargs_from_info(info, member_email=""):
+    """發票設定 dict（_parse_invoice_details_from_block 格式）→ quick_create_order 的發票參數。
     解析不到（或三聯式缺抬頭／統編）回傳 {}，交給原本的預設流程。"""
-    info = _parse_invoice_details_from_block(lines or [])
+    info = info or {}
     kind = info.get("invoice_type")
     if kind == "3":
         title, no = str(info.get("company_title") or "").strip(), str(info.get("company_no") or "").strip()
@@ -3184,6 +3188,33 @@ def _invoice_kwargs_from_block(lines, member_email=""):
         return {"invoice_type_override": "2", "carrier_type_id_override": carrier_type,
                 "carrier_info": carrier_info, "company_title": "", "company_no": "", "payment_type": "B2C"}
     return {}
+
+
+def _invoice_kwargs_from_block(lines, member_email=""):
+    """訂單卡片的發票設定 → quick_create_order 的發票參數（沿用同一張發票設定）。"""
+    return _invoice_kwargs_from_info(_parse_invoice_details_from_block(lines or []), member_email)
+
+
+_LAST_INVOICE_CACHE = {}
+
+
+def _last_order_invoice_kwargs(session, phone, member_email=""):
+    """舊客成單沒指定發票時，沿用這支電話上一次訂單的發票設定（來源順序同儲值金購買：
+    儲值金→VIP→專業清潔，取已付款、付款方式為信用卡／ATM 的最近一筆）。
+    查不到或出錯回傳 {}（維持原預設）。10 分鐘內同電話重複使用快取，避免批次每筆都重查。"""
+    phone_norm = re.sub(r"\D", "", str(phone or ""))
+    if not phone_norm:
+        return {}
+    cached = _LAST_INVOICE_CACHE.get(phone_norm)
+    if cached and time.time() - cached[0] < 600:
+        return dict(cached[1])
+    try:
+        _payway, info, _debug = _find_payway_invoice_source_for_stored_value(session, phone_norm)
+        kwargs = _invoice_kwargs_from_info(info, member_email)
+    except Exception:
+        return {}
+    _LAST_INVOICE_CACHE[phone_norm] = (time.time(), kwargs)
+    return dict(kwargs)
 
 
 def _extract_block_created_at(lines):
@@ -4840,6 +4871,19 @@ def _prepare_booking_data(
         purchase_info.get("donateCode", "") if purchase_info else "",
         default="8585",
     ))
+    # 舊客成單沒指定發票、後台也沒回傳該地址上次的發票時，沿用上一次訂單的發票設定
+    # （既有地址不會回傳 purchase，否則會落到預設二聯會員載具）。儲值金訂單不帶發票欄位。
+    if (not invoice_type_override and not company_no and not carrier_info
+            and not purchase_info and payway != "儲值金"):
+        _prev = _last_order_invoice_kwargs(session, phone, member.get("email") or "")
+        if _prev:
+            invoice_type = _prev["invoice_type_override"]
+            carrier_type_id = _prev["carrier_type_id_override"] or carrier_type_id
+            carrier_info = _prev.get("carrier_info", "")
+            company_title = _prev.get("company_title", "")
+            company_no = _prev.get("company_no", "")
+            donate_code = _prev.get("donate_code_override", donate_code)
+            payment_type = _prev.get("payment_type", payment_type)
     old_purchase = best_addr.get("purchase", {}) if isinstance(best_addr.get("purchase"), dict) else {}
 
     def pick(key, default=""):
