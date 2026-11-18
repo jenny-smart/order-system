@@ -102,6 +102,18 @@ class SyncTest(unittest.TestCase):
         ])
         self.assertEqual(sync.plan_staff_updates(staff, []), [])
 
+    def test_staff_sheet_columns_follow_new_line_url_layout(self):
+        staff = [
+            ["訂單編號", "服務日期", "服務時間", "訂購人", "電話", "地址", "付款狀態", "LINE網址", "通知內容", "回覆狀態"],
+            ["LC00000001", "2026-11-15"],
+        ]
+        cells = sync.plan_staff_updates(staff, [tracking("LC00000001", 回覆時間="2026-11-13 10:21")])
+        self.assertEqual(cells, [
+            {"range": "L1", "values": [["連結確認"]]},
+            {"range": "J2", "values": [["OK"]]},
+            {"range": "L2", "values": [["連結確認 11/13 10:21"]]},
+        ])
+
     def test_run_skips_api_when_nothing_pending_and_saves_when_confirmed(self):
         with patch.object(wr, "load_tracking_rows", return_value=[tracking("LC1", 回覆狀態="已回覆")]), \
                 patch.object(rc, "fetch_confirmations") as fetch:

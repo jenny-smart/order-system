@@ -108,18 +108,22 @@ def plan_staff_updates(staff_values, updated_rows) -> list[dict]:
     wanted = {_key(row): row for row in updated_rows}
     cells = []
     header = staff_values[0] if staff_values else []
-    if wanted and (len(header) < STAFF_CONFIRM_COL or not str(header[STAFF_CONFIRM_COL - 1]).strip()):
-        cells.append({"range": rowcol_to_a1(1, STAFF_CONFIRM_COL), "values": [[STAFF_CONFIRM_HEADER]]})
+    # 依「通知內容」欄位置找手動欄（2026-11-19 起通知內容前多了 LINE網址 欄，手動欄整批右移一欄）
+    names = [str(v).strip() for v in header]
+    shift = names.index("通知內容") + 1 - 8 if "通知內容" in names else 0
+    reply_col, confirm_col = STAFF_REPLY_COL + shift, STAFF_CONFIRM_COL + shift
+    if wanted and (len(header) < confirm_col or not str(header[confirm_col - 1]).strip()):
+        cells.append({"range": rowcol_to_a1(1, confirm_col), "values": [[STAFF_CONFIRM_HEADER]]})
     for index, values in enumerate(staff_values[1:], start=2):
-        values = list(values) + [""] * (STAFF_CONFIRM_COL - len(values))
+        values = list(values) + [""] * (confirm_col - len(values))
         row = wanted.get(f"{str(values[0]).strip()}|{str(values[1]).strip()}")
         if not row:
             continue
-        if not str(values[STAFF_REPLY_COL - 1]).strip():
-            cells.append({"range": rowcol_to_a1(index, STAFF_REPLY_COL), "values": [["OK"]]})
+        if not str(values[reply_col - 1]).strip():
+            cells.append({"range": rowcol_to_a1(index, reply_col), "values": [["OK"]]})
         stamp = f"{CONFIRM_NOTE} {datetime.strptime(row['回覆時間'], '%Y-%m-%d %H:%M').strftime('%m/%d %H:%M')}"
-        if str(values[STAFF_CONFIRM_COL - 1]).strip() != stamp:
-            cells.append({"range": rowcol_to_a1(index, STAFF_CONFIRM_COL), "values": [[stamp]]})
+        if str(values[confirm_col - 1]).strip() != stamp:
+            cells.append({"range": rowcol_to_a1(index, confirm_col), "values": [[stamp]]})
     return cells
 
 
@@ -132,8 +136,8 @@ def write_staff_sheet(updated_rows) -> int:
     worksheet = client.open_by_key(root_file_id(STAFF_SHEET_CATEGORY, STAFF_SHEET_AREA)).worksheet(STAFF_SHEET_TITLE)
     cells = plan_staff_updates(worksheet.get_all_values(), updated_rows)
     if cells:
-        if worksheet.col_count < STAFF_CONFIRM_COL:
-            worksheet.resize(cols=STAFF_CONFIRM_COL)
+        if worksheet.col_count < STAFF_CONFIRM_COL + 1:
+            worksheet.resize(cols=STAFF_CONFIRM_COL + 1)
         worksheet.batch_update(cells, value_input_option="RAW")
     return len(cells)
 
