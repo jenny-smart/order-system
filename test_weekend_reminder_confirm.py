@@ -35,24 +35,20 @@ class LinkTest(unittest.TestCase):
         self.assertEqual(rc.confirm_url("", "2026-11-15", url=URL, key=KEY), "")
         self.assertEqual(rc.confirm_url("LC002200072", "11/15", url=URL, key=KEY), "")
 
-    def test_message_keeps_reply_wording_and_adds_link_when_configured(self):
+    def test_message_never_includes_link_even_when_configured(self):
+        # 2026-11-19 Jenny：週末提醒訊息不放連結，只請客人回覆「已收到」
         row = {"order_no": "LC002200072", "service_date": "2026-11-15", "service_time": "14:00-18:00", "address": "台北市"}
-        with patch.object(rc, "api_key", return_value=""):
-            plain = wr.build_reminder_message(row)
-        self.assertIn("為確認您已收到提醒，請回覆「已收到」，謝謝您。", plain)
-        self.assertNotIn("/c/", plain)
         with patch.object(rc, "api_key", return_value=KEY), patch.object(rc, "api_url", return_value=URL):
-            linked = wr.build_reminder_message(row)
+            single = wr.build_reminder_message(row)
             combined = wr.build_combined_reminder_message([
                 dict(row, order_no="LC00220396", service_date="2026-11-15", service_time="09:00-12:00"),
                 dict(row, order_no="LC002200072", service_date="2026-11-14"),
             ])
-        link = rc.confirm_url("LC002200072", "2026-11-15", url=URL, key=KEY)
-        self.assertIn(f"請回覆「已收到」，或點以下連結確認：\n{link}\n謝謝您。", linked)
-        self.assertIn("專員會在服務前5-10分鐘", linked)
-        # 合併提醒只附最早那筆（主單）的連結
-        self.assertIn(rc.confirm_url("LC002200072", "2026-11-14", url=URL, key=KEY), combined)
-        self.assertEqual(combined.count("/c/"), 1)
+        for text in (single, combined):
+            self.assertIn("為確認您已收到提醒，請回覆「已收到」，謝謝您。", text)
+            self.assertNotIn("/c/", text)
+            self.assertNotIn("連結", text)
+        self.assertIn("專員會在服務前5-10分鐘", single)
 
 
 class SyncTest(unittest.TestCase):
