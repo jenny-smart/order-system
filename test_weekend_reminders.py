@@ -145,20 +145,46 @@ class StaffSheetTest(unittest.TestCase):
         raw = [["=importrange(\"x\",\"週末服務提醒!A:H\")"] + formatted[0][1:]] + formatted[1:]
         tracking = [
             {"訂單編號": "LC2", "服務日期": "2026-11-15", "姓名": "王", "LINE": "https://chat.line.biz/u",
-             "電話": "0912345678", "訂單狀態": "待付款", "通知內容": "msg"},
+             "電話": "0912345678", "訂單狀態": "已付款", "通知內容": "msg"},
             {"訂單編號": "LC1", "服務日期": "2026-11-15", "姓名": "林", "電話": "", "訂單狀態": "已付款"},
         ]
         m = plan_staff_sheet(formatted, raw, tracking, "https://b")
         self.assertEqual(m[0][:8], ["訂單編號", "服務日期", "服務時間", "訂購人", "電話", "地址", "付款狀態", "通知內容"])
-        self.assertEqual(m[0][8:], ["'回覆狀態", "", "'連結確認"])
-        self.assertEqual(m[1][:2], ["'LC2", "'2026-11-15"])
+        self.assertEqual(m[0][8:], ["回覆狀態", "", "連結確認"])
+        self.assertEqual(m[1][:2], ["LC2", "'2026-11-15"])
         self.assertEqual(m[1][3], '=HYPERLINK("https://chat.line.biz/u","王")')
         self.assertTrue(m[1][4].startswith('=HYPERLINK("https://b/purchase?') and m[1][4].endswith(',"0912345678")'))
-        self.assertEqual(m[1][6], "'待付款")
-        self.assertEqual(m[1][8:], ["", "'已排程 11/13 09:00", ""])
-        self.assertEqual(m[2][3], "'林")
-        self.assertEqual(m[2][8:], ["'OK", "", "'已確認"])
-        self.assertEqual(m[3][8], "'手動列")  # 追蹤表沒有的手動列保留
+        self.assertEqual(m[1][6], "已付款")
+        self.assertEqual(m[1][8:], ["", "已排程 11/13 09:00", ""])
+        self.assertEqual(m[2][3], "林")
+        self.assertEqual(m[2][8:], ["OK", "", "已確認"])
+        self.assertEqual(m[3][8], "手動列")  # 追蹤表沒有的手動列保留
+
+    def test_only_paid_rows_stay_on_staff_sheet(self):
+        # 2026-11-19 Jenny：只有已付款才在名單中；待付款、已退款整列移除
+        from function.weekend_reminders import plan_staff_sheet
+        formatted = [
+            ["訂單編號", "服務日期", "服務時間", "訂購人", "電話", "地址", "付款狀態", "通知內容", "回覆狀態"],
+            ["LC1", "2026-11-22", "", "", "", "", "已退款", "", ""],
+            ["LC2", "2026-11-22", "", "", "", "", "待付款", "", ""],
+            ["LC3", "2026-11-22", "", "", "", "", "已付款", "", "OK"],
+        ]
+        tracking = [
+            {"訂單編號": "LC1", "服務日期": "2026-11-22", "訂單狀態": "已退款"},
+            {"訂單編號": "LC2", "服務日期": "2026-11-22", "訂單狀態": "待付款"},
+            {"訂單編號": "LC3", "服務日期": "2026-11-22", "訂單狀態": "已付款"},
+        ]
+        m = plan_staff_sheet(formatted, formatted, tracking, "https://b")
+        self.assertEqual([row[0] for row in m[1:]], ["LC3"])
+        self.assertEqual(m[1][8], "OK")
+
+    def test_apostrophe_only_when_sheet_would_convert(self):
+        from function.weekend_reminders import _text_cell
+        self.assertEqual(_text_cell("LC00220182"), "LC00220182")
+        self.assertEqual(_text_cell("您好，這是週末/例假日的清潔服務提醒"), "您好，這是週末/例假日的清潔服務提醒")
+        self.assertEqual(_text_cell("2026-11-22"), "'2026-11-22")
+        self.assertEqual(_text_cell("0955186625"), "'0955186625")
+        self.assertEqual(_text_cell("=1+1"), "'=1+1")
 
     def test_row_runs_groups_consecutive_positions(self):
         self.assertEqual(_row_runs([2, 3, 4, 7, 9, 10]), [(2, 3), (7, 1), (9, 2)])

@@ -715,10 +715,18 @@ def strip_confirm_link(text):
     return _CONFIRM_LINK_RE.sub("，謝謝您。", str(text or ""))
 
 
+_NEEDS_TEXT_PREFIX_RE = re.compile(
+    r"^\s*([=+\-@']|[\d.,/:\s-]+$|(true|false)$|\d+\s*%$)", re.IGNORECASE
+)
+
+
 def _text_cell(value):
-    """USER_ENTERED 寫入時保持純文字（日期、0 開頭電話、= 開頭文字都不被轉換）。"""
+    """USER_ENTERED 寫入時保持純文字。
+    2026-11-19 Jenny：不要每格都加 '；只有會被試算表轉換的值（日期、數字、0 開頭電話、= + - @ 開頭）才加。"""
     text = str(value or "")
-    return f"'{text}" if text else ""
+    if not text:
+        return ""
+    return f"'{text}" if _NEEDS_TEXT_PREFIX_RE.match(text) else text
 
 
 def _manual_cell(raw, formatted):
@@ -747,7 +755,7 @@ def staff_data_cells(row, base_url):
 
 def plan_staff_sheet(formatted, raw, tracking_rows, base_url):
     """內勤「週末提醒」整頁要寫入的值：A:H 依追蹤表重建，I 欄起依訂單編號＋服務日期對齊搬移。
-    分頁上有、追蹤表沒有的列（手動加的）保留在最下方，不會遺失。"""
+    只放付款狀態為「已付款」的列；分頁上有、追蹤表沒有的列（手動加的）保留在最下方，不會遺失。"""
     width = len(STAFF_HEADERS)
     total = max([len(r) for r in formatted] + [len(r) for r in raw] + [width])
 
@@ -773,6 +781,9 @@ def plan_staff_sheet(formatted, raw, tracking_rows, base_url):
         key = reminder_key(row)
         found = by_key.get(key)
         used.add(key)
+        # 2026-11-19 Jenny：內勤名單只放已付款；待付款、已退款、取消的列整列移除（追蹤表仍保留紀錄）
+        if str(row.get("訂單狀態") or "已付款").strip() != "已付款":
+            continue
         matrix.append(staff_data_cells(row, base_url) + (found[1] if found else [""] * (total - width)))
     leftovers = [item for key, item in by_key.items() if key not in used] + extras
     for i, cells in sorted(leftovers):
