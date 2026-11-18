@@ -331,7 +331,7 @@ def _reminder_text(detail, typhoon_reminder=False, confirm_url=""):
 def build_reminder_message(row, typhoon_reminder=False):
     address_line = f"\n服務地址：{row['address']}" if row.get("address") else ""
     detail = f"服務時間：{_when_text(row['service_date'], row.get('service_time', ''))}{address_line}"
-    return _reminder_text(detail, typhoon_reminder, _confirm_url(row.get("order_no"), row["service_date"]))
+    return _reminder_text(detail, typhoon_reminder)  # 2026-11-19 Jenny：提醒訊息不放連結
 
 
 def build_combined_reminder_message(rows, typhoon_reminder=False):
@@ -349,7 +349,7 @@ def build_combined_reminder_message(rows, typhoon_reminder=False):
         ]
         detail = "服務時間及地址：\n" + "\n".join(lines)
     # 合併提醒只附主單（最早那筆）的連結；被併入的訂單由同步程式跟著主單記為已回覆。
-    return _reminder_text(detail, typhoon_reminder, _confirm_url(rows[0].get("order_no"), rows[0]["service_date"]))
+    return _reminder_text(detail, typhoon_reminder)  # 2026-11-19 Jenny：提醒訊息不放連結
 
 
 def _compact(value):
