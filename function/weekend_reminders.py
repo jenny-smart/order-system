@@ -29,8 +29,8 @@ TRACKING_HEADERS = [
 NOTICE_STATUSES = ["待通知", "已排程", "已通知", "發送失敗"]
 REPLY_STATUSES = ["未回覆", "已回覆", "需追蹤"]
 TRACKED_ORDER_STATUSES = {"待付款", "已付款", "取消訂單", "已退款"}
-# 提醒名單只列待付款／已付款（取消、退款只用來更新既有列的狀態）
-REMINDER_ORDER_STATUSES = ("待付款", "已付款")
+# 提醒名單只列已付款（2026-11-19 Jenny：待付款不放名單；待付款、取消、退款只用來更新既有列的狀態）
+REMINDER_ORDER_STATUSES = ("已付款",)
 # 內勤工作表單（台北）「週末提醒」分頁：A:H 由程式直接寫入（不再用 IMPORTRANGE，才能保留超連結），
 # 訂購人連到 LINE 聊天、電話連到後台電話搜尋結果；I 欄起（回覆狀態等）為手動／其他排程填寫，
 # 每次寫入都依「訂單編號＋服務日期」重新對齊，排序變動也不會錯位。
@@ -614,7 +614,7 @@ def merge_tracking_rows(order_rows, existing_rows, scheduled_at=""):
             "訂單編號": item["order_no"], "服務日期": item["service_date"],
             "服務時間": item.get("service_time", ""), "姓名": item.get("name", ""),
             "電話": item.get("phone", ""), "地址": item.get("address", ""),
-            "LINE": item.get("line_url", ""), "通知內容": (
+            "LINE": item.get("line_url", ""), "通知內容": strip_confirm_link(
                 (old.get("通知內容") or ("" if is_merged_note(old.get("回覆備註")) else message)) if old else message
             ),
             "訂單狀態": item.get("order_status") or "已付款",
@@ -707,6 +707,14 @@ def _row_runs(positions):
     return runs
 
 
+_CONFIRM_LINK_RE = re.compile(r"，或點以下連結確認：\s*\n\s*https?://\S+\s*\n\s*謝謝您。")
+
+
+def strip_confirm_link(text):
+    """2026-11-19 Jenny：提醒訊息不放連結；舊資料裡已產生的確認連結也一併拿掉。"""
+    return _CONFIRM_LINK_RE.sub("，謝謝您。", str(text or ""))
+
+
 def _text_cell(value):
     """USER_ENTERED 寫入時保持純文字（日期、0 開頭電話、= 開頭文字都不被轉換）。"""
     text = str(value or "")
@@ -733,7 +741,7 @@ def staff_data_cells(row, base_url):
         _text_cell(row.get("訂單編號")), _text_cell(row.get("服務日期")), _text_cell(row.get("服務時間")),
         name_cell(name, line_url) if line_url and name else _text_cell(name),
         phone_cell(base_url, phone) if phone else "",
-        _text_cell(row.get("地址")), _text_cell(row.get("訂單狀態")), _text_cell(row.get("通知內容")),
+        _text_cell(row.get("地址")), _text_cell(row.get("訂單狀態")), _text_cell(strip_confirm_link(row.get("通知內容"))),
     ]
 
 
