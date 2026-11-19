@@ -658,3 +658,48 @@ def test_ensure_format_retries_per_row_when_batch_fails():
     result = atm.ensure_candidate_row_format(ws, [8, 9])
     assert any("第8列下拉選單失敗" in e for e in result["errors"])
     assert (9, 14) in _dv_targets(ws) and (8, 14) not in _dv_targets(ws)
+
+
+# ── ② M 欄付款時間（2026-11-20）──────────────────────
+@pytest.mark.parametrize("m_value,bank_time,expected", [
+    ("2026/11/06 14:02", "2026/11/06 14:02:46", "time"),
+    ("2026/11/6 14:05", "2026/11/06 14:02:46", "time"),       # 沒補 0、差 3 分鐘
+    ("2026-11-06 14:07:46", "2026/11/06 14:02:46", "time"),   # 剛好 5 分鐘
+    ("2026/11/06 14:08", "2026/11/06 14:02:46", ""),          # 超過 5 分鐘
+    ("11/6 下午2:01", "2026/11/06 14:02:46", "time"),          # 省略年份、下午
+    ("2026/11/6 2:04 PM", "2026/11/06 14:02:46", "time"),
+    ("115/11/06 14:02", "2026/11/06 14:02:46", "time"),        # 民國年
+    ("２０２６／１１／０６　１４：０２", "2026/11/06 14:02:46", "time"),  # 全形
+    ("202611061402", "2026/11/06 14:02:46", "time"),
+    ("2026年11月6日", "2026/11/06 14:02:46", "date"),          # 只有日期
+    ("2026/11/05", "2026/11/06 14:02:46", ""),
+    ("12/31 23:58", "2027/01/01 00:01:00", "time"),            # 跨年省略年份
+    ("90344", "2026/11/06 14:02:46", ""),                      # 末碼不是時間
+    ("", "2026/11/06 14:02:46", ""),
+])
+def test_pay_time_match(m_value, bank_time, expected):
+    assert atm._pay_time_match(m_value, bank_time) == expected
+
+
+def test_pay_time_not_used_as_last_code():
+    assert not atm._bank_note_has_code("跨行轉帳 0614021402", "2026/11/06 14:02")
+    assert atm._bank_note_has_code("90344實", "90344")
+
+
+def test_auto_match_by_m_pay_time(monkeypatch):
+    rows = [
+        _row(A="日期"),
+        _row(A="2026/11/06", B="2026/11/06 14:02:46", E="4,800", F="家事清潔"),   # 2 M 時間 ±5 分 → 已配對
+        _row(A="2026/11/06", B="2026/11/06 16:00:00", E="3,600", F="?"),         # 3 M 只有日期 → 需確認
+        _row(A="2026/11/06", B="2026/11/06 17:00:00", E="2,400", F="?"),         # 4 M 差 20 分 → 人工
+        _row(I="2026.11", J="LC1", K="王小明", L="4800", M="11/6 14:05", N="清潔", O="服務費用"),
+        _row(I="2026.11", J="LC2", K="李小華", L="4800", M="2026/11/06 18:00", N="清潔", O="服務費用"),
+        _row(I="2026.11", J="LC3", K="陳大同", L="3600", M="2026/11/6", N="清潔", O="服務費用"),
+        _row(I="2026.11", J="LC4", K="林一一", L="2400", M="2026/11/06 17:20", N="清潔", O="服務費用"),
+    ]
+    result, ws = _run_match(monkeypatch, rows)
+    assert ws.writes["H2:O2"][2] == "LC1"
+    assert ws.writes[(2, atm.COL_RECON_STATUS)] == "已配對"
+    assert ws.writes["H3:O3"][2] == "LC3"
+    assert ws.writes[(3, atm.COL_RECON_STATUS)] == "需確認"
+    assert "H4:O4" not in ws.writes
