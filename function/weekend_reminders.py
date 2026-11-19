@@ -10,6 +10,7 @@ import requests
 
 import orders
 from shared.env_config import apply_env
+from shared.stroke_sort import name_stroke_key
 
 
 TRACKING_SHEET_TITLE = "週末服務提醒"
@@ -31,6 +32,9 @@ REPLY_STATUSES = ["未回覆", "已回覆", "需追蹤"]
 TRACKED_ORDER_STATUSES = {"待付款", "已付款", "取消訂單", "已退款"}
 # 提醒名單只列已付款（2026-11-19 Jenny：待付款不放名單；待付款、取消、退款只用來更新既有列的狀態）
 REMINDER_ORDER_STATUSES = ("已付款",)
+# 2026-11-20 Jenny：已在名單上的訂單後來退款／取消，保留在名單並標底色，提醒客服取消已預約的 LINE
+REFUND_ORDER_STATUSES = ("已退款", "取消訂單")
+REFUND_ROW_COLOR = {"red": 0.98, "green": 0.80, "blue": 0.80}
 # 內勤工作表單（台北）「週末提醒」分頁：A:H 由程式直接寫入（不再用 IMPORTRANGE，才能保留超連結），
 # 訂購人連到 LINE 聊天、電話連到後台電話搜尋結果；I 欄起（回覆狀態等）為手動／其他排程填寫，
 # 每次寫入都依「訂單編號＋服務日期」重新對齊，排序變動也不會錯位。
@@ -505,7 +509,7 @@ def find_paid_weekend_orders(
             hit_page_limit = False
             break
 
-    rows = sorted(found.values(), key=lambda item: (item["service_date"], item["service_time"], item["name"]))
+    rows = sorted(found.values(), key=lambda item: (item["service_date"], name_stroke_key(item["name"]), item["service_time"]))
     paid_count = sum(1 for item in rows if item.get("order_status") == "已付款")
     pending_count = sum(1 for item in rows if item.get("order_status") == "待付款")
     return rows, {
@@ -584,6 +588,7 @@ def merge_tracking_rows(order_rows, existing_rows, scheduled_at=""):
     """以「訂單編號＋服務日期」比對；訂單改期後的新日期視為新增，避免漏提醒。"""
     existing = {reminder_key(row): dict(row) for row in existing_rows}
 
+    tracked_before = set(existing)
     status_updates = []
     for item in order_rows:
         key = _order_key(item)
@@ -602,8 +607,12 @@ def merge_tracking_rows(order_rows, existing_rows, scheduled_at=""):
     typhoon = any(item.get("typhoon_reminder") for item in paid)
     combined = combine_customer_reminders(paid, fixed_keys, typhoon_reminder=typhoon)
 
+    refunded = [
+        item for item in order_rows
+        if item.get("order_status") in REFUND_ORDER_STATUSES and _order_key(item) in tracked_before
+    ]
     merged = []
-    for item in paid:
+    for item in sorted(paid + refunded, key=lambda r: (r.get("service_date", ""), name_stroke_key(r.get("name", "")), r.get("service_time", ""))):
         old = existing.get(_order_key(item), {})
         message = item.get("message", "")
         note = old.get("回覆備註", "")
@@ -648,20 +657,18 @@ def _tracking_message(raw, old):
 
 
 def _name_order(row):
-    return (str(row.get("姓名", "") or ""), str(row.get("訂單編號", "") or ""))
+    """同一天內依訂購人姓氏筆劃→名字筆劃→訂單編號（2026-11-20 Jenny）。"""
+    return (name_stroke_key(row.get("姓名", "")), str(row.get("訂單編號", "") or ""))
 
 
 def order_tracking_rows(old_rows, new_rows, resort=False):
-    """服務日期新→舊；同一天內既有列維持原順序，新增列依訂購人、訂單編號排在該日最下方。
-    resort=True（第一次改版）時，同一天全部依訂購人、訂單編號重排。"""
+    """服務日期新→舊；同一天內全部依訂購人姓氏筆劃排序（2026-11-20 Jenny，新增列不再固定排在該日最下方）。
+    resort 參數保留相容，不再使用。"""
     blocks = {}
-    for row in old_rows:
+    for row in list(old_rows) + list(new_rows):
         blocks.setdefault(row.get("服務日期", ""), []).append(row)
-    if resort:
-        for rows in blocks.values():
-            rows.sort(key=_name_order)
-    for row in sorted(new_rows, key=_name_order):
-        blocks.setdefault(row.get("服務日期", ""), []).append(row)
+    for rows in blocks.values():
+        rows.sort(key=_name_order)
     return [row for day in sorted(blocks, reverse=True) for row in blocks[day]]
 
 
@@ -789,8 +796,10 @@ def plan_staff_sheet(formatted, raw, tracking_rows, base_url):
         key = reminder_key(row)
         found = by_key.get(key)
         used.add(key)
-        # 2026-11-19 Jenny：內勤名單只放已付款；待付款、已退款、取消的列整列移除（追蹤表仍保留紀錄）
-        if str(row.get("訂單狀態") or "已付款").strip() != "已付款":
+        # 2026-11-19 Jenny：內勤名單只放已付款；待付款不放
+        # 2026-11-20 Jenny：原本就在名單上、後來退款／取消的列保留（write_staff_sheet 會標底色），沒在名單上的不加
+        status = str(row.get("訂單狀態") or "已付款").strip()
+        if status != "已付款" and not (status in REFUND_ORDER_STATUSES and found):
             continue
         matrix.append(staff_data_cells(row, base_url) + (found[1] if found else [""] * pad))
     leftovers = [item for key, item in by_key.items() if key not in used] + extras
@@ -834,6 +843,33 @@ def write_staff_sheet(worksheet, matrix, old_row_count):
     worksheet.update(range_name="A1", values=matrix, value_input_option="USER_ENTERED")
     if old_row_count > len(matrix):
         worksheet.batch_clear([f"A{len(matrix) + 1}:{rowcol_to_a1(old_row_count, width)}"])
+    _paint_refund_rows(worksheet, matrix, old_row_count)
+
+
+def refund_row_numbers(matrix):
+    """內勤分頁中付款狀態為已退款／取消訂單的工作表列號（從 2 開始）。"""
+    status_col = STAFF_HEADERS.index("付款狀態")
+    return [
+        index for index, row in enumerate(matrix[1:], start=2)
+        if len(row) > status_col and str(row[status_col]).lstrip("'").strip() in REFUND_ORDER_STATUSES
+    ]
+
+
+def _paint_refund_rows(worksheet, matrix, old_row_count):
+    """A～I 欄底色：先全部清成白色，再把已退款／取消訂單的列標成淡紅色。"""
+    from gspread.utils import rowcol_to_a1
+
+    last_row = max(len(matrix), old_row_count, 2)
+    last_col = rowcol_to_a1(1, len(STAFF_HEADERS)).rstrip("1")
+    formats = [{"range": f"A2:{last_col}{last_row}", "format": {"backgroundColor": {"red": 1, "green": 1, "blue": 1}}}]
+    formats += [
+        {"range": f"A{row}:{last_col}{row}", "format": {"backgroundColor": REFUND_ROW_COLOR}}
+        for row in refund_row_numbers(matrix)
+    ]
+    try:
+        worksheet.batch_format(formats)
+    except Exception as exc:  # 底色失敗不影響名單內容
+        print(f"WARN 週末提醒底色設定失敗：{exc}", flush=True)
 
 
 def save_tracking_rows(rows):

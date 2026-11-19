@@ -105,8 +105,22 @@ def render(backend_email, backend_password, env):
                 }
                 for row in wr_rows
             ]
+            # 2026-11-20 Jenny：已退款／取消訂單整列淡紅底，提醒客服取消已預約的 LINE
+            _editor_data = _editable
+            try:
+                import pandas as _pd
+
+                _refund_statuses = {"已退款", "取消訂單"}
+                _df = _pd.DataFrame(_editable)
+                if "訂單狀態" in _df.columns and _df["訂單狀態"].isin(_refund_statuses).any():
+                    _editor_data = _df.style.apply(
+                        lambda r: ["background-color: #fbcccc" if r.get("訂單狀態") in _refund_statuses else "" for _ in r],
+                        axis=1,
+                    )
+            except Exception:
+                _editor_data = _editable
             _edited = st.data_editor(
-                _editable, use_container_width=True, hide_index=True, key="wr_editor",
+                _editor_data, use_container_width=True, hide_index=True, key="wr_editor",
                 # 2026-11-19 Jenny：欄位順序對齊內勤工作表單「週末提醒」A～H，進度欄放最後
                 column_order=[
                     "選取", "資料狀態",
