@@ -94,13 +94,25 @@ class WeekendReminderTrackingTest(unittest.TestCase):
             [(row["訂單編號"], row["服務日期"]) for row in all_rows],
             [
                 ("LC00217404", "2026-10-31"), ("LC00218089", "2026-10-31"),
-                ("LC00217404", "2026-10-24"), ("LC00215507", "2026-10-24"),  # 既有列維持原順序
+                ("LC00215507", "2026-10-24"), ("LC00217404", "2026-10-24"),  # 同一天依姓名筆劃（姓名相同時依訂單編號）
             ],
         )
         self.assertEqual(positions, [2, 3])
         self.assertEqual(count, 3)
 
-    def test_new_rows_go_to_bottom_of_their_day_sorted_by_name(self):
+    def test_same_day_sorted_by_surname_strokes(self):
+        def row(no, day, name):
+            r = _tracked(no, day)
+            r["姓名"] = name
+            return r
+        existing = [row("LC1", "2026-11-22", "陳怡晴"), row("LC2", "2026-11-22", "王小明"), row("LC3", "2026-11-21", "劉冠廷")]
+        incoming = [row("LC4", "2026-11-22", "林佩君"), row("LC5", "2026-11-22", "Connie Hsu"),
+                    row("LC6", "2026-11-22", "陳曉倫"), row("LC7", "2026-11-21", "朱家棋")]
+        all_rows, _, _ = plan_tracking_rows(existing, incoming, "now")
+        # 王4 林8 陳11（怡8 < 曉16）英文名最後；11/21：朱6 劉15
+        self.assertEqual([r["訂單編號"] for r in all_rows], ["LC2", "LC4", "LC1", "LC6", "LC5", "LC7", "LC3"])
+
+    def test_new_and_existing_rows_mix_by_strokes(self):
         def row(no, day, name):
             r = _tracked(no, day)
             r["姓名"] = name
@@ -176,8 +188,19 @@ class StaffSheetTest(unittest.TestCase):
             {"訂單編號": "LC3", "服務日期": "2026-11-22", "訂單狀態": "已付款"},
         ]
         m = plan_staff_sheet(formatted, formatted, tracking, "https://b")
-        self.assertEqual([row[0] for row in m[1:]], ["LC3"])
-        self.assertEqual(m[1][9], "OK")
+        # 2026-11-20：原本就在名單上的已退款列保留（標底色）；待付款移除
+        self.assertEqual([row[0] for row in m[1:]], ["LC1", "LC3"])
+        self.assertEqual(m[2][9], "OK")
+        from function.weekend_reminders import refund_row_numbers
+        self.assertEqual(refund_row_numbers(m), [2])
+
+    def test_refunded_order_not_on_sheet_is_not_added(self):
+        from function.weekend_reminders import plan_staff_sheet, STAFF_HEADERS
+        formatted = [STAFF_HEADERS]
+        tracking = [{"訂單編號": "LC1", "服務日期": "2026-11-22", "訂單狀態": "已退款"},
+                    {"訂單編號": "LC2", "服務日期": "2026-11-22", "訂單狀態": "已付款"}]
+        m = plan_staff_sheet(formatted, formatted, tracking, "https://b")
+        self.assertEqual([row[0] for row in m[1:]], ["LC2"])
 
     def test_new_layout_keeps_manual_columns_in_place(self):
         # 已經是新版（有 LINE網址 欄）時，手動欄不再位移
