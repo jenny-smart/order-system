@@ -1,11 +1,14 @@
 # ============================================================
 # 檔名：change_order.py
-# 版本：v3.8
+# 版本：v3.9
 # 模組：清潔異動模組：車馬費 / 異動服務收款 / 異動服務退款
 # 建立日期：2026-06-22
-# 最後更新：2026-11-15
+# 最後更新：2026-11-19
 #
 # Change Log
+# v3.9（2026-11-19）
+# - 取消服務（待退款）一般客異動費改為依工作天數：服務前4個工作天以上 5%、
+#   2-3個工作天 30%、0-1個工作天 50%（原本一律 5%）；VIP 仍免收。
 # v3.8（2026-11-15）
 # - 清潔異動同步 ATM 工作表的條件統一為「付款方式（待收款）或退款方式（待退款）
 #   是 ATM」：待收款若 R 欄明確寫了信用卡等非 ATM 付款方式就不再同步；R 欄留空
@@ -974,7 +977,13 @@ def calc_change_fee(order: dict, service_date: date, change_person: int = None,
     }
 
 
-CANCEL_FEE_PERCENT_REGULAR = 5  # 一般客取消服務（待退款）固定收服務費 5%，不分工作天數
+def cancel_fee_percent_regular(workdays: int) -> int:
+    """一般客取消服務（待退款）費率：服務前4個工作天以上 5%、2-3個工作天 30%、0-1個工作天 50%。"""
+    if workdays >= 4:
+        return 5
+    if workdays <= 1:
+        return 50
+    return 30
 
 
 def calc_cancel_fee(order: dict, service_date: date,
@@ -982,7 +991,8 @@ def calc_cancel_fee(order: dict, service_date: date,
     """
     取消服務（異動費＋待退款）：
     - VIP：免收異動費，服務費全退。
-    - 一般客：不論服務前幾個工作天取消，一律收服務費 5% 取消異動費。
+    - 一般客：依服務前工作天數收服務費取消異動費——4個工作天以上 5%、2-3個工作天 30%、
+      0-1個工作天 50%。
     服務費基礎＝訂單總金額－車馬費（車馬費不列入比例計算）。
     """
     workdays = _count_workdays_before(service_date, today=today)
@@ -993,9 +1003,9 @@ def calc_cancel_fee(order: dict, service_date: date,
         rate_percent, change_fee = 0, 0
         calc_note = f"{timing}取消服務，VIP 免收異動費 = $0；退款${service_amount}"
     else:
-        rate_percent = CANCEL_FEE_PERCENT_REGULAR
+        rate_percent = cancel_fee_percent_regular(workdays)
         change_fee = round(service_amount * rate_percent / 100)
-        calc_note = (f"{timing}取消服務，一般客不分工作天數收 {rate_percent}% 取消異動費："
+        calc_note = (f"{timing}取消服務，一般客收 {rate_percent}% 取消異動費："
                      f"服務費{service_amount} × {rate_percent}% = ${change_fee}；"
                      f"退款${max(service_amount - change_fee, 0)}")
     return {

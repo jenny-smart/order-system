@@ -1845,7 +1845,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                         fee_info = change_order.calc_change_fee(order, service_date=service_date_input)
                         calc_rows.append(change_order.build_charge_row(order, fee_info, service_note, customer_type=customer_type, service_date=service_date_input))
                     else:
-                        # 取消、不服務：VIP 免收；一般客不分工作天數收 5%
+                        # 取消、不服務：VIP 免收；一般客依工作天數收 5%／30%／50%
                         fee_info = change_order.calc_cancel_fee(order, service_date=service_date_input)
                         calc_rows.append(change_order.build_refund_row(order, fee_info, service_note, customer_type=customer_type, service_date=service_date_input))
                     if also_day_type:
