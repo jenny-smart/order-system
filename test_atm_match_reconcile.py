@@ -347,7 +347,8 @@ def test_ensure_format_uses_single_template_row_not_chain():
     ws = FakeWorksheet([""] + [formula] * 9 + ["", ""], {9: {2, 3, 5}, 14: {2, 5}, 15: {2, 5}})
     ws.month_values = {11: 2026.11, 12: "2026.11"}
     result = atm.ensure_candidate_row_format(ws, [3, 11, 12])
-    assert _copies(ws, "PASTE_FORMAT") == [(5, 3, 7, 15), (5, 11, 7, 15), (5, 12, 7, 15)]
+    assert _copies(ws, "PASTE_FORMAT") == [(5, 3, 7, 12), (5, 3, 14, 15), (5, 11, 7, 12), (5, 11, 14, 15),
+                                          (5, 12, 7, 12), (5, 12, 14, 15)]   # M 欄格式不動
     assert _copies(ws, "PASTE_FORMULA") == [(5, 11, 7, 7), (5, 12, 7, 7)]
     assert _repeat_rows(ws) == [3, 11, 12]                          # I 欄固定文字格式
     assert ws.value_updates == [{"range": "I11", "values": [["2026.11"]]}]   # 數字改回文字
@@ -357,7 +358,7 @@ def test_ensure_format_uses_single_template_row_not_chain():
 def test_ensure_format_template_below_and_fallback_formula():
     ws = FakeWorksheet(["", "", "", "", '=I5&"-"'], {9: {5}, 14: {5}, 15: {5}})
     atm.ensure_candidate_row_format(ws, [2, 3])
-    assert _copies(ws, "PASTE_FORMAT") == [(5, 2, 7, 15), (5, 3, 7, 15)]
+    assert _copies(ws, "PASTE_FORMAT") == [(5, 2, 7, 12), (5, 2, 14, 15), (5, 3, 7, 12), (5, 3, 14, 15)]
     ws = FakeWorksheet(["", "", "已有值"], {})
     result = atm.ensure_candidate_row_format(ws, [2, 3])
     assert result["g_filled"] == 1 and result["format_copied"] == 0
@@ -703,3 +704,30 @@ def test_auto_match_by_m_pay_time(monkeypatch):
     assert ws.writes["H3:O3"][2] == "LC3"
     assert ws.writes[(3, atm.COL_RECON_STATUS)] == "需確認"
     assert "H4:O4" not in ws.writes
+
+
+# ── M 欄日期時間序號（46345.8987）─────────────────────
+def test_sheet_serial_to_text():
+    assert atm._sheet_serial_to_text(46345.8987) == "2026/11/19 21:34:08"
+    assert atm._sheet_serial_to_text(46345, "2026/11/19") == "2026/11/19"
+    assert atm._sheet_serial_to_text(42668, "42668") == ""        # 末碼不是日期
+    assert atm._sheet_serial_to_text("abc") == ""
+    assert atm._pay_time_match("46345.8987", "2026/11/19 21:34:10") == "time"
+
+
+def test_m_actual_value_restores_time(monkeypatch):
+    rows = [
+        _row(A="日期"),
+        _row(A="2026/11/19", B="2026/11/19 21:34:10", E="2,800", F="檸檬家事永和"),
+        _row(I="2026.11", J="LC00221071", K="陳文維", L="2800", M="2026/11/19", N="清潔", O="服務費用"),
+    ]
+    ws = _MatchWS(rows)
+    ws.get = lambda a1, value_render_option=None: [[""], [""], [46345.8987]]
+    monkeypatch.setattr(atm, "get_atm_worksheet", lambda region: ws)
+    monkeypatch.setattr(atm, "load_change_order_refunds", lambda region: [])
+    for name in ("_clear_data_validation", "_copy_data_validation", "ensure_candidate_row_format", "normalize_atm_rows"):
+        monkeypatch.setattr(atm, name, lambda *a, **k: None)
+    atm.auto_match_bank_rows("台北", row_spec="2", today=date(2026, 11, 20))
+    assert ws.writes["H2:O2"][2] == "LC00221071"
+    assert ws.writes["H2:O2"][5] == "2026/11/19 21:34:08"
+    assert ws.writes[(2, atm.COL_RECON_STATUS)] == "已配對"

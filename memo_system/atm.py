@@ -58,6 +58,9 @@ ATM 對帳自動化模組
   省略年份（取 B 欄年份）、民國年、全形數字都可讀。
 - M 欄只有日期沒有時間、且與 B 欄同日 → 只算「需確認」（需勾允許需確認候選預填）。
 - M 欄是付款時間時不再當末碼比對，避免時間數字誤配 F 欄。
+- 修正 M 欄日期時間被顯示成序號（例 46345.8987）：整理 G:O 格式時不再複製
+  M 欄格式（保留原本的日期時間格式）；配對時 M 欄改讀實際值，日期序號轉成
+  「YYYY/MM/DD HH:MM:SS」文字再比對／寫入，不會因只顯示日期而丟掉時間。
 """
 import json
 import os
@@ -737,6 +740,9 @@ def _parse_pay_time(value, ref: Optional[datetime] = None) -> Optional[Tuple[dat
     text = unicodedata.normalize("NFKC", str(value or "")).strip()
     if not text:
         return None
+    serial = _sheet_serial_to_text(text) if re.fullmatch(r"\d{5}\.\d+", text) else ""
+    if serial:
+        text = serial
     if re.fullmatch(r"20\d{10}(\d{2})?", text):
         try:
             return datetime.strptime(text[:12], "%Y%m%d%H%M"), True
@@ -769,6 +775,47 @@ def _parse_pay_time(value, ref: Optional[datetime] = None) -> Optional[Tuple[dat
         except ValueError:
             return None
     return dt, has_time
+
+
+def _sheet_serial_to_text(value, formatted: str = "") -> str:
+    """Sheets 日期序號 → 「YYYY/MM/DD HH:MM:SS」（沒有時間只回日期）；不是日期序號回 ""。
+    整數序號只有在畫面上本來就顯示成日期時才轉（避免把 5 碼末碼當日期）。"""
+    if isinstance(value, bool):
+        return ""
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if not (30000 <= num < 80000):
+        return ""
+    has_fraction = abs(num - round(num)) > 1e-9
+    if not has_fraction and not _parse_pay_time(formatted, ref=datetime(2000, 1, 1)):
+        return ""
+    dt = datetime(1899, 12, 30) + timedelta(seconds=round(num * 86400))
+    return dt.strftime("%Y/%m/%d %H:%M:%S") if has_fraction else dt.strftime("%Y/%m/%d")
+
+
+def _apply_m_actual_values(ws, rows: List[List[str]], log=None) -> int:
+    """M 欄改用實際值：日期時間序號轉成完整文字，避免只顯示日期（或被改成數字格式）而丟掉時間。"""
+    try:
+        raw = memo.with_retry(ws.get, f"M1:M{len(rows)}", value_render_option="UNFORMATTED_VALUE") or []
+    except Exception as exc:
+        if log:
+            log(f"⚠️ 讀取 M 欄實際值失敗，沿用顯示值：{exc}")
+        return 0
+    fixed = 0
+    for idx, cell in enumerate(raw):
+        if idx >= len(rows) or not cell:
+            continue
+        row = rows[idx]
+        shown = row[COL_M_LAST_CODE - 1] if len(row) >= COL_M_LAST_CODE else ""
+        text = _sheet_serial_to_text(cell[0], shown)
+        if text and text != shown:
+            while len(row) < COL_M_LAST_CODE:
+                row.append("")
+            row[COL_M_LAST_CODE - 1] = text
+            fixed += 1
+    return fixed
 
 
 def _pay_time_match(m_value, bank_time, tolerance_minutes: int = PAY_TIME_TOLERANCE_MINUTES) -> str:
@@ -885,6 +932,7 @@ def _format_match_text(year_month: str, service_type: str, fee_type: str, order_
 # -----------------------------------------------------------------------------
 COL_G_SUMMARY = 7   # G
 COL_I_MONTH = 9     # I
+COL_M_LAST_CODE = 13  # M：末碼或付款時間
 COL_N_SERVICE = 14  # N
 COL_O_FEE = 15      # O
 TRAINEE_FEE_AMOUNT = 2000
@@ -1053,7 +1101,9 @@ def ensure_candidate_row_format(ws, target_rows: List[int], log=None) -> Dict:
     fmt_requests, dv_requests, text_requests, g_requests = [], [], [], []
     for row in target_rows:
         if template and row != template:
-            fmt_requests.append(_copy_request(ws, template, row, COL_G_SUMMARY, COL_O_FEE, "PASTE_FORMAT"))
+            # M 欄不複製格式：客人付款時間是日期時間，套數字格式會變成序號（46345.8987）
+            fmt_requests.append(_copy_request(ws, template, row, COL_G_SUMMARY, COL_M_LAST_CODE - 1, "PASTE_FORMAT"))
+            fmt_requests.append(_copy_request(ws, template, row, COL_N_SERVICE, COL_O_FEE, "PASTE_FORMAT"))
             missing = False
             for col in DROPDOWN_COLUMNS:
                 rule = rules[col].get(template)
@@ -1095,7 +1145,7 @@ def ensure_candidate_row_format(ws, target_rows: List[int], log=None) -> Dict:
 
     # 格式先套，再套下拉選單與文字格式（格式失敗不影響下拉選單）
     if send(fmt_requests, "G:O 格式套用"):
-        result["format_copied"] = len(fmt_requests)
+        result["format_copied"] = len(fmt_requests) // 2  # 每列 G:L、N:O 兩段
     if not send(dv_requests + text_requests, "I/N/O 下拉選單與 I 欄文字格式"):
         # 整批失敗時逐列重試，找出哪幾列不行
         ok = 0
@@ -1394,6 +1444,9 @@ def auto_match_bank_rows(
         log(f"⚠️ 整理 ATM 分頁 G:O 失敗：{exc}")
         add_review("", "G:O 整理", f"整理失敗：{exc}")
     rows = memo.with_retry(ws.get_all_values)
+    m_fixed = _apply_m_actual_values(ws, rows, log)
+    if m_fixed:
+        log(f"M 欄日期時間改讀實際值：{m_fixed} 格")
     if str(row_spec or "").strip():
         target_row_nums = memo.parse_row_spec(row_spec)
         log(f"指定銀行列號：{target_row_nums}")
