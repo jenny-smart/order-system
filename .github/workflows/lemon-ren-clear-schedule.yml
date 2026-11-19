@@ -1,11 +1,11 @@
-# 排班管理「清空檸檬人」：每日 12:30、18:00 清空未配班清單中的檸檬人（五區）
+# 排班管理「清空檸檬人」：每日 12:30、18:00 清空未配班清單中的檸檬人（台北／台中）
 #
 # 由 tool-system 的 Cloud Schedule Router 依主控表「排程設定」（功能代號 lemon_ren_clear）
 # 派送過來（不用 GitHub cron）。也可以在這裡手動執行。
 # 規則見 shared/lemon_ren_clear_schedule.py：清空範圍＝當月 1 日～＋4 個月的月底，
-# 沒設帳密的地區略過。
+# 只跑台北／台中。
 #
-# 需要的 Secrets：GOOGLE_SERVICE_ACCOUNT_JSON（執行 Log）、各區 *_EMAIL／*_PASSWORD
+# 需要的 Secrets：GOOGLE_SERVICE_ACCOUNT_JSON（執行 Log）、TAIPEI_／TAICHUNG_EMAIL／PASSWORD
 name: Lemon-Ren Clear Schedule
 run-name: ${{ inputs.scheduled_slot && format('cloud-{0}', inputs.scheduled_slot) || 'Lemon-Ren Clear Schedule' }}
 
@@ -13,7 +13,7 @@ on:
   workflow_dispatch:
     inputs:
       date: {description: "以這天當作執行日（YYYY-MM-DD，空白＝今天）", required: false, default: "", type: string}
-      regions: {description: "地區（逗號分隔，空白＝五區）", required: false, default: "", type: string}
+      regions: {description: "地區（逗號分隔，空白＝台北,台中）", required: false, default: "", type: string}
       months: {description: "清空到當月＋幾個月的月底", required: false, default: "4", type: string}
       env: {description: prod / dev, required: false, default: "prod", type: string}
       scheduled_slot: {description: 排程設定派送時段（手動執行請留空）, required: false, default: "", type: string}
@@ -41,12 +41,6 @@ jobs:
           TAIPEI_PASSWORD: ${{ secrets.TAIPEI_PASSWORD }}
           TAICHUNG_EMAIL: ${{ secrets.TAICHUNG_EMAIL }}
           TAICHUNG_PASSWORD: ${{ secrets.TAICHUNG_PASSWORD }}
-          TAOYUAN_EMAIL: ${{ secrets.TAOYUAN_EMAIL }}
-          TAOYUAN_PASSWORD: ${{ secrets.TAOYUAN_PASSWORD }}
-          HSINCHU_EMAIL: ${{ secrets.HSINCHU_EMAIL }}
-          HSINCHU_PASSWORD: ${{ secrets.HSINCHU_PASSWORD }}
-          KAOHSIUNG_EMAIL: ${{ secrets.KAOHSIUNG_EMAIL }}
-          KAOHSIUNG_PASSWORD: ${{ secrets.KAOHSIUNG_PASSWORD }}
           RUN_DATE: ${{ inputs.date }}
           RUN_ENV: ${{ inputs.env || 'prod' }}
           REGIONS: ${{ inputs.regions }}

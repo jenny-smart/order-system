@@ -10,6 +10,9 @@ OK = {"found": 3, "people": 2, "cleared_days": 3, "slots": 5, "errors": []}
 
 
 class RangeTest(unittest.TestCase):
+    def test_default_regions_taipei_taichung_only(self):
+        self.assertEqual(lrc.REGIONS, ("台北", "台中"))
+
     def test_current_month_to_plus_4_month_end(self):
         self.assertEqual(lrc.date_range(date(2026, 11, 20)), ("2026-11-01", "2027-03-31"))
         self.assertEqual(lrc.date_range(date(2027, 10, 31)), ("2027-10-01", "2028-02-29"))  # 閏年

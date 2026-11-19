@@ -10,7 +10,7 @@
 - 等同 ordersapp【排班管理】→ 清空排班 →「掃描並清空未配班清單」：
   memo_system.shift.find_unassigned_lemon_bookings_range → clear_unassigned_lemon_bookings（同一套程式）。
 - 清空範圍＝當月 1 日～＋4 個月的月底（例：11/20 執行 → 11/01～隔年 03/31）。
-- 五區各用自己的後台帳號（accounts.ACCOUNTS）；沒設帳密的地區略過，不擋其他地區。
+- 只跑台北、台中（2026-11-20 Jenny），各用自己的後台帳號（accounts.ACCOUNTS）；沒設帳密的地區略過。
 - 有地區失敗時 exit 1（tool-system 行事曆紀錄會標 ❌）；每區結果寫執行 Log。
 """
 from __future__ import annotations
@@ -24,7 +24,7 @@ from zoneinfo import ZoneInfo
 
 TOOL_NAME = "清空未配班檸檬人：自動排程"
 TZ = ZoneInfo("Asia/Taipei")
-REGIONS = ("台北", "台中", "桃園", "新竹", "高雄")
+REGIONS = ("台北", "台中")
 DEFAULT_MONTHS = 4
 
 
@@ -122,7 +122,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--env", default="prod")
     parser.add_argument("--date", default="", help="以這天當作執行日（YYYY-MM-DD，測試用）")
-    parser.add_argument("--regions", default=",".join(REGIONS), help="逗號分隔，預設五區")
+    parser.add_argument("--regions", default=",".join(REGIONS), help="逗號分隔，預設台北,台中")
     parser.add_argument("--months", type=int, default=DEFAULT_MONTHS, help="清空到當月＋幾個月的月底（預設 4）")
     args = parser.parse_args()
     today = date.fromisoformat(args.date) if args.date.strip() else None
