@@ -3,6 +3,8 @@
 # 說明：整併進 tool-system，包成 render_memo_system() 供
 #       pages/訂單系統.py 呼叫。
 # 更新記錄：
+# 2026-11-20
+# - ATM ②配對依據說明加「金額 + M 欄付款時間」（±5 分鐘 → 已配對；只有日期 → 需確認）。
 # 2026-11-12
 # - 服務異動新增「階段 C：自後台補齊＋同步 ATM 工作表」（memo_system/change_order_fill.py）：
 #   清潔異動缺的資料（ATM 退款 P／Q 除外）自檸檬後台補空白格，ATM 待退款／待收款同步 ATM 工作表；
@@ -1357,7 +1359,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
 
     def render_atm_auto_match_mode():
         step("4", "配對銀行明細")
-        st.markdown('<div class="info-strip"><b>配對依據</b><ul><li>金額 + 末碼</li><li>金額 + 姓名</li><li>金額 + 公司名稱（F 欄像公司時比對訂單發票抬頭）</li><li>金額 + 備註或時間</li><li>一筆收入可配對 2～5 筆訂單加總；須有末碼/姓名依據且組合唯一</li></ul></div>', unsafe_allow_html=True)
+        st.markdown('<div class="info-strip"><b>配對依據</b><ul><li>金額 + 末碼</li><li>金額 + 姓名</li><li>金額 + 公司名稱（F 欄像公司時比對訂單發票抬頭）</li><li>金額 + M 欄付款時間（與 B 欄入帳時間相差 ±5 分鐘內 → 已配對；M 只有日期 → 需確認）</li><li>金額 + 備註或時間</li><li>一筆收入可配對 2～5 筆訂單加總；須有末碼/姓名依據且組合唯一</li></ul></div>', unsafe_allow_html=True)
         st.markdown('<div class="warn-strip"><b>配對限制</b><ul><li>只靠金額不會自動配對</li><li>必須有末碼、姓名、備註或時間依據</li></ul></div>', unsafe_allow_html=True)
 
         c1, c2 = st.columns([1, 3])

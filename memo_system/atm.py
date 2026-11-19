@@ -50,13 +50,22 @@ ATM 對帳自動化模組
   N/O＝清潔／退款（下拉選單由 ensure_candidate_row_format 套用）。
 - ② 配對：負數候選列不參與收入配對；支出配對到同訂單清潔異動退款時，
   移除該筆負數候選列，避免重複。排程取消訂單複查略過負數列。
+
+修正（2026-11-20）：
+- ② 配對：M 欄填的是客人付款時間時，與 B 欄入帳時間相差 ±5 分鐘內（含）
+  ＋金額相同 → 直接「已配對」（原本只能精確到分鐘、且只算需確認）。
+- M 欄時間格式放寬：月日時沒補 0、-／.／年月日、上午／下午／AM／PM、
+  省略年份（取 B 欄年份）、民國年、全形數字都可讀。
+- M 欄只有日期沒有時間、且與 B 欄同日 → 只算「需確認」（需勾允許需確認候選預填）。
+- M 欄是付款時間時不再當末碼比對，避免時間數字誤配 F 欄。
 """
 import json
 import os
 import re
+import unicodedata
 from datetime import datetime, timedelta, date as _date
 from zoneinfo import ZoneInfo
-from typing import Dict, List, Optional, Callable
+from typing import Dict, List, Optional, Callable, Tuple
 from difflib import SequenceMatcher
 
 import gspread
@@ -652,6 +661,8 @@ def _norm_code(value: str) -> str:
 
 
 def _bank_note_has_code(bank_note: str, customer_code: str) -> bool:
+    if _parse_pay_time(customer_code):
+        return False  # M 欄是付款時間，不當末碼
     note_digits = _digits(bank_note)
     code_digits = _digits(customer_code)
     if not note_digits or not code_digits:
@@ -707,6 +718,75 @@ def _datetime_equals(a: str, b: str) -> bool:
     if n < 12:
         return False
     return aa[:n] == bb[:n]
+
+
+PAY_TIME_TOLERANCE_MINUTES = 5
+
+_PAY_TIME_RE = re.compile(
+    r"(?:(\d{3,4})\s*[/\-.年]\s*)?(\d{1,2})\s*[/\-.月]\s*(\d{1,2})\s*日?"
+    r"(?:\s*(上午|下午|早上|中午|晚上|AM|PM)?\s*(\d{1,2})\s*[:：點]\s*(\d{1,2})"
+    r"(?:\s*[:：]\s*\d{1,2})?\s*(AM|PM)?)?",
+    re.IGNORECASE,
+)
+
+
+def _parse_pay_time(value, ref: Optional[datetime] = None) -> Optional[Tuple[datetime, bool]]:
+    """M 欄／B 欄日期時間 → (datetime, 是否有時間)；讀不到回 None。
+    5 碼末碼這類純數字不會被當成日期（12／14 碼 yyyymmddHHMM[SS] 例外）。
+    沒寫年份時用 ref 的年份（跨年時往前推一年）；3 碼年份視為民國年。"""
+    text = unicodedata.normalize("NFKC", str(value or "")).strip()
+    if not text:
+        return None
+    if re.fullmatch(r"20\d{10}(\d{2})?", text):
+        try:
+            return datetime.strptime(text[:12], "%Y%m%d%H%M"), True
+        except ValueError:
+            return None
+    m = _PAY_TIME_RE.search(text)
+    if not m:
+        return None
+    year_s, mon, day, ap1, hour, minute, ap2 = m.groups()
+    if year_s:
+        year = int(year_s) + (1911 if len(year_s) == 3 else 0)
+    elif ref is not None:
+        year = ref.year
+    else:
+        return None
+    has_time = hour is not None
+    h = int(hour) if has_time else 0
+    ap = (ap1 or ap2 or "").upper()
+    if has_time and ap in ("下午", "晚上", "PM") and h < 12:
+        h += 12
+    elif has_time and ap in ("上午", "早上", "AM") and h == 12:
+        h = 0
+    try:
+        dt = datetime(year, int(mon), int(day), h, int(minute) if has_time else 0)
+    except ValueError:
+        return None
+    if not year_s and ref is not None and dt - ref > timedelta(days=31):
+        try:
+            dt = dt.replace(year=dt.year - 1)
+        except ValueError:
+            return None
+    return dt, has_time
+
+
+def _pay_time_match(m_value, bank_time, tolerance_minutes: int = PAY_TIME_TOLERANCE_MINUTES) -> str:
+    """M 欄付款時間 vs B 欄入帳時間：
+    "time"＝都有時間且相差 ≤ tolerance 分鐘；"date"＝M 只有日期且同日；否則 ""。"""
+    bank = _parse_pay_time(bank_time)
+    if not bank:
+        return ""
+    bank_dt, bank_has_time = bank
+    pay = _parse_pay_time(m_value, ref=bank_dt)
+    if not pay:
+        return ""
+    pay_dt, pay_has_time = pay
+    if pay_has_time and bank_has_time:
+        return "time" if abs((pay_dt - bank_dt).total_seconds()) <= tolerance_minutes * 60 else ""
+    if not pay_has_time and pay_dt.date() == bank_dt.date():
+        return "date"
+    return ""
 
 
 def _build_confirm_code(candidate: Dict) -> str:
@@ -1582,6 +1662,8 @@ def auto_match_bank_rows(
                     titles = "、".join(f"{c['order_no']}「{invoice_title_of(c['order_no']) or '無抬頭'}」" for c in order_candidates[:5])
                     log(f"第{idx}列：F 欄「{note}」像公司名稱，同金額訂單發票抬頭不符：{titles}")
 
+            time_matches = [c for c in amount_candidates if _pay_time_match(c.get("last_code"), bank_time) == "time"]
+
             match_type = ""
             matches = []
             needs_confirm = False
@@ -1598,6 +1680,8 @@ def auto_match_bank_rows(
                 matches = company_matches; match_type = "公司抬頭+金額"
             elif len(company_matches) > 1:
                 matches = company_matches; match_type = "公司抬頭+金額"
+            elif time_matches:
+                matches = time_matches; match_type = "M欄付款時間+金額"
             elif len(split_candidates) == 1:
                 matches = [dict(split_candidates[0], split_reason="疑似拆單")]
                 match_type = "疑似拆單"; needs_confirm = True
@@ -1611,8 +1695,8 @@ def auto_match_bank_rows(
                 review_matches = []
                 for c in amount_candidates:
                     reasons = []
-                    if _datetime_equals(c.get("last_code", ""), bank_time):
-                        reasons.append("M欄日期時間=B欄")
+                    if _pay_time_match(c.get("last_code", ""), bank_time) == "date":
+                        reasons.append("M欄日期=B欄日期（無時間）")
                     if _similar_text(note, c.get("name", "")):
                         reasons.append("F欄與K欄姓名相近")
                     if reasons:
@@ -1634,8 +1718,9 @@ def auto_match_bank_rows(
                     str(match_type).startswith("末碼+金額")
                     or str(match_type).startswith("備註姓名+金額")
                     or str(match_type).startswith("公司抬頭+金額")
+                    or str(match_type).startswith("M欄付款時間+金額")
                     or "F欄與K欄姓名相近" in str(match_type)
-                    or "M欄日期時間=B欄" in str(match_type)
+                    or "M欄日期=B欄日期" in str(match_type)
                     or str(match_type).startswith("疑似拆單")
                 )
                 if not evidence_ok:
