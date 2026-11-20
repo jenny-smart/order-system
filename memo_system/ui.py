@@ -770,7 +770,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         <div class="info-strip"><b>可執行項目</b><ul>
         <li>排班匯入</li><li>檸檬人勾班</li><li>清空排班</li>
         </ul><b>下一步</b><ul><li>請選擇下方排班子功能</li></ul></div>""",
-        "📊 檸檬人統計": '<div class="info-strip"><b>只讀取、不修改後台</b><ul><li>統計每日上午／下午／全天訂單裡的檸檬人（待換正式專員）</li><li>不算檸檬保留單、不算灰底未配班名單</li><li>同一客人當天多張單且客服備註有「檸檬人勿動」（合併訂單）也不算</li><li>上午＝12:30 前結束；下午＝12:00 後開始；其餘跨中午＝全天</li></ul></div>',
+        "📊 檸檬人統計": '<div class="info-strip"><b>只讀取、不修改後台</b><ul><li>統計明天以後每日上午／下午／全天訂單裡的檸檬人（待換正式專員）</li><li>不算檸檬保留單、不算灰底未配班名單</li><li>同一客人當天多張單且客服備註有「檸檬人勿動」（合併訂單）也不算</li><li>上午＝12:30 前結束；下午＝12:00 後開始；其餘跨中午＝全天</li></ul></div>',
         "💰 財務對帳": """
         <div class="info-strip"><b>建議順序</b><ol>
         <li>待付款清單查詢</li><li>配對銀行明細</li><li>更新系統對帳</li>

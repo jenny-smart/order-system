@@ -875,9 +875,8 @@ def clear_unassigned_lemon_bookings(
 LEMON_COUNT_GROUPS = ("上午", "下午", "全天", "晚上")
 RESERVE_CUSTOMER_KEYWORD = "檸檬保留"
 _PERIOD_RE = re.compile(r"(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})")
-_ORDER_DATE_RE = re.compile(r"^\d{2}-\d{2}$")
+_ORDER_DATE_RE = re.compile(r"^\d{2}-\d{2}(\s+\d{2}-\d{2})*$")  # 訂購日期（可能接著紅字修改日期）
 _UNASSIGNED_RE = re.compile(r"^未配班\s*(\d+)\s*人$")
-_STAFF_RE = re.compile(r"^\d+\D.*\d$")
 _MARKERS = {"V", "X", "D", "v", "x", "d"}
 
 
@@ -935,11 +934,11 @@ def _parse_cell_orders(cell) -> List[Dict]:
         if not text:
             continue
         first = text.split(" ")[0]
-        if _STAFF_RE.match(first) and not expect_customer:
-            if current is not None:
-                current["staff"].append(first)
+        # 訂購日期下一行＝客人；之後行尾是星等數字的都是這張單的專員（前面不一定有區域編號，
+        # 例如「陳靜怡3」）。客人姓名不會以數字結尾，沒有訂購日期行時才用它開新訂單。
+        if not expect_customer and current is not None and first[-1:].isdigit():
+            current["staff"].append(first)
             continue
-        # 不是專員代號 → 客人姓名（沒有訂購日期行時也開新訂單）
         if current is None or not expect_customer:
             current = {"customer": "", "staff": []}
             orders.append(current)
@@ -1104,6 +1103,12 @@ def count_order_lemons_range(
     end = date.fromisoformat(date_end)
     if end < start:
         start, end = end, start
+    tomorrow = memo.today_tw().date() + timedelta(days=1)
+    if start < tomorrow:  # 只統計今天以後（已服務的單不算待換）
+        start = tomorrow
+    if end < start:
+        log(f"{date_start} ~ {date_end} 都不在明天以後，不統計")
+        return {"days": [], "entries": [], "excluded": [], "merged_kept": []}
     s_text, e_text = start.isoformat(), end.isoformat()
 
     entries: List[Dict] = []
