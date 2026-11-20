@@ -3,7 +3,20 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
+from datetime import datetime
+
 from memo_system import shift
+
+
+def setUpModule():
+    # 統計只算明天以後：測試固定「今天」＝2026-11-20
+    global _today_patch
+    _today_patch = patch.object(shift.memo, "today_tw", return_value=datetime(2026, 11, 20))
+    _today_patch.start()
+
+
+def tearDownModule():
+    _today_patch.stop()
 
 HEADER = ("<tr><td></td><td>08:30-12:30</td><td>09:00-12:00</td><td>09:00-18:00</td>"
           "<td>14:00-18:00</td><td>19:00-21:00</td></tr>")
@@ -132,3 +145,23 @@ class PurchaseJsonNoticeTest(unittest.TestCase):
             result = shift.count_order_lemons_range(None, "2026-11-23", "2026-11-23")
         self.assertEqual(result["days"][0]["上午"], 1)
         self.assertEqual({e["name"] for e in result["excluded"]}, {"檸檬人1", "檸檬人2"})
+
+
+class ReserveAttributionTest(unittest.TestCase):
+    def test_staff_without_area_code_stays_in_reserve_order(self):
+        # 檸檬保留單的專員「陳靜怡3」前面沒有區域編號，後面的檸檬人仍屬於保留單
+        html = ('<input id="date" value="2027-01-25"><table>'
+                "<tr><td></td><td>14:00-17:00</td></tr>"
+                "<tr><td>01-29<br>(五)</td>"
+                "<td>11-02 11-05<br>檸檬保留 V<br>陳靜怡3 X<br>4檸檬人10"
+                "<br>11-03<br>林小明<br>8張志豪3 X<br>4檸檬人20</td></tr></table>")
+        got = [(e["customer"], e["name"]) for e in shift.parse_order_lemon_entries(html, "2027-01-25")]
+        self.assertEqual(got, [("林小明", "檸檬人2")])
+
+    def test_only_dates_after_today(self):
+        resp = MagicMock(text=MERGED_SCHEDULE)  # 11-23 的班表
+        with patch.object(shift.memo, "session_get", return_value=resp):
+            result = shift.count_order_lemons_range(None, "2026-11-01", "2026-11-23")
+        self.assertEqual(result["days"][0]["日期"], "2026-11-21")
+        with patch.object(shift.memo, "today_tw", return_value=datetime(2026, 11, 25)):
+            self.assertEqual(shift.count_order_lemons_range(None, "2026-11-01", "2026-11-23")["days"], [])

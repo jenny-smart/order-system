@@ -3,13 +3,14 @@
 
 更新記錄：
 2026-11-20
+- 統計範圍改為明天～＋3 個月月底（日期要大於今天）；執行紀錄不再每行印兩次。
 - 新增（Jenny）。由 tool-system 的 Cloud Schedule Router 依主控表「排程設定」
   （功能代號 lemon_ren_count）派送 .github/workflows/lemon-ren-count-schedule.yml。
 
 規則：
 - 等同 ordersapp【檸檬人統計】：memo_system.shift.count_order_lemons_range（同一套程式）。
   不算檸檬保留單、灰底未配班名單、合併訂單（同一客人當天多張單且客服備註有「檸檬人勿動」）。
-- 統計範圍＝當月 1 日～＋3 個月的月底（例：11/20 執行 → 11/01～隔年 02/28）。
+- 統計範圍＝明天～＋3 個月的月底（例：11/20 執行 → 11/21～隔年 02/28）；今天以前已服務的不算。
 - 預設只跑台北（台北後台帳號 accounts.ACCOUNTS）。
 - 結果記一則行事曆到 tpe@lemonclean.com.tw 與 jenny@lemonclean.com.tw（兩個都寫，各自回報）：
   標題「【檸檬人待換專員】台北 N 天 M 人次（MM/DD）」，內容＝「檸檬人待換專員進度：」文字；
@@ -22,7 +23,7 @@ import argparse
 import calendar
 import os
 import traceback
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Callable
 from zoneinfo import ZoneInfo
 
@@ -35,12 +36,12 @@ CALENDAR_PREFIX = "【檸檬人待換專員】"
 
 
 def date_range(today: date, months: int = DEFAULT_MONTHS) -> tuple[str, str]:
-    """當月 1 日～＋months 個月的月底（含）。"""
+    """明天～＋months 個月的月底（含）。"""
     total = today.year * 12 + (today.month - 1) + months
     year, month = divmod(total, 12)
     month += 1
     end = date(year, month, calendar.monthrange(year, month)[1])
-    return today.replace(day=1).isoformat(), end.isoformat()
+    return (today + timedelta(days=1)).isoformat(), end.isoformat()
 
 
 def _log(status: str, area: str, message: str, traceback_text: str = "") -> None:
@@ -59,8 +60,9 @@ def _count_region(env: str, email: str, password: str, date_start: str, date_end
 
     memo.set_env(env)
     memo.set_runtime_credentials(email, password)
-    session = memo.login(ui_logger=log)
-    return shift.count_order_lemons_range(session=session, date_start=date_start, date_end=date_end, ui_logger=log)
+    quiet = None if log is print or getattr(log, "_prints", False) else log  # shift／memo 本身會 print，避免每行印兩次
+    session = memo.login(ui_logger=quiet)
+    return shift.count_order_lemons_range(session=session, date_start=date_start, date_end=date_end, ui_logger=quiet)
 
 
 def build_calendar_event(region: str, result: dict, date_start: str, date_end: str, now: datetime) -> dict:
@@ -71,7 +73,7 @@ def build_calendar_event(region: str, result: dict, date_start: str, date_end: s
     lines = [format_lemon_progress(result.get("days") or [])]
     if not days:
         lines.append("（沒有待換專員的檸檬人）")
-    lines += ["", f"統計範圍：{region} {date_start}～{date_end}（不含檸檬保留單、未配班名單、合併訂單）"]
+    lines += ["", f"統計範圍：{region} {date_start}～{date_end}（明天起；不含檸檬保留單、未配班名單、合併訂單）"]
     return dict(
         summary=f"{CALENDAR_PREFIX}{region} {len(days)} 天 {total} 人次（{now:%m/%d}）",
         description="\n".join(lines),
@@ -104,7 +106,10 @@ def run(env: str = "prod", today: date | None = None, regions=REGIONS, months: i
     import orders  # noqa: F401  （先載入 orders，與其他排程相同的載入順序）
     from accounts import ACCOUNTS
 
-    log = log or (lambda text: print(text, flush=True))
+    if log is None:
+        def log(text):
+            print(text, flush=True)
+        log._prints = True
     count = count or _count_region
     now = datetime.now(TZ)
     today = today or now.date()

@@ -18,9 +18,9 @@ RESULT = {
 
 
 class LemonRenCountScheduleTest(unittest.TestCase):
-    def test_range_current_month_to_plus_3_month_end(self):
-        self.assertEqual(job.date_range(date(2026, 11, 20)), ("2026-11-01", "2027-02-28"))
-        self.assertEqual(job.date_range(date(2026, 1, 5)), ("2026-01-01", "2026-04-30"))
+    def test_range_tomorrow_to_plus_3_month_end(self):
+        self.assertEqual(job.date_range(date(2026, 11, 20)), ("2026-11-21", "2027-02-28"))
+        self.assertEqual(job.date_range(date(2026, 1, 31)), ("2026-02-01", "2026-04-30"))
 
     def test_calendar_event_text(self):
         now = datetime(2026, 11, 20, 11, 0, tzinfo=job.TZ)
@@ -48,7 +48,7 @@ class LemonRenCountScheduleTest(unittest.TestCase):
         with patch.dict("accounts.ACCOUNTS", {"台北": {"email": "a", "password": "b"}}), \
              patch.object(job, "_log"):
             out = job.run(today=date(2026, 11, 20), count=lambda *a: RESULT, dry_run=True, log=lambda _t: None)
-        self.assertEqual(out["range"], ("2026-11-01", "2027-02-28"))
+        self.assertEqual(out["range"], ("2026-11-21", "2027-02-28"))
         self.assertIn("台北", out["result"])
 
 
