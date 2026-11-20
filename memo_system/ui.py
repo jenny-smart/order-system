@@ -4,6 +4,8 @@
 #       pages/訂單系統.py 呼叫。
 # 更新記錄：
 # 2026-11-20
+# - 排班管理新增「📊 檸檬人統計」：掃描班表，統計每日上午／下午／全天非檸檬保留單訂單裡的
+#   檸檬人數（未配班名單、檸檬保留單不算），產生「檸檬人待換專員進度」文字可直接複製。
 # - ATM ②配對依據說明加「金額 + M 欄付款時間」（±5 分鐘 → 已配對；只有日期 → 需確認）。
 # 2026-11-12
 # - 服務異動新增「階段 C：自後台補齊＋同步 ATM 工作表」（memo_system/change_order_fill.py）：
@@ -308,7 +310,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         "atm_result": None, "atm_match_result": None,
         "atm_list_rows": None, "atm_list_paste_result": None,
         "clear_person_result": None,
-        "lemon_scan_entries": None, "lemon_clear_results": None,
+        "lemon_scan_entries": None, "lemon_clear_results": None, "lemon_count_result": None,
         "co_calc_rows": [], "co_pending_rows": [],
         "co_phone_orders": [], "co_selected_order_no": "",
         "co_selected_order_detail": None,
@@ -764,7 +766,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         </ol></div>""",
         "📅 排班管理": """
         <div class="info-strip"><b>可執行項目</b><ul>
-        <li>排班匯入</li><li>檸檬人勾班</li><li>清空排班</li>
+        <li>排班匯入</li><li>檸檬人勾班</li><li>清空排班</li><li>檸檬人統計</li>
         </ul><b>下一步</b><ul><li>請選擇下方排班子功能</li></ul></div>""",
         "💰 財務對帳": """
         <div class="info-strip"><b>建議順序</b><ol>
@@ -805,7 +807,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         step("3", "選擇排班子功能")
         shift_sub_section = st.radio(
             "排班子功能",
-            ["📥 排班匯入", "🍋 檸檬人勾班", "🧹 清空排班"],
+            ["📥 排班匯入", "🍋 檸檬人勾班", "🧹 清空排班", "📊 檸檬人統計"],
             horizontal=True,
             label_visibility="collapsed",
             key="shift_sub_section",
@@ -813,6 +815,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         SHIFT_SUB_HELP = {
             "📥 排班匯入": '<div class="info-strip"><b>操作流程</b><ol><li>上傳 Excel / CSV</li><li>執行 Dry Run 預覽</li><li>確認合併結果</li><li>正式儲存</li></ol></div>',
             "🍋 檸檬人勾班": '<div class="info-strip"><b>操作流程</b><ol><li>輸入檸檬人名單</li><li>選擇起迄日期</li><li>選擇要勾的班別</li><li>批次勾班</li></ol></div>',
+            "📊 檸檬人統計": '<div class="info-strip"><b>只讀取、不修改後台</b><ul><li>統計每日上午／下午／全天訂單裡的檸檬人（待換正式專員）</li><li>不算檸檬保留單、不算灰底未配班名單</li><li>上午＝12:30 前結束；下午＝12:00 後開始；其餘跨中午＝全天</li></ul></div>',
             "🧹 清空排班": '<div class="warn-strip"><b>危險操作</b><ul><li>會直接修改後台排班</li><li>沒有逐筆預覽機制</li><li>請確認人員與日期後再執行</li></ul></div>',
         }
         st.markdown(SHIFT_SUB_HELP.get(shift_sub_section, ""), unsafe_allow_html=True)
@@ -1600,6 +1603,67 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                     else: st.success(f"✅ {r['name']}：清空 {len(r.get('cleared_dates', []))} 天，移除 {r.get('cleared_slot_count', 0)} 筆勾選")
 
     # ============================================================
+    # 功能：檸檬人統計（非保留單訂單裡的檸檬人，每日上午／下午／全天）
+    # ============================================================
+
+    def render_lemon_count_section():
+        step("3", "設定統計日期區間")
+        c1, c2 = st.columns(2)
+        with c1: count_start = st.date_input("開始日期", key="lemon_count_start")
+        with c2: count_end = st.date_input("結束日期", value=date.today() + timedelta(days=120), key="lemon_count_end")
+        count_btn = st.button("📊 統計檸檬人", use_container_width=True, type="primary",
+                              disabled=not st.session_state.credentials_ready)
+
+        with st.expander("執行 LOG", expanded=False):
+            log_box_local = st.empty()
+            log_box_local.text("\n".join(st.session_state.logs[-3000:]) if st.session_state.logs else "尚未執行")
+
+        def count_ui_log(msg):
+            st.session_state.logs.append(str(msg))
+            try: log_box_local.text("\n".join(st.session_state.logs[-3000:]))
+            except Exception: pass
+
+        if count_btn:
+            try:
+                st.session_state.logs = []
+                st.session_state.lemon_count_result = None
+                with st.spinner("讀取班表中，請稍候…"):
+                    session = get_session(ui_logger=count_ui_log)
+                    st.session_state.lemon_count_result = shift.count_order_lemons_range(
+                        session=session,
+                        date_start=count_start.strftime("%Y-%m-%d"),
+                        date_end=count_end.strftime("%Y-%m-%d"),
+                        ui_logger=count_ui_log,
+                    )
+                st.rerun()
+            except Exception as e:
+                count_ui_log(f"❌ 統計失敗：{e}"); st.error(str(e))
+
+        result = st.session_state.get("lemon_count_result")
+        if result is None:
+            return
+        st.markdown("---"); step("4", "統計結果")
+        days = [d for d in result["days"] if d.get("合計")]
+        groups = [g for g in shift.LEMON_COUNT_GROUPS if g != "晚上" or any(d.get("晚上") for d in days)]
+        c = st.columns(len(groups) + 1)
+        for col, g in zip(c, groups):
+            col.metric(g, sum(d.get(g, 0) for d in days))
+        c[-1].metric("有檸檬人的天數", len(days))
+        if not days:
+            st.info("這個日期區間的訂單（不含檸檬保留單）沒有檸檬人。")
+            return
+        text = shift.format_lemon_progress(result["days"])
+        st.text_area("檸檬人待換專員進度（可直接複製）", text, height=min(60 + 22 * len(days), 500), key="lemon_count_text")
+        try:
+            from function.ui_common import copy_button
+            copy_button("📋 複製進度文字", text, key="lemon_count_copy")
+        except Exception:
+            pass
+        import pandas as pd
+        st.dataframe(pd.DataFrame(days)[["日期", "星期", *groups, "合計", "明細"]],
+                     use_container_width=True, hide_index=True)
+
+    # ============================================================
     # 功能六：服務異動
     # ============================================================
 
@@ -2121,6 +2185,8 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
             render_shift_import_section()
         elif shift_sub_section == "🍋 檸檬人勾班":
             render_lemon_assign_section()
+        elif shift_sub_section == "📊 檸檬人統計":
+            render_lemon_count_section()
         else:
             render_clear_shift_section()
 

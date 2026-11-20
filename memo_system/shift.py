@@ -9,6 +9,10 @@
 2. submit_shift_payload 加上 month 參數，POST URL 帶 ?month=YYYY-MM。
 3. clear_person_shift_dates 確認當月有勾選才送出，無勾選直接略過。
 
+v2026.11.20-1：新增 count_order_lemons_range／format_lemon_progress：
+掃描 /schedule，統計每日上午／下午／全天「非檸檬保留單」訂單裡的檸檬人
+（灰底未配班名單不算），產生「檸檬人待換專員進度」文字。
+
 v2026.11.09-1：排班頁解析與送出欄位改用 shared/shift_page.py，
 與所有成單自動補檸檬人共用同一套程式（行為不變）。
 """
@@ -862,3 +866,194 @@ def clear_unassigned_lemon_bookings(
         res = clear_person_shift_dates(session, name, sorted(set(dates)), ui_logger=ui_logger)
         results.append(res)
     return results
+
+
+# =============================================================================
+# 檸檬人佔位統計（2026-11-20）：每日上午／下午／全天，非保留單訂單裡的檸檬人
+# =============================================================================
+LEMON_COUNT_GROUPS = ("上午", "下午", "全天", "晚上")
+RESERVE_CUSTOMER_KEYWORD = "檸檬保留"
+_PERIOD_RE = re.compile(r"(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})")
+_ORDER_DATE_RE = re.compile(r"^\d{2}-\d{2}$")
+_UNASSIGNED_RE = re.compile(r"^未配班\s*(\d+)\s*人$")
+_STAFF_RE = re.compile(r"^\d+\D.*\d$")
+_MARKERS = {"V", "X", "D", "v", "x", "d"}
+
+
+def period_group(period: str) -> str:
+    """時段 → 上午／下午／全天／晚上；看不懂回傳空字串。
+
+    上午＝12:30 前結束；下午＝12:00 後開始；晚上＝19:00 後開始；其餘跨中午＝全天。
+    """
+    m = _PERIOD_RE.search(str(period or ""))
+    if not m:
+        return ""
+    start = int(m.group(1)) * 60 + int(m.group(2))
+    end = int(m.group(3)) * 60 + int(m.group(4))
+    if start >= 19 * 60:
+        return "晚上"
+    if start >= 12 * 60:
+        return "下午"
+    if end <= 12 * 60 + 30:
+        return "上午"
+    return "全天"
+
+
+def _clean_line(line: str) -> str:
+    """去掉性別圖示與 V／X／D 標記，只留姓名或專員代號。"""
+    tokens = [t for t in re.split(r"\s+", line.strip()) if t and t not in _MARKERS]
+    text = " ".join(tokens)
+    return re.sub(r"^[♂♀⚥\s]+", "", text).strip()
+
+
+def _parse_cell_orders(cell) -> List[Dict]:
+    """班表一格（某日某時段）→ 訂單清單 [{customer, staff:[...]}]；灰底未配班名單不算訂單。"""
+    for p in cell.select('p[style*="616161"]'):
+        p.decompose()
+    lines = [x.strip() for x in cell.get_text("\n").split("\n") if x.strip()]
+    orders: List[Dict] = []
+    current: Optional[Dict] = None
+    skip = 0
+    expect_customer = False
+    for line in lines:
+        if skip:
+            skip -= 1
+            continue
+        m = _UNASSIGNED_RE.match(re.sub(r"\s+", " ", line))
+        if m:
+            skip = int(m.group(1))
+            current = None
+            expect_customer = False
+            continue
+        if _ORDER_DATE_RE.match(line):
+            current = {"customer": "", "staff": []}
+            orders.append(current)
+            expect_customer = True
+            continue
+        text = _clean_line(line)
+        if not text:
+            continue
+        first = text.split(" ")[0]
+        if _STAFF_RE.match(first) and not expect_customer:
+            if current is not None:
+                current["staff"].append(first)
+            continue
+        # 不是專員代號 → 客人姓名（沒有訂購日期行時也開新訂單）
+        if current is None or not expect_customer:
+            current = {"customer": "", "staff": []}
+            orders.append(current)
+        current["customer"] = text
+        expect_customer = False
+    return orders
+
+
+def parse_order_lemon_entries(html: str, query_date: str) -> List[Dict]:
+    """解析 /schedule 一週班表：非「檸檬保留」訂單裡的檸檬人。
+
+    回傳 [{date, period, group, name, raw, customer}]；未配班名單、檸檬保留單都不算。
+    """
+    soup = BeautifulSoup(html or "", "html.parser")
+    results: List[Dict] = []
+    for table in soup.find_all("table"):
+        periods: List[str] = []
+        for tr in table.find_all("tr"):
+            cells = tr.find_all(["td", "th"], recursive=False)
+            if not cells:
+                continue
+            texts = [re.sub(r"\s+", "", c.get_text(" ", strip=True)) for c in cells]
+            if any(_PERIOD_RE.fullmatch(t) for t in texts[1:]):
+                periods = [t if _PERIOD_RE.fullmatch(t) else "" for t in texts]
+                continue
+            if not periods:
+                continue
+            date_val = _row_label_to_date(cells[0].get_text(" ", strip=True), query_date)
+            if not date_val:
+                continue
+            for idx, cell in enumerate(cells[1:], start=1):
+                period = periods[idx] if idx < len(periods) else ""
+                group = period_group(period)
+                if not group:
+                    continue
+                for order in _parse_cell_orders(cell):
+                    if RESERVE_CUSTOMER_KEYWORD in order["customer"]:
+                        continue
+                    for raw in order["staff"]:
+                        parsed = parse_lemon_label(raw)
+                        if parsed:
+                            results.append({
+                                "date": date_val, "period": period, "group": group,
+                                "name": parsed["name"], "raw": raw, "customer": order["customer"],
+                            })
+    return results
+
+
+def count_order_lemons_range(
+    session: requests.Session,
+    date_start: str,
+    date_end: str,
+    ui_logger=None,
+) -> Dict:
+    """掃描 date_start～date_end 的 /schedule，統計每日上午／下午／全天非保留單的檸檬人數。
+
+    回傳 {"days": [{date, 上午, 下午, 全天, 晚上, 合計, 明細}], "entries": [...]}；
+    同一天同一類別同一位檸檬人只算一次。
+    """
+    log = make_logger(ui_logger)
+    start = date.fromisoformat(date_start)
+    end = date.fromisoformat(date_end)
+    if end < start:
+        start, end = end, start
+    s_text, e_text = start.isoformat(), end.isoformat()
+
+    entries: List[Dict] = []
+    seen = set()
+    week = start - timedelta(days=start.weekday())
+    while week <= end:
+        r = memo.session_get(session, f"{memo.BASE_URL}/schedule", params={"date": week.isoformat()})
+        r.raise_for_status()
+        actual = _parse_schedule_query_date(r.text, week.isoformat())
+        week_entries = parse_order_lemon_entries(r.text, actual)
+        log(f"{week.isoformat()} 那週：訂單裡（不含檸檬保留）找到 {len(week_entries)} 筆檸檬人")
+        for e in week_entries:
+            key = (e["date"], e["period"], e["name"], e["customer"])
+            if s_text <= e["date"] <= e_text and key not in seen:
+                seen.add(key)
+                entries.append(e)
+        week += timedelta(days=7)
+
+    days: List[Dict] = []
+    cur = start
+    weekday = "一二三四五六日"
+    while cur <= end:
+        d = cur.isoformat()
+        row: Dict = {"日期": d, "星期": weekday[cur.weekday()]}
+        details = []
+        total = 0
+        for g in LEMON_COUNT_GROUPS:
+            names = sorted({e["name"] for e in entries if e["date"] == d and e["group"] == g},
+                           key=lambda n: (len(n), n))
+            row[g] = len(names)
+            total += len(names)
+            for e in sorted((x for x in entries if x["date"] == d and x["group"] == g),
+                            key=lambda x: (x["period"], x["customer"])):
+                details.append(f"{g} {e['period']} {e['customer']}：{e['name']}")
+        row["合計"] = total
+        row["明細"] = "；".join(details)
+        days.append(row)
+        cur += timedelta(days=1)
+    log(f"{s_text} ~ {e_text} 共 {len(entries)} 筆非保留單訂單的檸檬人")
+    return {"days": days, "entries": entries}
+
+
+def format_lemon_progress(days: List[Dict], title: str = "檸檬人待換專員進度：") -> str:
+    """統計結果 → 可直接貼 LINE 的進度文字，只列有檸檬人的日期、0 的時段不寫。
+
+    例：02/17-上午-1，下午-1
+    """
+    lines = [title]
+    for row in days:
+        parts = [f"{g}-{row.get(g, 0)}" for g in LEMON_COUNT_GROUPS if row.get(g, 0)]
+        if parts:
+            mmdd = str(row["日期"])[5:].replace("-", "/")
+            lines.append(f"{mmdd}-" + "，".join(parts))
+    return "\n".join(lines)
