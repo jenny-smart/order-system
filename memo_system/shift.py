@@ -11,7 +11,8 @@
 
 v2026.11.20-1：新增 count_order_lemons_range／format_lemon_progress：
 掃描 /schedule，統計每日上午／下午／全天「非檸檬保留單」訂單裡的檸檬人
-（灰底未配班名單不算），產生「檸檬人待換專員進度」文字。
+（灰底未配班名單不算；同一位客人當天多張單且客服備註有「檸檬人勿動」的合併訂單也不算），
+產生「檸檬人待換專員進度」文字。
 
 v2026.11.09-1：排班頁解析與送出欄位改用 shared/shift_page.py，
 與所有成單自動補檸檬人共用同一套程式（行為不變）。
@@ -954,6 +955,7 @@ def parse_order_lemon_entries(html: str, query_date: str) -> List[Dict]:
     """
     soup = BeautifulSoup(html or "", "html.parser")
     results: List[Dict] = []
+    day_orders: Dict[tuple, int] = {}
     for table in soup.find_all("table"):
         periods: List[str] = []
         for tr in table.find_all("tr"):
@@ -975,6 +977,8 @@ def parse_order_lemon_entries(html: str, query_date: str) -> List[Dict]:
                 if not group:
                     continue
                 for order in _parse_cell_orders(cell):
+                    key = (date_val, _norm_name(order["customer"]))
+                    day_orders[key] = day_orders.get(key, 0) + 1
                     if RESERVE_CUSTOMER_KEYWORD in order["customer"]:
                         continue
                     for raw in order["staff"]:
@@ -984,7 +988,60 @@ def parse_order_lemon_entries(html: str, query_date: str) -> List[Dict]:
                                 "date": date_val, "period": period, "group": group,
                                 "name": parsed["name"], "raw": raw, "customer": order["customer"],
                             })
+    for e in results:  # 同一位客人當天在班表上共有幾張單（合併訂單判斷用）
+        e["same_day_orders"] = day_orders.get((e["date"], _norm_name(e["customer"])), 1)
     return results
+
+
+def _norm_name(name: str) -> str:
+    return re.sub(r"[\s♂♀⚥]+", "", str(name or ""))
+
+
+LEMON_KEEP_NOTE = "檸檬人勿動"
+
+
+def parse_purchase_notices(html: str) -> List[Dict]:
+    """訂單管理列表（/purchase）每張單的客人姓名與客服備註。
+
+    客服備註內容在 <label alt="...">客服備註</label> 的 alt／title 屬性；沒有這個標籤＝空白。
+    """
+    soup = BeautifulSoup(html or "", "html.parser")
+    rows = soup.select("table tbody tr") or soup.select("tr")
+    out = []
+    for tr in rows:
+        if not re.search(r"(LC|TT|KK)\d+", tr.get_text(" ", strip=True)):
+            continue
+        name_tag = tr.select_one('a[href*="/member?keyword"]')
+        name = name_tag.get_text(strip=True) if name_tag else ""
+        notice = ""
+        for label in tr.find_all("label"):
+            if label.get_text(strip=True) == "客服備註":
+                notice = str(label.get("alt") or label.get("title") or "")
+                break
+        if name:
+            out.append({"name": name, "notice": notice})
+    return out
+
+
+def _lemon_keep_customers(session: requests.Session, date_val: str) -> set:
+    """該服務日期，客服備註含「檸檬人勿動」的客人姓名（正規化後）。"""
+    params = memo.blank_list_params()
+    params["clean_date_s"] = params["clean_date_e"] = date_val
+    keep = set()
+    seen_pages = set()
+    for page in range(1, 31):
+        params["page"] = str(page)
+        r = memo.session_get(session, f"{memo.BASE_URL}/purchase", params=params)
+        r.raise_for_status()
+        rows = parse_purchase_notices(r.text)
+        sig = tuple((x["name"], x["notice"]) for x in rows)
+        if not rows or sig in seen_pages:
+            break
+        seen_pages.add(sig)
+        keep |= {_norm_name(x["name"]) for x in rows if LEMON_KEEP_NOTE in x["notice"]}
+        if len(rows) < 20:
+            break
+    return keep
 
 
 def count_order_lemons_range(
@@ -1021,6 +1078,21 @@ def count_order_lemons_range(
                 entries.append(e)
         week += timedelta(days=7)
 
+    # 合併訂單：同一位客人當天多張單、且客服備註有「檸檬人勿動」→ 不在待換名單
+    merged_dates = sorted({e["date"] for e in entries if e.get("same_day_orders", 1) >= 2})
+    excluded: List[Dict] = []
+    for d in merged_dates:
+        keep = _lemon_keep_customers(session, d)
+        if not keep:
+            continue
+        for e in [x for x in entries if x["date"] == d and x.get("same_day_orders", 1) >= 2
+                  and _norm_name(x["customer"]) in keep]:
+            entries.remove(e)
+            excluded.append(e)
+    if excluded:
+        log(f"排除合併訂單（客服備註有「{LEMON_KEEP_NOTE}」）{len(excluded)} 筆：" + "、".join(
+            f"{e['date'][5:]} {e['customer']} {e['name']}" for e in excluded))
+
     days: List[Dict] = []
     cur = start
     weekday = "一二三四五六日"
@@ -1042,7 +1114,7 @@ def count_order_lemons_range(
         days.append(row)
         cur += timedelta(days=1)
     log(f"{s_text} ~ {e_text} 共 {len(entries)} 筆非保留單訂單的檸檬人")
-    return {"days": days, "entries": entries}
+    return {"days": days, "entries": entries, "excluded": excluded}
 
 
 def format_lemon_progress(days: List[Dict], title: str = "檸檬人待換專員進度：") -> str:

@@ -770,7 +770,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         <div class="info-strip"><b>可執行項目</b><ul>
         <li>排班匯入</li><li>檸檬人勾班</li><li>清空排班</li>
         </ul><b>下一步</b><ul><li>請選擇下方排班子功能</li></ul></div>""",
-        "📊 檸檬人統計": '<div class="info-strip"><b>只讀取、不修改後台</b><ul><li>統計每日上午／下午／全天訂單裡的檸檬人（待換正式專員）</li><li>不算檸檬保留單、不算灰底未配班名單</li><li>上午＝12:30 前結束；下午＝12:00 後開始；其餘跨中午＝全天</li></ul></div>',
+        "📊 檸檬人統計": '<div class="info-strip"><b>只讀取、不修改後台</b><ul><li>統計每日上午／下午／全天訂單裡的檸檬人（待換正式專員）</li><li>不算檸檬保留單、不算灰底未配班名單</li><li>同一客人當天多張單且客服備註有「檸檬人勿動」（合併訂單）也不算</li><li>上午＝12:30 前結束；下午＝12:00 後開始；其餘跨中午＝全天</li></ul></div>',
         "💰 財務對帳": """
         <div class="info-strip"><b>建議順序</b><ol>
         <li>待付款清單查詢</li><li>配對銀行明細</li><li>更新系統對帳</li>
@@ -1653,6 +1653,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                             session=session, date_start=r_start, date_end=r_end, ui_logger=count_ui_log)
                         merged["days"] += part["days"]
                         merged["entries"] += part["entries"]
+                        merged.setdefault("excluded", []).extend(part.get("excluded") or [])
                     st.session_state.lemon_count_result = merged
                 st.rerun()
             except Exception as e:
@@ -1671,6 +1672,9 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         if not days:
             st.info("這個日期區間的訂單（不含檸檬保留單）沒有檸檬人。")
             return
+        if result.get("excluded"):
+            st.caption("已排除合併訂單（同一客人當天多張單、客服備註有「檸檬人勿動」）：" + "、".join(
+                f"{e['date'][5:]} {e['customer']} {e['name']}" for e in result["excluded"]))
         text = shift.format_lemon_progress(result["days"])
         st.text_area("檸檬人待換專員進度（可直接複製）", text, height=min(60 + 22 * len(days), 500), key="lemon_count_text")
         try:
