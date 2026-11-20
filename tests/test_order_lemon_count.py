@@ -1,0 +1,65 @@
+# -*- coding: utf-8 -*-
+"""排班管理「檸檬人統計」：非保留單訂單裡的檸檬人，依每日上午／下午／全天統計。"""
+import unittest
+from unittest.mock import MagicMock, patch
+
+from memo_system import shift
+
+HEADER = ("<tr><td></td><td>08:30-12:30</td><td>09:00-12:00</td><td>09:00-18:00</td>"
+          "<td>14:00-18:00</td><td>19:00-21:00</td></tr>")
+UNASSIGNED = '<p style="background:#616161"><span>未配班 2 人</span><br><span>4檸檬人70</span><br><span>4檸檬人40</span></p>'
+HTML = (
+    '<input id="date" value="2027-02-01"><table>' + HEADER +
+    "<tr><td>02-04<br>(四)</td>"
+    "<td><span>11-02</span><br>♂♀ 李先生 V<br>48汪才閔4 X<br>4檸檬人50<br>" + UNASSIGNED + "</td>"
+    "<td>11-02<br>趙妍婷 V<br>33黃柏維2 X<br>8張志豪3"
+    "<br>11-02<br>檸檬保留 V<br>3偏翮2 X<br>4檸檬人30<br>" + UNASSIGNED + "</td>"
+    "<td>11-20<br>林秀娟<br>4檸檬人20<br>4檸檬人60</td>"
+    "<td>11-02<br>王櫻娟 V<br>8吳爽1 X<br>11-02<br>莊知霖 V<br>4呂筠蓁2 X<br>4檸檬人10</td>"
+    "<td></td></tr>" + HEADER +
+    "<tr><td>02-05<br>(五)</td><td>未配班 1 人<br>4檸檬人90</td><td></td><td></td><td></td><td></td></tr>"
+    "</table>"
+)
+
+
+class OrderLemonCountTest(unittest.TestCase):
+    def test_period_group(self):
+        self.assertEqual(shift.period_group("08:30-12:30"), "上午")
+        self.assertEqual(shift.period_group("09:00-11:00"), "上午")
+        self.assertEqual(shift.period_group("09:00-16:00"), "全天")
+        self.assertEqual(shift.period_group("14:00-17:00"), "下午")
+        self.assertEqual(shift.period_group("19:00-21:00"), "晚上")
+
+    def test_excludes_reserve_orders_and_unassigned_box(self):
+        entries = shift.parse_order_lemon_entries(HTML, "2027-02-01")
+        got = {(e["date"], e["group"], e["name"], e["customer"]) for e in entries}
+        self.assertEqual(got, {
+            ("2027-02-04", "上午", "檸檬人5", "李先生"),
+            ("2027-02-04", "全天", "檸檬人2", "林秀娟"),
+            ("2027-02-04", "全天", "檸檬人6", "林秀娟"),
+            ("2027-02-04", "下午", "檸檬人1", "莊知霖"),
+        })
+
+    def test_count_range_per_day(self):
+        resp = MagicMock(text=HTML)
+        with patch.object(shift.memo, "session_get", return_value=resp):
+            result = shift.count_order_lemons_range(None, "2027-02-04", "2027-02-05")
+        d4, d5 = result["days"]
+        self.assertEqual((d4["上午"], d4["下午"], d4["全天"], d4["合計"]), (1, 1, 2, 4))
+        self.assertEqual((d5["上午"], d5["下午"], d5["全天"], d5["合計"]), (0, 0, 0, 0))
+        self.assertIn("莊知霖：檸檬人1", d4["明細"])
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class FormatProgressTest(unittest.TestCase):
+    def test_format_matches_line_text(self):
+        days = [
+            {"日期": "2027-02-16", "上午": 0, "下午": 0, "全天": 0, "晚上": 0},
+            {"日期": "2027-02-17", "上午": 1, "下午": 1, "全天": 0, "晚上": 0},
+            {"日期": "2027-02-04", "上午": 0, "下午": 1, "全天": 0, "晚上": 0},
+        ]
+        self.assertEqual(shift.format_lemon_progress(days),
+                         "檸檬人待換專員進度：\n02/17-上午-1，下午-1\n02/04-下午-1")
