@@ -109,3 +109,26 @@ class MergedOrderTest(unittest.TestCase):
         # 蘇玉珮當天只有一張單：就算備註有勿動也照算（只排除合併訂單）
         day = self.run_count([("王上惠", ""), ("蘇玉珮", "檸檬人勿動")])["days"][0]
         self.assertEqual(day["上午"], 3)
+
+
+class PurchaseJsonNoticeTest(unittest.TestCase):
+    """訂單管理頁是 Vue：客服備註在內嵌 purchaseList JSON，不在表格。"""
+
+    def test_merged_order_excluded_via_json(self):
+        import json
+        items = [
+            {"order_no": "LC1", "name": "王上惠", "notice": "**2-4**檸檬人勿動", "member": {"name": "王上惠"}},
+            {"order_no": "LC2", "name": "王上惠", "notice": "", "member": {"name": "王上惠"}},
+            {"order_no": "LC3", "name": "蘇玉珮", "notice": "", "member": {"name": "蘇玉珮", "memo": "檸檬人勿動"}},
+        ]
+        page = "<script>new Vue({data:{purchaseList: " + json.dumps({"data": items}, ensure_ascii=False) + "}})</script>"
+
+        def fake_get(_session, url, params=None):
+            if url.endswith("/schedule"):
+                return MagicMock(text=MERGED_SCHEDULE)
+            return MagicMock(text=page)
+
+        with patch.object(shift.memo, "session_get", side_effect=fake_get):
+            result = shift.count_order_lemons_range(None, "2026-11-23", "2026-11-23")
+        self.assertEqual(result["days"][0]["上午"], 1)
+        self.assertEqual({e["name"] for e in result["excluded"]}, {"檸檬人1", "檸檬人2"})

@@ -1654,6 +1654,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                         merged["days"] += part["days"]
                         merged["entries"] += part["entries"]
                         merged.setdefault("excluded", []).extend(part.get("excluded") or [])
+                        merged.setdefault("merged_kept", []).extend(part.get("merged_kept") or [])
                     st.session_state.lemon_count_result = merged
                 st.rerun()
             except Exception as e:
@@ -1672,9 +1673,6 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         if not days:
             st.info("這個日期區間的訂單（不含檸檬保留單）沒有檸檬人。")
             return
-        if result.get("excluded"):
-            st.caption("已排除合併訂單（同一客人當天多張單、客服備註有「檸檬人勿動」）：" + "、".join(
-                f"{e['date'][5:]} {e['customer']} {e['name']}" for e in result["excluded"]))
         text = shift.format_lemon_progress(result["days"])
         st.text_area("檸檬人待換專員進度（可直接複製）", text, height=min(60 + 22 * len(days), 500), key="lemon_count_text")
         try:

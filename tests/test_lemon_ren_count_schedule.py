@@ -28,7 +28,7 @@ class LemonRenCountScheduleTest(unittest.TestCase):
         self.assertEqual(ev["summary"], "【檸檬人待換專員】台北 2 天 3 人次（11/20）")
         self.assertTrue(ev["description"].startswith(
             "檸檬人待換專員進度：\n02/04-下午-1\n02/17-上午-1，下午-1\n"))
-        self.assertIn("11-23 王上惠 檸檬人1", ev["description"])
+        self.assertNotIn("王上惠", ev["description"])  # 只放排除後的結果
 
     def test_writes_both_calendars_and_reports_each(self):
         written = []

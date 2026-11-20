@@ -1023,22 +1023,66 @@ def parse_purchase_notices(html: str) -> List[Dict]:
     return out
 
 
+def _json_strings(value) -> List[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [x for v in value.values() for x in _json_strings(v)]
+    if isinstance(value, list):
+        return [x for v in value for x in _json_strings(v)]
+    return []
+
+
+def parse_purchase_json_notices(html: str) -> Optional[List[Dict]]:
+    """訂單管理頁內嵌的 Vue purchaseList JSON → [{order_no, names, notice}]；沒有 JSON 回傳 None。
+
+    客服備註欄位名稱不固定，只要訂單資料（不含會員資料）任一文字欄位含「檸檬人勿動」就記在 notice。
+    """
+    from .atm import extract_purchase_list_json
+
+    data = extract_purchase_list_json(html or "")
+    if not data:
+        return None
+    out = []
+    for item in data.get("data") or []:
+        member = item.get("member") or {}
+        names = {str(item.get(k) or "") for k in ("name", "contact_name", "receiver_name")}
+        if isinstance(member, dict):
+            names.add(str(member.get("name") or ""))
+        own = {k: v for k, v in item.items() if k != "member"}
+        notice = "\n".join(x for x in _json_strings(own) if LEMON_KEEP_NOTE in x)
+        out.append({"order_no": str(item.get("order_no") or ""), "names": {n for n in names if n},
+                    "notice": notice})
+    return out
+
+
 def _lemon_keep_customers(session: requests.Session, date_val: str) -> set:
     """該服務日期，客服備註含「檸檬人勿動」的客人姓名（正規化後）。"""
     params = memo.blank_list_params()
     params["clean_date_s"] = params["clean_date_e"] = date_val
     keep = set()
+    seen_orders = set()
     seen_pages = set()
     for page in range(1, 31):
         params["page"] = str(page)
         r = memo.session_get(session, f"{memo.BASE_URL}/purchase", params=params)
         r.raise_for_status()
-        rows = parse_purchase_notices(r.text)
-        sig = tuple((x["name"], x["notice"]) for x in rows)
+        rows = parse_purchase_json_notices(r.text)
+        if rows is None:  # 沒有內嵌 JSON：退回讀表格
+            rows = [{"order_no": "", "names": {x["name"]}, "notice": x["notice"]}
+                    for x in parse_purchase_notices(r.text)]
+        sig = tuple(sorted((x["order_no"], tuple(sorted(x["names"]))) for x in rows))
         if not rows or sig in seen_pages:
             break
         seen_pages.add(sig)
-        keep |= {_norm_name(x["name"]) for x in rows if LEMON_KEEP_NOTE in x["notice"]}
+        new_rows = [x for x in rows if not x["order_no"] or x["order_no"] not in seen_orders]
+        if not new_rows:
+            break
+        for x in new_rows:
+            if x["order_no"]:
+                seen_orders.add(x["order_no"])
+            if LEMON_KEEP_NOTE in x["notice"]:
+                keep |= {_norm_name(n) for n in x["names"]}
         if len(rows) < 20:
             break
     return keep
@@ -1089,6 +1133,10 @@ def count_order_lemons_range(
                   and _norm_name(x["customer"]) in keep]:
             entries.remove(e)
             excluded.append(e)
+    merged_left = sorted({(e["date"], e["customer"]) for e in entries if e.get("same_day_orders", 1) >= 2})
+    if merged_left:
+        log("同一客人當天多張單、但客服備註沒查到「檸檬人勿動」（照算）：" + "、".join(
+            f"{d[5:]} {c}" for d, c in merged_left))
     if excluded:
         log(f"排除合併訂單（客服備註有「{LEMON_KEEP_NOTE}」）{len(excluded)} 筆：" + "、".join(
             f"{e['date'][5:]} {e['customer']} {e['name']}" for e in excluded))
@@ -1114,7 +1162,8 @@ def count_order_lemons_range(
         days.append(row)
         cur += timedelta(days=1)
     log(f"{s_text} ~ {e_text} 共 {len(entries)} 筆非保留單訂單的檸檬人")
-    return {"days": days, "entries": entries, "excluded": excluded}
+    return {"days": days, "entries": entries, "excluded": excluded,
+            "merged_kept": [{"date": d, "customer": c} for d, c in merged_left]}
 
 
 def format_lemon_progress(days: List[Dict], title: str = "檸檬人待換專員進度：") -> str:

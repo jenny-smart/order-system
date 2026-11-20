@@ -71,11 +71,7 @@ def build_calendar_event(region: str, result: dict, date_start: str, date_end: s
     lines = [format_lemon_progress(result.get("days") or [])]
     if not days:
         lines.append("（沒有待換專員的檸檬人）")
-    excluded = result.get("excluded") or []
-    if excluded:
-        lines += ["", "已排除合併訂單（同一客人當天多張單、客服備註有「檸檬人勿動」）："]
-        lines += [f"{e['date'][5:]} {e['customer']} {e['name']}" for e in excluded]
-    lines += ["", f"統計範圍：{region} {date_start}～{date_end}（不含檸檬保留單、未配班名單）"]
+    lines += ["", f"統計範圍：{region} {date_start}～{date_end}（不含檸檬保留單、未配班名單、合併訂單）"]
     return dict(
         summary=f"{CALENDAR_PREFIX}{region} {len(days)} 天 {total} 人次（{now:%m/%d}）",
         description="\n".join(lines),
