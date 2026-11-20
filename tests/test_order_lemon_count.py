@@ -63,3 +63,72 @@ class FormatProgressTest(unittest.TestCase):
         ]
         self.assertEqual(shift.format_lemon_progress(days),
                          "檸檬人待換專員進度：\n02/17-上午-1，下午-1\n02/04-下午-1")
+
+
+MERGED_SCHEDULE = (
+    '<input id="date" value="2026-11-23"><table>'
+    "<tr><td></td><td>08:30-12:30</td><td>09:00-12:00</td></tr>"
+    "<tr><td>11-23<br>(一)</td>"
+    "<td>11-17<br>王上惠<br>4檸檬人10 X<br>4檸檬人20"
+    "<br>11-08<br>高鈺欣 N<br>48周延澤2 X<br>48黃麗玲2 D"
+    "<br>11-19<br>王上惠<br>48吳承軒5 X<br>463李佳芸1 X<br>4陳蕙琪1</td>"
+    "<td>10-04<br>蘇玉珮 V<br>4檸檬人30</td></tr></table>"
+)
+
+
+def purchase_page(rows):
+    trs = "".join(
+        f'<tr><td>LC00{i}</td><td><a href="/member?keyword=x">{name}</a>'
+        + (f'<label alt="{note}" title="{note}">客服備註</label>' if note else "")
+        + "</td></tr>"
+        for i, (name, note) in enumerate(rows)
+    )
+    return f"<table><tbody>{trs}</tbody></table>"
+
+
+class MergedOrderTest(unittest.TestCase):
+    def run_count(self, purchase_rows):
+        def fake_get(_session, url, params=None):
+            if url.endswith("/schedule"):
+                return MagicMock(text=MERGED_SCHEDULE)
+            return MagicMock(text=purchase_page(purchase_rows) if params.get("page") == "1" else "")
+        with patch.object(shift.memo, "session_get", side_effect=fake_get):
+            return shift.count_order_lemons_range(None, "2026-11-23", "2026-11-23")
+
+    def test_same_customer_multi_orders_with_keep_note_excluded(self):
+        result = self.run_count([("王上惠", "**2-4**檸檬人勿動"), ("王上惠", ""), ("蘇玉珮", "")])
+        day = result["days"][0]
+        self.assertEqual((day["上午"], day["合計"]), (1, 1))  # 只剩蘇玉珮的檸檬人3
+        self.assertEqual({e["name"] for e in result["excluded"]}, {"檸檬人1", "檸檬人2"})
+
+    def test_multi_orders_without_keep_note_still_counted(self):
+        day = self.run_count([("王上惠", "**2-4**"), ("王上惠", "")])["days"][0]
+        self.assertEqual(day["上午"], 3)
+
+    def test_single_order_with_keep_note_still_counted(self):
+        # 蘇玉珮當天只有一張單：就算備註有勿動也照算（只排除合併訂單）
+        day = self.run_count([("王上惠", ""), ("蘇玉珮", "檸檬人勿動")])["days"][0]
+        self.assertEqual(day["上午"], 3)
+
+
+class PurchaseJsonNoticeTest(unittest.TestCase):
+    """訂單管理頁是 Vue：客服備註在內嵌 purchaseList JSON，不在表格。"""
+
+    def test_merged_order_excluded_via_json(self):
+        import json
+        items = [
+            {"order_no": "LC1", "name": "王上惠", "notice": "**2-4**檸檬人勿動", "member": {"name": "王上惠"}},
+            {"order_no": "LC2", "name": "王上惠", "notice": "", "member": {"name": "王上惠"}},
+            {"order_no": "LC3", "name": "蘇玉珮", "notice": "", "member": {"name": "蘇玉珮", "memo": "檸檬人勿動"}},
+        ]
+        page = "<script>new Vue({data:{purchaseList: " + json.dumps({"data": items}, ensure_ascii=False) + "}})</script>"
+
+        def fake_get(_session, url, params=None):
+            if url.endswith("/schedule"):
+                return MagicMock(text=MERGED_SCHEDULE)
+            return MagicMock(text=page)
+
+        with patch.object(shift.memo, "session_get", side_effect=fake_get):
+            result = shift.count_order_lemons_range(None, "2026-11-23", "2026-11-23")
+        self.assertEqual(result["days"][0]["上午"], 1)
+        self.assertEqual({e["name"] for e in result["excluded"]}, {"檸檬人1", "檸檬人2"})

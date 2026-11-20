@@ -4,7 +4,7 @@
 #       pages/訂單系統.py 呼叫。
 # 更新記錄：
 # 2026-11-20
-# - 排班管理新增「📊 檸檬人統計」：掃描班表，統計每日上午／下午／全天非檸檬保留單訂單裡的
+# - 新增獨立功能「📊 檸檬人統計」：掃描班表，統計每日上午／下午／全天非檸檬保留單訂單裡的
 #   檸檬人數（未配班名單、檸檬保留單不算），產生「檸檬人待換專員進度」文字可直接複製；
 #   可依月份（複選）或依日期區間統計。
 # - ATM ②配對依據說明加「金額 + M 欄付款時間」（±5 分鐘 → 已配對；只有日期 → 需確認）。
@@ -749,6 +749,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
             [
                 "📋 客服作業",
                 "📅 排班管理",
+                "📊 檸檬人統計",
                 "💰 財務對帳",
                 "💳 付款後5碼及星和診所比對",
                 "🔄 服務異動",
@@ -767,8 +768,9 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         </ol></div>""",
         "📅 排班管理": """
         <div class="info-strip"><b>可執行項目</b><ul>
-        <li>排班匯入</li><li>檸檬人勾班</li><li>清空排班</li><li>檸檬人統計</li>
+        <li>排班匯入</li><li>檸檬人勾班</li><li>清空排班</li>
         </ul><b>下一步</b><ul><li>請選擇下方排班子功能</li></ul></div>""",
+        "📊 檸檬人統計": '<div class="info-strip"><b>只讀取、不修改後台</b><ul><li>統計每日上午／下午／全天訂單裡的檸檬人（待換正式專員）</li><li>不算檸檬保留單、不算灰底未配班名單</li><li>同一客人當天多張單且客服備註有「檸檬人勿動」（合併訂單）也不算</li><li>上午＝12:30 前結束；下午＝12:00 後開始；其餘跨中午＝全天</li></ul></div>',
         "💰 財務對帳": """
         <div class="info-strip"><b>建議順序</b><ol>
         <li>待付款清單查詢</li><li>配對銀行明細</li><li>更新系統對帳</li>
@@ -808,7 +810,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         step("3", "選擇排班子功能")
         shift_sub_section = st.radio(
             "排班子功能",
-            ["📥 排班匯入", "🍋 檸檬人勾班", "🧹 清空排班", "📊 檸檬人統計"],
+            ["📥 排班匯入", "🍋 檸檬人勾班", "🧹 清空排班"],
             horizontal=True,
             label_visibility="collapsed",
             key="shift_sub_section",
@@ -816,7 +818,6 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         SHIFT_SUB_HELP = {
             "📥 排班匯入": '<div class="info-strip"><b>操作流程</b><ol><li>上傳 Excel / CSV</li><li>執行 Dry Run 預覽</li><li>確認合併結果</li><li>正式儲存</li></ol></div>',
             "🍋 檸檬人勾班": '<div class="info-strip"><b>操作流程</b><ol><li>輸入檸檬人名單</li><li>選擇起迄日期</li><li>選擇要勾的班別</li><li>批次勾班</li></ol></div>',
-            "📊 檸檬人統計": '<div class="info-strip"><b>只讀取、不修改後台</b><ul><li>統計每日上午／下午／全天訂單裡的檸檬人（待換正式專員）</li><li>不算檸檬保留單、不算灰底未配班名單</li><li>上午＝12:30 前結束；下午＝12:00 後開始；其餘跨中午＝全天</li></ul></div>',
             "🧹 清空排班": '<div class="warn-strip"><b>危險操作</b><ul><li>會直接修改後台排班</li><li>沒有逐筆預覽機制</li><li>請確認人員與日期後再執行</li></ul></div>',
         }
         st.markdown(SHIFT_SUB_HELP.get(shift_sub_section, ""), unsafe_allow_html=True)
@@ -1652,6 +1653,8 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                             session=session, date_start=r_start, date_end=r_end, ui_logger=count_ui_log)
                         merged["days"] += part["days"]
                         merged["entries"] += part["entries"]
+                        merged.setdefault("excluded", []).extend(part.get("excluded") or [])
+                        merged.setdefault("merged_kept", []).extend(part.get("merged_kept") or [])
                     st.session_state.lemon_count_result = merged
                 st.rerun()
             except Exception as e:
@@ -2203,10 +2206,11 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
             render_shift_import_section()
         elif shift_sub_section == "🍋 檸檬人勾班":
             render_lemon_assign_section()
-        elif shift_sub_section == "📊 檸檬人統計":
-            render_lemon_count_section()
         else:
             render_clear_shift_section()
+
+    elif main_section == "📊 檸檬人統計":
+        render_lemon_count_section()
 
     elif main_section == "💰 財務對帳":
         render_atm_section()
