@@ -5,7 +5,8 @@
 # 更新記錄：
 # 2026-11-20
 # - 排班管理新增「📊 檸檬人統計」：掃描班表，統計每日上午／下午／全天非檸檬保留單訂單裡的
-#   檸檬人數（未配班名單、檸檬保留單不算），產生「檸檬人待換專員進度」文字可直接複製。
+#   檸檬人數（未配班名單、檸檬保留單不算），產生「檸檬人待換專員進度」文字可直接複製；
+#   可依月份（複選）或依日期區間統計。
 # - ATM ②配對依據說明加「金額 + M 欄付款時間」（±5 分鐘 → 已配對；只有日期 → 需確認）。
 # 2026-11-12
 # - 服務異動新增「階段 C：自後台補齊＋同步 ATM 工作表」（memo_system/change_order_fill.py）：
@@ -1607,12 +1608,28 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
     # ============================================================
 
     def render_lemon_count_section():
-        step("3", "設定統計日期區間")
-        c1, c2 = st.columns(2)
-        with c1: count_start = st.date_input("開始日期", key="lemon_count_start")
-        with c2: count_end = st.date_input("結束日期", value=date.today() + timedelta(days=120), key="lemon_count_end")
+        import calendar as _calendar
+        step("3", "設定統計期間")
+        count_by = st.radio("統計方式", ["依月份", "依日期區間"], horizontal=True, key="lemon_count_by")
+        if count_by == "依月份":
+            today = date.today()
+            month_options = []
+            for i in range(-1, 12):
+                y, m = divmod(today.year * 12 + today.month - 1 + i, 12)
+                month_options.append(f"{y}-{m + 1:02d}")
+            picked = st.multiselect("月份（可複選）", month_options, default=[month_options[1]], key="lemon_count_months")
+            count_ranges = []
+            for ym in sorted(picked):
+                y, m = int(ym[:4]), int(ym[5:])
+                last = _calendar.monthrange(y, m)[1]
+                count_ranges.append((f"{ym}-01", f"{ym}-{last:02d}"))
+        else:
+            c1, c2 = st.columns(2)
+            with c1: count_start = st.date_input("開始日期", key="lemon_count_start")
+            with c2: count_end = st.date_input("結束日期", value=date.today() + timedelta(days=120), key="lemon_count_end")
+            count_ranges = [(count_start.strftime("%Y-%m-%d"), count_end.strftime("%Y-%m-%d"))]
         count_btn = st.button("📊 統計檸檬人", use_container_width=True, type="primary",
-                              disabled=not st.session_state.credentials_ready)
+                              disabled=not (st.session_state.credentials_ready and count_ranges))
 
         with st.expander("執行 LOG", expanded=False):
             log_box_local = st.empty()
@@ -1629,12 +1646,13 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                 st.session_state.lemon_count_result = None
                 with st.spinner("讀取班表中，請稍候…"):
                     session = get_session(ui_logger=count_ui_log)
-                    st.session_state.lemon_count_result = shift.count_order_lemons_range(
-                        session=session,
-                        date_start=count_start.strftime("%Y-%m-%d"),
-                        date_end=count_end.strftime("%Y-%m-%d"),
-                        ui_logger=count_ui_log,
-                    )
+                    merged = {"days": [], "entries": []}
+                    for r_start, r_end in count_ranges:
+                        part = shift.count_order_lemons_range(
+                            session=session, date_start=r_start, date_end=r_end, ui_logger=count_ui_log)
+                        merged["days"] += part["days"]
+                        merged["entries"] += part["entries"]
+                    st.session_state.lemon_count_result = merged
                 st.rerun()
             except Exception as e:
                 count_ui_log(f"❌ 統計失敗：{e}"); st.error(str(e))
