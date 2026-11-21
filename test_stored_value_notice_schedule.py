@@ -63,19 +63,18 @@ class CalendarEventTest(unittest.TestCase):
         self.assertIn("■ 台中：0 筆（X）", event["description"])
         self.assertEqual(event["replace_prefix"], "【儲值金客服備註空白】")
 
-    def test_write_calendar_falls_back_to_second_calendar(self):
+    def test_write_calendar_uses_notice_calendar(self):
         inserted = []
 
         def insert(service, calendar_id, **event):
-            if calendar_id == "jenny@hers.com.tw":
-                raise RuntimeError("404")
             inserted.append(calendar_id)
 
-        with patch("shared.atm_match_reconcile_schedule._insert_event", insert):
+        with patch.dict("os.environ", {"SCHEDULE_NOTICE_CALENDAR_ID": "notice@x"}), \
+             patch("shared.atm_match_reconcile_schedule._insert_event", insert):
             msg = svn.write_calendar({"台北": {"rows": [], "error": ""}}, (datetime(2026, 11, 9, 8), datetime(2026, 11, 10, 8)),
                                      datetime(2026, 11, 10, 8, 20, tzinfo=svn.TZ), service_factory=lambda cid: MagicMock())
-        self.assertEqual(inserted, ["jenny@lemonclean.com.tw"])
-        self.assertIn("jenny@lemonclean.com.tw", msg[0])
+        self.assertEqual(inserted, ["notice@x"])
+        self.assertIn("notice@x", msg[0])
 
 
 class CreatedTimeFilterTest(unittest.TestCase):

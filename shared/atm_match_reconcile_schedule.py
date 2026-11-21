@@ -11,7 +11,7 @@
      M 欄不是取消訂單、B 欄入帳日不早於 2026/11/06 的列；按已付款＋開立發票＋發確認信。
      訂單本來就已付款的不再發確認信；未開立發票的不發確認信。
      需確認／疑似拆單／非訂單收入一律留給人工。
-行事曆（預設 jenny@hers.com.tw，寫不進去改寫 jenny@lemonclean.com.tw；可用 ATM_CALENDAR_ID 指定）：
+行事曆（排程行事曆 SCHEDULE_NOTICE_CALENDAR_ID；2026-11-22 起不再記 jenny@hers.com.tw／jenny@lemonclean.com.tw）：
   當日完成對帳的訂單記一則「【ATM對帳】今日完成」（只留紀錄，不跳提醒）；
   已付款但未開立發票的另記「【ATM對帳】未開立發票」（30 分鐘後、提前 20／10 分鐘跳提醒）；
   ② 需確認／疑似拆單／未配對／清潔異動未回填等記「【ATM對帳】需人工處理」（同上提醒）。
@@ -30,7 +30,7 @@ from zoneinfo import ZoneInfo
 
 TOOL_NAME = "ATM 配對銀行明細＋更新系統對帳"
 TZ = ZoneInfo("Asia/Taipei")
-CALENDAR_IDS = ("jenny@hers.com.tw", "jenny@lemonclean.com.tw")
+# 行事曆：shared/notice_calendar.py（SCHEDULE_NOTICE_CALENDAR_ID）
 DONE_PREFIX = "【ATM對帳】今日完成"
 NO_INVOICE_PREFIX = "【ATM對帳】未開立發票"
 REVIEW_PREFIX = "【ATM對帳】需人工處理"
@@ -182,8 +182,11 @@ def write_calendar(result: dict, now: datetime | None = None, service_factory=_c
     events = build_calendar_events(result, now)
     if not events:
         return []
-    preferred = os.getenv("ATM_CALENDAR_ID", "").strip()
-    calendar_ids = (preferred,) if preferred else CALENDAR_IDS
+    from shared.notice_calendar import MISSING_MESSAGE, notice_calendar_ids
+
+    calendar_ids = notice_calendar_ids("ATM_CALENDAR_ID")
+    if not calendar_ids:
+        return [MISSING_MESSAGE]
     messages = []
     for kwargs in events:
         title = kwargs["replace_prefix"]

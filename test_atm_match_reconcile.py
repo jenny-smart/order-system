@@ -457,17 +457,32 @@ class _FakeEvents:
         return type("R", (), {"execute": lambda s: {}})()
 
 
-def test_write_calendar_falls_back_to_lemonclean(monkeypatch):
+def test_write_calendar_uses_notice_calendar_only(monkeypatch):
     from shared import atm_match_reconcile_schedule as job
 
-    monkeypatch.delenv("ATM_CALENDAR_ID", raising=False)
-    events = _FakeEvents(fail_ids={"jenny@hers.com.tw"})
+    monkeypatch.setenv("SCHEDULE_NOTICE_CALENDAR_ID", "notice@group.calendar.google.com")
+    monkeypatch.setenv("ATM_CALENDAR_ID", "jenny@hers.com.tw")  # 舊變數不再優先
+    events = _FakeEvents(fail_ids=set())
     service = type("S", (), {"events": lambda s: events})()
     done = {"region": "台北", "row": 5, "order_no": "LC1", "name": "甲", "amount": 4800}
     msgs = job.write_calendar({"台北": {"reconcile": {"completed": [done], "no_invoice": []}}},
                               now=datetime(2026, 11, 6, 8, 12, tzinfo=TZ), service_factory=lambda: service)
-    assert events.inserted == [("jenny@lemonclean.com.tw", "【ATM對帳】今日完成 1 筆（11/06）")]
-    assert msgs == ["已記入行事曆 jenny@lemonclean.com.tw：【ATM對帳】今日完成"]
+    assert events.inserted == [("notice@group.calendar.google.com", "【ATM對帳】今日完成 1 筆（11/06）")]
+    assert msgs == ["已記入行事曆 notice@group.calendar.google.com：【ATM對帳】今日完成"]
+
+
+def test_write_calendar_without_notice_calendar_writes_nothing(monkeypatch):
+    from shared import atm_match_reconcile_schedule as job
+
+    monkeypatch.setenv("SCHEDULE_NOTICE_CALENDAR_ID", "")
+    monkeypatch.delenv("ATM_CALENDAR_ID", raising=False)
+    events = _FakeEvents(fail_ids=set())
+    service = type("S", (), {"events": lambda s: events})()
+    done = {"region": "台北", "row": 5, "order_no": "LC1", "name": "甲", "amount": 4800}
+    msgs = job.write_calendar({"台北": {"reconcile": {"completed": [done], "no_invoice": []}}},
+                              now=datetime(2026, 11, 6, 8, 12, tzinfo=TZ), service_factory=lambda: service)
+    assert events.inserted == []
+    assert "SCHEDULE_NOTICE_CALENDAR_ID" in msgs[0]
 
 
 def test_preview_lists_rows_for_confirmation(monkeypatch):

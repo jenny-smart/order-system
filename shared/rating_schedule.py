@@ -2,6 +2,9 @@
 """官網評價自動登記（雲端排程，上班日）＋整理電話／姓名連結。
 
 更新記錄：
+2026-11-22
+- 行事曆改記排程行事曆 SCHEDULE_NOTICE_CALENDAR_ID（shared/notice_calendar.py），不再記 jenny@hers.com.tw／jenny@lemonclean.com.tw；
+  沒設定時只回報、不寫任何行事曆。
 2026-11-11（新增）
 - complaint（上班日 07:00）：評價管理（/rating）中「服務滿意度」為不滿意或尚可的評價；
   滿意但評價項目有非正面（例：準時到達：無）或備註有負面字詞（NEGATIVE_KEYWORDS）也登記，客訴內容最前面註明交客服判斷；
@@ -13,7 +16,7 @@
 - 獨立功能「整理姓名／電話連結」（function/sheet_link_tool.py）：任一工作表指定姓名／電話欄套用同樣連結。
 - 電話一律放後台訂單管理電話查詢連結；姓名一律加上 LINE 聊天連結（查不到 LINE 就維持文字）。
 - 兩個排程的區間都是「前一上班日 07:00 ～ 今天 07:00」（依評價時間），已登記過的不重複貼。
-- 貼完記 jenny@hers.com.tw 行事曆（寫不進去改 jenny@lemonclean.com.tw；可用 RATING_CALENDAR_ID 指定）。
+- 貼完記排程行事曆（SCHEDULE_NOTICE_CALENDAR_ID）。
 
 由 tool-system 的 Cloud Schedule Router 依主控表「排程設定」派送 .github/workflows/rating-schedule.yml：
   rating_complaint_daily → job=complaint、rating_booking_daily → job=booking。
@@ -35,7 +38,7 @@ TZ = ZoneInfo("Asia/Taipei")
 CUTOFF = time(7, 0)
 REGIONS = ("台北", "台中")
 SHEET_CATEGORY = "內勤工作表單"
-CALENDAR_IDS = ("jenny@hers.com.tw", "jenny@lemonclean.com.tw")
+# 行事曆：shared/notice_calendar.py（SCHEDULE_NOTICE_CALENDAR_ID）
 WEEKDAY_ZH = "一二三四五六日"
 
 # ------------------------------------------------------------
@@ -386,10 +389,14 @@ def write_calendar(job: str, result: dict, window, now: datetime, service_factor
     from shared.atm_match_reconcile_schedule import _calendar_service, _insert_event, service_for
 
     service_factory = service_factory or _calendar_service
-    preferred = os.getenv("RATING_CALENDAR_ID", "").strip()
+    from shared.notice_calendar import MISSING_MESSAGE, notice_calendar_ids
+
+    calendar_ids = notice_calendar_ids("RATING_CALENDAR_ID")
+    if not calendar_ids:
+        return [MISSING_MESSAGE]
     event = build_calendar_event(job, result, window, now)
     last_error = None
-    for calendar_id in ((preferred,) if preferred else CALENDAR_IDS):
+    for calendar_id in calendar_ids:
         try:
             _insert_event(service_for(service_factory, calendar_id), calendar_id, **event)
             return [f"已記入行事曆 {calendar_id}"]

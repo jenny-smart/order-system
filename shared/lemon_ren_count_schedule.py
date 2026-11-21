@@ -19,7 +19,7 @@
 - 預設只跑台北（台北後台帳號 accounts.ACCOUNTS）。
 - 結果記一則行事曆到獨立行事曆 SCHEDULE_NOTICE_CALENDAR_ID（不再寫 tpe@、jenny@）：
   標題「【檸檬人待換專員】台北 N 天 M 人次（MM/DD）」，內容＝「檸檬人待換專員進度：」文字；
-  同一天重跑只留最新一則。LEMON_REN_COUNT_CALENDAR_IDS（逗號分隔）優先。
+  同一天重跑只留最新一則。SCHEDULE_NOTICE_CALENDAR_ID 優先，沒設定才看 LEMON_REN_COUNT_CALENDAR_IDS。
 - 只讀取、不修改後台；統計失敗或行事曆全部寫不進去時 exit 1。
 """
 from __future__ import annotations
@@ -36,7 +36,7 @@ TOOL_NAME = "檸檬人統計：自動排程"
 TZ = ZoneInfo("Asia/Taipei")
 REGIONS = ("台北",)
 DEFAULT_MONTHS = 3
-CALENDAR_IDS = ("tpe@lemonclean.com.tw", "jenny@lemonclean.com.tw")
+# 行事曆：shared/notice_calendar.py（SCHEDULE_NOTICE_CALENDAR_ID）
 CALENDAR_PREFIX = "【檸檬人待換專員】"
 
 
@@ -92,10 +92,9 @@ def write_calendar(event: dict, service_factory=None, calendar_ids=None) -> tupl
 
     service_factory = service_factory or _calendar_service
     if calendar_ids is None:
-        env_ids = [x.strip() for x in os.getenv("LEMON_REN_COUNT_CALENDAR_IDS", "").split(",") if x.strip()]
-        from shared.unassigned_staff import require_notice_calendar_ids
+        from shared.notice_calendar import require_notice_calendar_ids
 
-        calendar_ids = tuple(env_ids) or require_notice_calendar_ids()
+        calendar_ids = require_notice_calendar_ids("LEMON_REN_COUNT_CALENDAR_IDS")
     messages, ok = [], 0
     for calendar_id in calendar_ids:
         try:
