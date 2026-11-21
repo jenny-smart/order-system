@@ -2,6 +2,8 @@
 """記錄未配班人員：自動排程。未來 2 週某時段未配班只剩 1 位專員，記到獨立行事曆。
 
 更新記錄：
+2026-11-22
+- 只寫排程行事曆 SCHEDULE_NOTICE_CALENDAR_ID，不再預設 tpe@／jenny@。
 2026-11-21
 - 新增（Jenny）。由 tool-system 的 Cloud Schedule Router 依主控表「排程設定」
   （功能代號 unassigned_staff_record）派送 .github/workflows/unassigned-staff-record-schedule.yml。
@@ -10,7 +12,7 @@
 - 範圍＝明天起 14 天；不算檸檬人與晚上時段。
 - 一則行事曆：標題「【未配班剩1人】台北 N 個時段（MM/DD）」，內容每行「2026/11/24 下午-1」；
   同一天重跑只留最新一則。
-- 寫到 SCHEDULE_NOTICE_CALENDAR_ID（獨立行事曆）；還沒設定時先寫 tpe@、jenny@lemonclean.com.tw。
+- 只寫 SCHEDULE_NOTICE_CALENDAR_ID（排程行事曆）；沒設定時報錯，不寫 tpe@／jenny@。
 - 只讀取、不修改後台。
 """
 from __future__ import annotations
@@ -77,13 +79,16 @@ def run(env: str = "prod", today: date | None = None, regions=REGIONS, days: int
         log: Callable[[str], None] = lambda t: print(t, flush=True)) -> dict:
     import orders  # noqa: F401  （與其他排程相同的載入順序）
     from accounts import ACCOUNTS
-    from shared.unassigned_staff import build_calendar_event, notice_calendar_ids, single_left
+    from shared.unassigned_staff import build_calendar_event, require_notice_calendar_ids, single_left
 
     scan = scan or _scan_region
     now = datetime.now(TZ)
     today = today or now.date()
     date_start, date_end = date_range(today, days)
-    calendar_ids = tuple(calendar_ids) if calendar_ids is not None else notice_calendar_ids()
+    if calendar_ids is not None:
+        calendar_ids = tuple(calendar_ids)
+    elif not dry_run:
+        calendar_ids = require_notice_calendar_ids()
     log(f"RANGE {date_start} ～ {date_end}（{'、'.join(regions)}）")
 
     failed, out = [], {}
