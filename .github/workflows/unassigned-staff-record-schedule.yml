@@ -23,7 +23,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: unassigned-staff-record-schedule
+  # 與「未配班成立保留單」共用：兩支不同時讀班表
+  group: unassigned-staff
   cancel-in-progress: false
 
 jobs:

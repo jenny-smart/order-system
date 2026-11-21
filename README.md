@@ -88,6 +88,7 @@ VIP提前異動費目前保留每2人1小時200／300元，待確認是否改為
 
 - ① 成立保留單：日期區間內只要有未配班就成立檸檬保留單（不管是不是新增）。同一天同一時段（上午／下午／全天）合成一張：人數＝人數、時數取最短（1人2小時＋1人3小時 → 2人2小時；1 人也成立 1人單）。每輪先重讀班表；後台查不到這麼多人（例如有人不服務保留地址）時人數減 1 再試。備註與「保留單紀錄」沿用檸檬保留單建單。
 - ② 記錄未配班人員：明天起 14 天，某時段未配班只剩 1 位專員，記「2026/11/24 下午-1」到行事曆。每日排程：`shared/unassigned_staff_schedule.py`（功能代號 `unassigned_staff_record`，`.github/workflows/unassigned-staff-record-schedule.yml`）。
+- ① 也有排程：`shared/unassigned_reserve_schedule.py`（功能代號 `unassigned_reserve_create`，`.github/workflows/unassigned-reserve-schedule.yml`），08:30～17:30 每小時；區間暫訂 2027/01/22～02/04（repository variable `UNASSIGNED_RESERVE_START`／`UNASSIGNED_RESERVE_END` 可改），台北、保留會員 0939592628、儲值金。兩支 workflow 共用 concurrency group，不會同時讀班表。
 - 獨立行事曆：GitHub Secret／Streamlit Secrets `SCHEDULE_NOTICE_CALENDAR_ID`（行事曆 ID，需能用 `GOOGLE_CALENDAR_REFRESH_TOKEN` 那個帳號寫入）。只寫這個行事曆，不再寫 tpe@、jenny@；「檸檬人待換專員」排程也一樣。
 
 ## 颱風假訂單移轉

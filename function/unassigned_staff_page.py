@@ -2,6 +2,7 @@
 """未配班檢查頁：① 成立保留單 ② 記錄未配班人員（只剩 1 人的時段）。
 
 變更紀錄
+- 2026-11-22：① 預設日期＝保留單排程區間（2027/01/22～02/04）；① 也有每小時排程（shared/unassigned_reserve_schedule.py）。
 - 2026-11-21：新增。邏輯在 shared/unassigned_staff.py；
   ② 的每日排程在 shared/unassigned_staff_schedule.py。
 """
@@ -58,11 +59,13 @@ def _render_reserve(env, lookup, get_region_by_address) -> None:
         payway = st.selectbox("付款類型", ["儲值金", "信用卡", "ATM"], index=0, key="unassigned_reserve_payway")
     region = get_region_by_address(address, ACCOUNTS) or "台北"
     d1, d2 = st.columns(2)
-    tomorrow = date.today() + timedelta(days=1)
+    from shared.unassigned_reserve_schedule import RESERVE_END, RESERVE_START
+
+    # 預設＝保留單排程的區間（暫訂 2027/01/22～02/04）
     with d1:
-        start = st.date_input("開始日期", value=tomorrow, key="unassigned_reserve_start")
+        start = st.date_input("開始日期", value=date.fromisoformat(RESERVE_START), key="unassigned_reserve_start")
     with d2:
-        end = st.date_input("結束日期", value=tomorrow + timedelta(days=6), key="unassigned_reserve_end")
+        end = st.date_input("結束日期", value=date.fromisoformat(RESERVE_END), key="unassigned_reserve_end")
     if st.button("讀取未配班並產生保留計畫", width="stretch", key="unassigned_reserve_scan"):
         with st.spinner("讀取班表中…"):
             try:
