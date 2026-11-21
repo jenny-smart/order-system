@@ -109,7 +109,7 @@ def _render_reserve(env, lookup, get_region_by_address) -> None:
 def _render_record(lookup, region: str) -> None:
     from shared.unassigned_staff_schedule import DEFAULT_DAYS, date_range, write_calendar
 
-    st.caption("未來 2 週某時段未配班只剩 1 位專員，記到獨立行事曆（每日排程：tool-system 排程設定 "
+    st.caption("未來 2 週某時段未配班只剩 1 位專員，記到行事曆（每日排程：tool-system 排程設定 "
                "功能代號 unassigned_staff_record）。")
     today = date.today()
     date_start, date_end = date_range(today, DEFAULT_DAYS)
@@ -131,10 +131,8 @@ def _render_record(lookup, region: str) -> None:
         st.dataframe(pd.DataFrame([{"日期": r["date"], "時段": r["group"], "專員": r["name"], "勾班時數": r["hours"]}
                                    for r in rows]), width="stretch", hide_index=True)
     ids = us.notice_calendar_ids()
-    if not ids:
-        st.warning(f"尚未設定獨立行事曆（{us.NOTICE_CALENDAR_ENV}），無法記入行事曆。")
-        return
-    if st.button("記入獨立行事曆", width="stretch", key="unassigned_record_write"):
+    st.caption("記入：" + "、".join(ids))
+    if st.button("記入行事曆", width="stretch", key="unassigned_record_write"):
         from zoneinfo import ZoneInfo
 
         event = us.build_calendar_event(region, rows, date_start, date_end, datetime.now(ZoneInfo("Asia/Taipei")))

@@ -9,7 +9,7 @@
   → 2人2小時；只有 1 人就成立 1人單）。後台查不到這麼多人（例如有人不服務保留地址）時，
   人數減 1 再試，直到 1 人。
   功能2 記錄未配班人員：未來 2 週某天某時段未配班只剩 1 位專員，記「YYYY/MM/DD 下午-1」，
-  寫到獨立行事曆（SCHEDULE_NOTICE_CALENDAR_ID），不寫 tpe@／jenny@。
+  寫到獨立行事曆（SCHEDULE_NOTICE_CALENDAR_ID）；還沒設定時先寫 tpe@、jenny@lemonclean.com.tw。
 
 規則：
 - 檸檬人是占位用的，不算專員（不建保留單、也不算進只剩 1 人）。
@@ -39,10 +39,16 @@ CALENDAR_PREFIX = "【未配班剩1人】"
 NOTICE_CALENDAR_ENV = "SCHEDULE_NOTICE_CALENDAR_ID"
 
 
-def notice_calendar_ids() -> tuple:
+# 獨立行事曆還沒建之前，先記在原本的行事曆（與檸檬人待換專員相同）
+DEFAULT_CALENDAR_IDS = ("tpe@lemonclean.com.tw", "jenny@lemonclean.com.tw")
+
+
+def notice_calendar_ids(default: tuple = DEFAULT_CALENDAR_IDS) -> tuple:
+    """SCHEDULE_NOTICE_CALENDAR_ID（逗號分隔）；沒設定時用 default。"""
     import os
 
-    return tuple(x.strip() for x in os.getenv(NOTICE_CALENDAR_ENV, "").split(",") if x.strip())
+    ids = tuple(x.strip() for x in os.getenv(NOTICE_CALENDAR_ENV, "").split(",") if x.strip())
+    return ids or tuple(default)
 _PERIOD_RE = re.compile(r"\d{1,2}:\d{2}-\d{1,2}:\d{2}")
 _COUNT_RE = re.compile(r"未配班\s*(\d+)\s*人")
 

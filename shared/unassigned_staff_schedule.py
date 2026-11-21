@@ -10,7 +10,7 @@
 - 範圍＝明天起 14 天；不算檸檬人與晚上時段。
 - 一則行事曆：標題「【未配班剩1人】台北 N 個時段（MM/DD）」，內容每行「2026/11/24 下午-1」；
   同一天重跑只留最新一則。
-- 寫到 SCHEDULE_NOTICE_CALENDAR_ID（獨立行事曆）；沒設定時 exit 1，不寫進 tpe@／jenny@。
+- 寫到 SCHEDULE_NOTICE_CALENDAR_ID（獨立行事曆）；還沒設定時先寫 tpe@、jenny@lemonclean.com.tw。
 - 只讀取、不修改後台。
 """
 from __future__ import annotations
@@ -77,15 +77,13 @@ def run(env: str = "prod", today: date | None = None, regions=REGIONS, days: int
         log: Callable[[str], None] = lambda t: print(t, flush=True)) -> dict:
     import orders  # noqa: F401  （與其他排程相同的載入順序）
     from accounts import ACCOUNTS
-    from shared.unassigned_staff import NOTICE_CALENDAR_ENV, build_calendar_event, notice_calendar_ids, single_left
+    from shared.unassigned_staff import build_calendar_event, notice_calendar_ids, single_left
 
     scan = scan or _scan_region
     now = datetime.now(TZ)
     today = today or now.date()
     date_start, date_end = date_range(today, days)
     calendar_ids = tuple(calendar_ids) if calendar_ids is not None else notice_calendar_ids()
-    if not calendar_ids and not dry_run:
-        raise RuntimeError(f"尚未設定獨立行事曆 {NOTICE_CALENDAR_ENV}，不寫進 tpe@／jenny@")
     log(f"RANGE {date_start} ～ {date_end}（{'、'.join(regions)}）")
 
     failed, out = [], {}

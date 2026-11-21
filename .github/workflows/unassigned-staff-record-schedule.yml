@@ -4,7 +4,7 @@
 # 派送過來（不用 GitHub cron）。也可以在這裡手動執行。
 # 規則見 shared/unassigned_staff_schedule.py：範圍＝明天起 14 天，不算檸檬人。
 #
-# 需要的 Secrets：SCHEDULE_NOTICE_CALENDAR_ID（獨立行事曆 ID）、GOOGLE_SERVICE_ACCOUNT_JSON（執行 Log）、
+# 需要的 Secrets：SCHEDULE_NOTICE_CALENDAR_ID（獨立行事曆 ID，選填；沒設定時記 tpe@、jenny@）、GOOGLE_SERVICE_ACCOUNT_JSON（執行 Log）、
 # GOOGLE_CALENDAR_REFRESH_TOKEN＋GOOGLE_CALENDAR_CLIENT_ID／SECRET（或 GOOGLE_OAUTH_CLIENT_ID／SECRET）、TAIPEI_EMAIL／PASSWORD
 name: Unassigned Staff Record Schedule
 run-name: ${{ inputs.scheduled_slot && format('cloud-{0}', inputs.scheduled_slot) || 'Unassigned Staff Record Schedule' }}

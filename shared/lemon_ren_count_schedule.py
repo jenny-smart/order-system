@@ -93,7 +93,7 @@ def write_calendar(event: dict, service_factory=None, calendar_ids=None) -> tupl
         env_ids = [x.strip() for x in os.getenv("LEMON_REN_COUNT_CALENDAR_IDS", "").split(",") if x.strip()]
         from shared.unassigned_staff import notice_calendar_ids
 
-        calendar_ids = tuple(env_ids) or notice_calendar_ids() or CALENDAR_IDS
+        calendar_ids = tuple(env_ids) or notice_calendar_ids(CALENDAR_IDS)
     messages, ok = [], 0
     for calendar_id in calendar_ids:
         try:

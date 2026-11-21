@@ -96,10 +96,9 @@ class ScheduleTest(unittest.TestCase):
     def test_range_is_next_two_weeks(self):
         self.assertEqual(sch.date_range(date(2026, 11, 23)), ("2026-11-24", "2026-12-07"))
 
-    def test_requires_dedicated_calendar(self):
+    def test_defaults_to_existing_calendars_until_dedicated_one_is_set(self):
         with patch.dict("os.environ", {"SCHEDULE_NOTICE_CALENDAR_ID": ""}):
-            with self.assertRaises(RuntimeError):
-                self._run()
+            self.assertEqual(us.notice_calendar_ids(), ("tpe@lemonclean.com.tw", "jenny@lemonclean.com.tw"))
 
     def test_writes_only_dedicated_calendar(self):
         written = []
