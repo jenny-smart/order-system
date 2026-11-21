@@ -2,6 +2,9 @@
 """儲值金訂單客服備註空白：每日 08:20（上班日）列出訂購人姓名，記入行事曆。
 
 更新記錄：
+2026-11-22
+- 行事曆改記排程行事曆 SCHEDULE_NOTICE_CALENDAR_ID（shared/notice_calendar.py），不再記 jenny@hers.com.tw／jenny@lemonclean.com.tw；
+  沒設定時只回報、不寫任何行事曆。
 2026-11-12
 - 新增（Jenny）。由 tool-system 的 Cloud Schedule Router 依主控表「排程設定」
   （功能代號 stored_value_notice_daily）派送 .github/workflows/stored-value-notice-schedule.yml。
@@ -11,8 +14,7 @@
 - 查詢區間＝前一上班日 08:00 ～ 今天 08:00（依訂購時間；週一會涵蓋週五 08:00 起整個週末）。
 - 台北／台中各用自己的後台帳號查：購買項目＝儲值金、付款狀態＝待付款＋已付款、客服備註空白
   （orders.find_pending_stored_value_orders，與「儲值獎金備註」搜尋相同）。
-- 結果記一則 jenny@hers.com.tw 行事曆「【儲值金客服備註空白】台北 N 筆、台中 M 筆」
-  （寫不進去改寫 jenny@lemonclean.com.tw；可用 STORED_VALUE_NOTICE_CALENDAR_ID 指定），
+- 結果記一則排程行事曆（SCHEDULE_NOTICE_CALENDAR_ID）「【儲值金客服備註空白】台北 N 筆、台中 M 筆」，
   內容逐區列出訂購人姓名（附訂單編號、付款狀態、訂購時間）。同一天重跑只留最新一則。
 - 只查詢、記行事曆，不修改後台。
 
@@ -33,7 +35,7 @@ TZ = ZoneInfo("Asia/Taipei")
 CUTOFF = time(8, 0)
 REGIONS = ("台北", "台中")
 PURCHASE_STATUS = ["0", "1"]  # 待付款＋已付款（取消／退款不列）
-CALENDAR_IDS = ("jenny@hers.com.tw", "jenny@lemonclean.com.tw")
+# 行事曆：shared/notice_calendar.py（SCHEDULE_NOTICE_CALENDAR_ID）
 CALENDAR_PREFIX = "【儲值金客服備註空白】"
 
 
@@ -76,8 +78,11 @@ def write_calendar(result: dict, window, now: datetime, service_factory=None) ->
     from shared.atm_match_reconcile_schedule import _calendar_service, _insert_event, service_for
 
     service_factory = service_factory or _calendar_service
-    preferred = os.getenv("STORED_VALUE_NOTICE_CALENDAR_ID", "").strip()
-    calendar_ids = (preferred,) if preferred else CALENDAR_IDS
+    from shared.notice_calendar import MISSING_MESSAGE, notice_calendar_ids
+
+    calendar_ids = notice_calendar_ids("STORED_VALUE_NOTICE_CALENDAR_ID")
+    if not calendar_ids:
+        return [MISSING_MESSAGE]
     event = build_calendar_event(result, window, now)
     last_error = None
     for calendar_id in calendar_ids:

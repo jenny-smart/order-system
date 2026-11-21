@@ -2,6 +2,9 @@
 """客人備註非空白（雲端排程，上班日 08:30，區間截到 08:00，和儲值金客服備註同一區間）。
 
 更新記錄：
+2026-11-22
+- 行事曆改記排程行事曆 SCHEDULE_NOTICE_CALENDAR_ID（shared/notice_calendar.py），不再記 jenny@hers.com.tw／jenny@lemonclean.com.tw；
+  沒設定時只回報、不寫任何行事曆。
 2026-11-12
 - 兩個分頁都排除取消訂單／已退款。
 - 「訂購人」改為 HYPERLINK 到客戶 LINE 聊天（沒有 LINE 連結時照舊寫姓名）。
@@ -38,8 +41,7 @@
   訂單編號已在分頁上的不重複貼；沒有「客人備註」分頁時自動建立並寫標題列。
 - 另外跑「訂單客服備註」的①②③查詢（①有相同訂單／②無相同訂單／③已處理但 VIP 非儲值金或 **N-
   已非首次）→ 貼到同一個內勤工作表單的「客服備註」分頁，欄位與頁面列表相同，異動欄最前方。
-- 貼完在 jenny@hers.com.tw 行事曆記一則「【客人備註】台北 N 筆、台中 M 筆」（寫不進去改寫
-  jenny@lemonclean.com.tw；可用 CUSTOMER_MEMO_CALENDAR_ID 指定），內容列出逐筆訂單與工作表連結。
+- 貼完在排程行事曆（SCHEDULE_NOTICE_CALENDAR_ID）記一則「【客人備註】台北 N 筆、台中 M 筆」，內容列出逐筆訂單與工作表連結。
 
 Actions 紀錄只印各區筆數，不印客戶姓名、電話；逐筆明細寫進工作表與行事曆。
 """
@@ -71,7 +73,7 @@ NOTICE_TAB_TITLE = "客服備註"
 NOTICE_HEADER = ["備註日期時間", "標記", "訂單編號", "訂購人", "電話號碼", "地址", "服務日期", "付款狀態",
                  "異動單號", "異動項目", "異動時數", "異動客服備註", "異動註記"]
 NOTICE_KEY_COL = 3  # 「客服備註」分頁的訂單編號在 C 欄
-CALENDAR_IDS = ("jenny@hers.com.tw", "jenny@lemonclean.com.tw")
+# 行事曆：shared/notice_calendar.py（SCHEDULE_NOTICE_CALENDAR_ID）
 CALENDAR_PREFIX = "【客人備註】"
 
 
@@ -331,8 +333,11 @@ def write_calendar(result: dict, window, now: datetime, service_factory=None) ->
     from shared.atm_match_reconcile_schedule import _calendar_service, _insert_event, service_for
 
     service_factory = service_factory or _calendar_service
-    preferred = os.getenv("CUSTOMER_MEMO_CALENDAR_ID", "").strip()
-    calendar_ids = (preferred,) if preferred else CALENDAR_IDS
+    from shared.notice_calendar import MISSING_MESSAGE, notice_calendar_ids
+
+    calendar_ids = notice_calendar_ids("CUSTOMER_MEMO_CALENDAR_ID")
+    if not calendar_ids:
+        return [MISSING_MESSAGE]
     event = build_calendar_event(result, window, now)
     last_error = None
     for calendar_id in calendar_ids:

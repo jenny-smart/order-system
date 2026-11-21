@@ -75,7 +75,7 @@ def render(backend_email, backend_password, env):
     if not n:
         st.info("都已登記過，沒有要新增的列。")
         return
-    add_calendar = st.checkbox("寫入後記 jenny@hers.com.tw 行事曆", value=True, key="rc_calendar")
+    add_calendar = st.checkbox("寫入後記排程行事曆", value=True, key="rc_calendar")
     if st.button(f"✍️ 寫入清潔客訴（新增 {n} 筆）", key="rc_write", type="primary", use_container_width=True):
         try:
             rs.write_complaints(plan)

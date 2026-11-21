@@ -37,24 +37,8 @@ GROUP_PERIODS: Dict[str, Dict[int, str]] = {
 }
 PERIOD_INFO = {p: (g, h) for g, m in GROUP_PERIODS.items() for h, p in m.items()}
 CALENDAR_PREFIX = "【未配班剩1人】"
-# 排程紀錄專用的獨立行事曆（未配班、檸檬人待換專員共用），避免寫進 tpe@／jenny@ 干擾
-NOTICE_CALENDAR_ENV = "SCHEDULE_NOTICE_CALENDAR_ID"
-
-
-
-
-def notice_calendar_ids() -> tuple:
-    """SCHEDULE_NOTICE_CALENDAR_ID（逗號分隔）。只記這個排程行事曆，不再寫 tpe@／jenny@。"""
-    import os
-
-    return tuple(x.strip() for x in os.getenv(NOTICE_CALENDAR_ENV, "").split(",") if x.strip())
-
-
-def require_notice_calendar_ids() -> tuple:
-    ids = notice_calendar_ids()
-    if not ids:
-        raise RuntimeError(f"尚未設定排程行事曆 {NOTICE_CALENDAR_ENV}（不再寫 tpe@／jenny@）")
-    return ids
+# 排程行事曆（共用，見 shared/notice_calendar.py）
+from shared.notice_calendar import NOTICE_CALENDAR_ENV, notice_calendar_ids, require_notice_calendar_ids  # noqa: E402,F401
 _PERIOD_RE = re.compile(r"\d{1,2}:\d{2}-\d{1,2}:\d{2}")
 _COUNT_RE = re.compile(r"未配班\s*(\d+)\s*人")
 
