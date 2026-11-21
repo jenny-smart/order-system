@@ -1,0 +1,50 @@
+# 未配班成立保留單：保留單區間（暫訂 2027/01/22～02/04）有未配班就成立檸檬保留單（同時段合成一張、時數取最短）
+#
+# 由 tool-system 的 Cloud Schedule Router 依主控表「排程設定」（功能代號 unassigned_reserve_create）
+# 派送過來（不用 GitHub cron）。也可以在這裡手動執行。
+# 規則見 shared/unassigned_reserve_schedule.py。會直接建訂單，沒有 dry run。
+#
+# 需要的 Secrets：GOOGLE_SERVICE_ACCOUNT_JSON（保留單紀錄、執行 Log）、TAIPEI_EMAIL／PASSWORD（TAICHUNG_ 選填）
+name: Unassigned Reserve Schedule
+run-name: ${{ inputs.scheduled_slot && format('cloud-{0}', inputs.scheduled_slot) || 'Unassigned Reserve Schedule' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      date: {description: "以這天當作執行日（YYYY-MM-DD，空白＝今天）", required: false, default: "", type: string}
+      regions: {description: "地區（逗號分隔，空白＝台北）", required: false, default: "", type: string}
+      start: {description: "保留單開始日（空白＝repository variable 或 2027-01-22）", required: false, default: "", type: string}
+      end: {description: "保留單結束日（空白＝repository variable 或 2027-02-04）", required: false, default: "", type: string}
+      env: {description: prod / dev, required: false, default: "prod", type: string}
+      scheduled_slot: {description: 排程設定派送時段（手動執行請留空）, required: false, default: "", type: string}
+
+permissions:
+  contents: read
+
+concurrency:
+  # 與「記錄未配班人員」共用：兩支不同時讀班表
+  group: unassigned-staff
+  cancel-in-progress: false
+
+jobs:
+  unassigned-reserve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12", cache: pip}
+      - run: pip install -r requirements.txt
+      - name: Create reserve orders for unassigned staff
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          TAIPEI_EMAIL: ${{ secrets.TAIPEI_EMAIL }}
+          TAIPEI_PASSWORD: ${{ secrets.TAIPEI_PASSWORD }}
+          TAICHUNG_EMAIL: ${{ secrets.TAICHUNG_EMAIL }}
+          TAICHUNG_PASSWORD: ${{ secrets.TAICHUNG_PASSWORD }}
+          RUN_DATE: ${{ inputs.date }}
+          RUN_ENV: ${{ inputs.env || 'prod' }}
+          REGIONS: ${{ inputs.regions }}
+          RESERVE_START: ${{ inputs.start || vars.UNASSIGNED_RESERVE_START }}
+          RESERVE_END: ${{ inputs.end || vars.UNASSIGNED_RESERVE_END }}
+        run: python -u -m shared.unassigned_reserve_schedule --env "$RUN_ENV" --date "$RUN_DATE" --start "$RESERVE_START" --end "$RESERVE_END" ${REGIONS:+--regions "$REGIONS"}

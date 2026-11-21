@@ -1,0 +1,150 @@
+# -*- coding: utf-8 -*-
+"""未配班成立保留單：自動排程。區間內有未配班專員就成立檸檬保留單。
+
+更新記錄：
+2026-11-22
+- 新增（Jenny）。由 tool-system 的 Cloud Schedule Router 依主控表「排程設定」
+  （功能代號 unassigned_reserve_create，08:30～17:30 每小時）派送
+  .github/workflows/unassigned-reserve-schedule.yml。
+
+規則（同「未配班檢查 → ① 成立保留單」，見 shared/unassigned_staff.py）：
+- 範圍：暫訂 2027/01/22～2027/02/04（RESERVE_START／RESERVE_END；可用 repository variable
+  UNASSIGNED_RESERVE_START／UNASSIGNED_RESERVE_END 或手動執行參數改）；開始日早於明天時從明天起，
+  過了結束日就略過。不算檸檬人、晚上時段。
+- 同一天同一時段（上午／下午／全天）合成一張：人數＝人數、時數取最短；1 人也成立 1人單。
+- 後台查不到這麼多人時人數減 1 再試。
+- 保留會員 0939592628、儲值金；地址用該區的保留地址（台北：信義路四段210號4樓、台中：館前路19號4樓）。
+- 備註、「保留單紀錄」工作表沿用檸檬保留單建單；結果寫執行 Log。
+"""
+from __future__ import annotations
+
+import argparse
+import traceback
+from datetime import date, datetime, timedelta
+from typing import Callable
+from zoneinfo import ZoneInfo
+
+TOOL_NAME = "未配班成立保留單：自動排程"
+TZ = ZoneInfo("Asia/Taipei")
+REGIONS = ("台北",)
+RESERVE_START, RESERVE_END = "2027-01-22", "2027-02-04"
+CITY = {"台北": "台北市", "台中": "台中市"}
+
+
+def date_range(today: date, start: str = "", end: str = "") -> tuple[str, str] | None:
+    """保留單區間；開始日早於明天就從明天起，已經過了結束日回傳 None。"""
+    import os
+
+    start = (start or os.getenv("UNASSIGNED_RESERVE_START", "") or RESERVE_START).strip()
+    end = (end or os.getenv("UNASSIGNED_RESERVE_END", "") or RESERVE_END).strip()
+    first = max(date.fromisoformat(start), today + timedelta(days=1))
+    last = date.fromisoformat(end)
+    return None if first > last else (first.isoformat(), last.isoformat())
+
+
+def _log(status: str, area: str, message: str, traceback_text: str = "") -> None:
+    try:
+        from shared.execution_log_service import log_execution
+
+        log_execution(function_name=TOOL_NAME, status=status, run_type="排程", area=area,
+                      message=message, traceback_text=traceback_text)
+    except Exception as exc:
+        print(f"WARN 執行 Log 寫入失敗：{exc}", flush=True)
+
+
+def pick_address(region: str, addresses: list[str]) -> str:
+    """該區的保留地址；會員沒有這個地址時用同城市的第一個地址。"""
+    from function.reserve_address import KEEP_ADDRESSES
+
+    city = CITY.get(region, region)
+    for keep in KEEP_ADDRESSES:
+        if keep.startswith(city) and keep in addresses:
+            return keep
+    same_city = [a for a in addresses if a.startswith(city)]
+    if same_city:
+        return same_city[0]
+    raise RuntimeError(f"保留會員沒有{region}的地址")
+
+
+def _run_region(env: str, region: str, email: str, password: str, date_start: str, date_end: str,
+                log: Callable[[str], None]) -> list[dict]:
+    from function.reserve_optimizer import login_reserve_member, member_addresses
+    from shared.unassigned_staff import _schedule_getter, build_plan, create_reserve_orders, scan_range
+
+    lookup = login_reserve_member(env, email, password)
+    address = pick_address(region, member_addresses(lookup))
+    plan = build_plan(scan_range(_schedule_getter(lookup), date_start, date_end))
+    log(f"{region}：保留地址 {address}；{len(plan)} 個日期時段有未配班")
+    for p in plan:
+        log(f"  {p['service_date']} {p['group']} {p['period']} {p['person']}人{p['hours']}小時：{p['staff']}")
+    if not plan:
+        return []
+    return create_reserve_orders(env_name=env, lookup_result=lookup, region=region, address=address,
+                                 plan=plan, payway="儲值金", log=log)
+
+
+def run(env: str = "prod", today: date | None = None, regions=REGIONS, start: str = "", end: str = "",
+        run_region=None, log: Callable[[str], None] = lambda t: print(t, flush=True)) -> dict:
+    import orders  # noqa: F401  （與其他排程相同的載入順序）
+    from accounts import ACCOUNTS
+
+    run_region = run_region or _run_region
+    today = today or datetime.now(TZ).date()
+    window = date_range(today, start, end)
+    if window is None:
+        log(f"已過保留單區間（{start or RESERVE_START}～{end or RESERVE_END}），略過")
+        return {"range": None, "result": {}}
+    date_start, date_end = window
+    log(f"RANGE {date_start} ～ {date_end}（{'、'.join(regions)}）")
+    failed, out = [], {}
+    for region in regions:
+        account = ACCOUNTS.get(region) or {}
+        email, password = str(account.get("email") or ""), str(account.get("password") or "")
+        if not email or not password:
+            log(f"{region}：略過（未設定後台帳密）")
+            out[region] = {"skipped": True}
+            continue
+        try:
+            results = run_region(env, region, email, password, date_start, date_end, log)
+        except Exception as exc:
+            msg = f"{type(exc).__name__}: {exc}"
+            log(f"❌ {region} 失敗：{msg}")
+            _log("失敗", region, f"{date_start}～{date_end}：{msg}", traceback.format_exc())
+            failed.append(region)
+            out[region] = {"error": msg}
+            continue
+        ok = [r for r in results if r.get("success")]
+        bad = [r for r in results if not r.get("success") and r.get("message") != "已無未配班專員"]
+        for r in results:
+            mark = "✅" if r.get("success") else "❌"
+            log(f"{mark} {r.get('service_date')} {r.get('group')} {r.get('period', '')} "
+                f"{r.get('person', 0)}人 {r.get('order_no', '')} {r.get('message', '')}".rstrip())
+        summary = f"{date_start}～{date_end}：成立 {len(ok)} 張" + (f"、未成立 {len(bad)} 個時段" if bad else "")
+        log(f"{region}：{summary}")
+        _log("失敗" if bad else "成功", region, summary + ("；" + "；".join(
+            f"{r.get('service_date')} {r.get('group')}：{r.get('message')}" for r in bad) if bad else ""))
+        out[region] = {"results": results}
+    if failed:
+        raise RuntimeError("未配班成立保留單失敗：" + "、".join(failed))
+    return {"range": (date_start, date_end), "result": out}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--env", default="prod")
+    parser.add_argument("--date", default="", help="以這天當作執行日（YYYY-MM-DD，測試用）")
+    parser.add_argument("--regions", default=",".join(REGIONS), help="逗號分隔，預設台北")
+    parser.add_argument("--start", default="", help=f"保留單開始日（空白＝{RESERVE_START}）")
+    parser.add_argument("--end", default="", help=f"保留單結束日（空白＝{RESERVE_END}）")
+    args = parser.parse_args()
+    today = date.fromisoformat(args.date) if args.date.strip() else None
+    regions = tuple(r.strip() for r in args.regions.split(",") if r.strip()) or REGIONS
+    try:
+        run(env=args.env, today=today, regions=regions, start=args.start.strip(), end=args.end.strip())
+    except Exception as exc:
+        _log("失敗", "、".join(regions), str(exc), traceback.format_exc())
+        raise
+
+
+if __name__ == "__main__":
+    main()
