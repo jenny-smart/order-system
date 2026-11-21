@@ -1,9 +1,13 @@
 # ============================================================
 # 檔名：ordersapp.py
-# 版本：v8.87
+# 版本：v8.88
 # 模組：服務訂單系統主畫面／統一功能選單
-# 最後更新：2026-11-20
+# 最後更新：2026-11-21
 #
+# v8.88
+# - 新增獨立功能「未配班檢查」（function/unassigned_staff_page.py），放在 B 類「檸檬人統計」下方：
+#   ① 成立保留單：日期區間內有未配班就成立檸檬保留單，同一天同一時段合成一張（人數＝人數、時數取最短）。
+#   ② 記錄未配班人員：未來 2 週只剩 1 位未配班的時段，記到獨立行事曆（SCHEDULE_NOTICE_CALENDAR_ID）。
 # v8.87
 # - 新增獨立功能「檸檬人統計」（memo_system.ui 的 📊 檸檬人統計），放在 B 類「檸檬人換正式專員」
 #   下方：依月份或日期區間統計每日上午／下午／全天訂單裡的檸檬人（不含檸檬保留單、未配班），
@@ -136,6 +140,7 @@ from function import batch_booking_optimized as _batch_booking_optimized_page
 from function import cloud_batch_booking as _cloud_batch_booking_page
 from function import reserve_menu as _reserve_menu_page
 from function import lemon_staff_replacement as _lemon_staff_replacement_page
+from function import unassigned_staff_page as _unassigned_staff_page
 from function.memo_router import render as _render_memo
 
 try:
@@ -222,6 +227,7 @@ FUNCTION_OPTIONS = [
     ("取消訂單：依電話（可留空）、服務月份／日期區間與付款狀態搜尋訂單，處理退款與備註。", "orders", "取消訂單"),
     ("檸檬人換正式專員：搜尋含檸檬人占位的訂單，依交通與配班規範推薦正式專員。", "orders", "檸檬人換正式專員"),
     ("檸檬人統計：依月份或日期區間，統計每日上午／下午／全天訂單裡待換專員的檸檬人數（不含檸檬保留單），產生進度文字。", "memo", "檸檬人統計"),
+    ("未配班檢查：① 有未配班就成立檸檬保留單（同時段合成一張、時數取最短）；② 未來 2 週只剩 1 位未配班的時段記到獨立行事曆。", "orders", "未配班檢查"),
     ("VIP 訂單／Google 日曆同步：同時查詢後台訂單與 Google 日曆，支援異動、取消、暫停與日曆更新。", "orders", "VIP 訂單／Google 日曆同步"),
     ("颱風假訂單移轉／比對：颱風假（可連放多天）訂單依時段逐筆用「修改日期」移到指定日期區間，時段不變；並可比對移轉後訂單目前日期，找出又被改過的訂單。", "orders", "颱風假訂單移轉"),
     ("訂單班表記錄與返回：先記錄執行日期區間的訂單班表（日期／時段／專員），人員或日期被調整後可返回記錄的班表，執行前後都可複製名單。", "orders", "訂單班表記錄與返回"),
@@ -352,6 +358,10 @@ if mode == "訂單班表記錄與返回":
 
     step("3", "訂單班表記錄與返回")
     _reschedule_page.render(backend_email, backend_password, env, copy_button=_copy_button)
+    st.stop()
+
+if mode == "未配班檢查":
+    _unassigned_staff_page.render(backend_email, backend_password, env)
     st.stop()
 
 if mode == "檸檬人換正式專員":

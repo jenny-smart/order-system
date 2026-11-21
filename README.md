@@ -82,6 +82,14 @@ VIP提前異動費目前保留每2人1小時200／300元，待確認是否改為
 - 檸檬保留刪除地址（`function/reserve_address.py`）：只留信義路、館前路兩個地址，其他地址不查訂單直接刪除；取消檸檬保留單時也順便清。
 - 成立／取消紀錄寫入「保留單紀錄」工作表（`shared/reserve_sheet_log.py`）。
 
+## 未配班檢查
+
+「B. 訂單附屬功能 → 未配班檢查」（`function/unassigned_staff_page.py`＋`shared/unassigned_staff.py`），讀 `/schedule` 灰底未配班名單；不算檸檬人、晚上時段。
+
+- ① 成立保留單：日期區間內只要有未配班就成立檸檬保留單（不管是不是新增）。同一天同一時段（上午／下午／全天）合成一張：人數＝人數、時數取最短（1人2小時＋1人3小時 → 2人2小時；1 人也成立 1人單）。每輪先重讀班表；後台查不到這麼多人（例如有人不服務保留地址）時人數減 1 再試。備註與「保留單紀錄」沿用檸檬保留單建單。
+- ② 記錄未配班人員：明天起 14 天，某時段未配班只剩 1 位專員，記「2026/11/24 下午-1」到行事曆。每日排程：`shared/unassigned_staff_schedule.py`（功能代號 `unassigned_staff_record`，`.github/workflows/unassigned-staff-record-schedule.yml`）。
+- 獨立行事曆：GitHub Secret／Streamlit Secrets `SCHEDULE_NOTICE_CALENDAR_ID`（行事曆 ID，需能用 `GOOGLE_CALENDAR_REFRESH_TOKEN` 那個帳號寫入）。還沒設定時先記在 tpe@、jenny@lemonclean.com.tw；「檸檬人待換專員」排程也改寫這個行事曆。
+
 ## 颱風假訂單移轉
 
 `function/typhoon_transfer.py`（邏輯）＋ `function/typhoon_transfer_page.py`（畫面）：颱風假日期（一天或區間）當天已付款訂單，依後台列表由上而下逐筆用「修改日期」移到指定日期區間，時段不變、日別只分平日與週末；結果可複製原／移轉後日期時段，並可追蹤目前日期（可貼沒有標題列的內容或上次追蹤結果）。
