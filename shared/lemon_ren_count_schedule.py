@@ -2,6 +2,9 @@
 """檸檬人統計（待換專員進度）自動排程：每日 11:00 統計台北訂單裡的檸檬人，記入行事曆。
 
 更新記錄：
+2026-11-21
+- 行事曆改寫到獨立行事曆 SCHEDULE_NOTICE_CALENDAR_ID（與「記錄未配班人員」共用），
+  不再寫 tpe@／jenny@，避免干擾；尚未設定時才沿用 tpe@、jenny@。
 2026-11-20
 - 統計範圍改為明天～＋3 個月月底（日期要大於今天）；執行紀錄不再每行印兩次。
 - 新增（Jenny）。由 tool-system 的 Cloud Schedule Router 依主控表「排程設定」
@@ -12,9 +15,9 @@
   不算檸檬保留單、灰底未配班名單、合併訂單（同一客人當天多張單且客服備註有「檸檬人勿動」）。
 - 統計範圍＝明天～＋3 個月的月底（例：11/20 執行 → 11/21～隔年 02/28）；今天以前已服務的不算。
 - 預設只跑台北（台北後台帳號 accounts.ACCOUNTS）。
-- 結果記一則行事曆到 tpe@lemonclean.com.tw 與 jenny@lemonclean.com.tw（兩個都寫，各自回報）：
+- 結果記一則行事曆到獨立行事曆 SCHEDULE_NOTICE_CALENDAR_ID（未設定時才寫 tpe@、jenny@）：
   標題「【檸檬人待換專員】台北 N 天 M 人次（MM/DD）」，內容＝「檸檬人待換專員進度：」文字；
-  同一天重跑只留最新一則。可用 LEMON_REN_COUNT_CALENDAR_IDS（逗號分隔）改寫入對象。
+  同一天重跑只留最新一則。LEMON_REN_COUNT_CALENDAR_IDS（逗號分隔）優先。
 - 只讀取、不修改後台；統計失敗或行事曆全部寫不進去時 exit 1。
 """
 from __future__ import annotations
@@ -88,7 +91,9 @@ def write_calendar(event: dict, service_factory=None, calendar_ids=None) -> tupl
     service_factory = service_factory or _calendar_service
     if calendar_ids is None:
         env_ids = [x.strip() for x in os.getenv("LEMON_REN_COUNT_CALENDAR_IDS", "").split(",") if x.strip()]
-        calendar_ids = tuple(env_ids) or CALENDAR_IDS
+        from shared.unassigned_staff import notice_calendar_ids
+
+        calendar_ids = tuple(env_ids) or notice_calendar_ids() or CALENDAR_IDS
     messages, ok = [], 0
     for calendar_id in calendar_ids:
         try:
