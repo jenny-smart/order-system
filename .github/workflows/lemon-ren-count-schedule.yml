@@ -3,7 +3,7 @@
 # 由 tool-system 的 Cloud Schedule Router 依主控表「排程設定」（功能代號 lemon_ren_count）
 # 派送過來（不用 GitHub cron）。也可以在這裡手動執行。
 # 規則見 shared/lemon_ren_count_schedule.py：統計範圍＝當月 1 日～＋3 個月的月底，
-# 結果記獨立行事曆 SCHEDULE_NOTICE_CALENDAR_ID（未設定時才記 tpe@、jenny@）。
+# 結果記獨立行事曆 SCHEDULE_NOTICE_CALENDAR_ID（不再寫 tpe@、jenny@）。
 #
 # 需要的 Secrets：GOOGLE_SERVICE_ACCOUNT_JSON（執行 Log）、GOOGLE_CALENDAR_REFRESH_TOKEN＋
 # GOOGLE_CALENDAR_CLIENT_ID／SECRET（或 GOOGLE_OAUTH_CLIENT_ID／SECRET）、TAIPEI_EMAIL／PASSWORD

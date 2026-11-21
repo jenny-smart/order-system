@@ -2,6 +2,8 @@
 """未配班檢查：讀 /schedule 灰底「未配班」名單，成立檸檬保留單／記錄只剩 1 人的時段。
 
 更新記錄：
+2026-11-22
+- 只寫排程行事曆 SCHEDULE_NOTICE_CALENDAR_ID，拿掉 tpe@／jenny@ 預設；沒設定時報錯、不寫任何行事曆。
 2026-11-21
 - 新增（Jenny）。
   功能1 成立保留單：日期區間內只要有未配班專員（不管是不是新增），同一天同一時段
@@ -9,7 +11,7 @@
   → 2人2小時；只有 1 人就成立 1人單）。後台查不到這麼多人（例如有人不服務保留地址）時，
   人數減 1 再試，直到 1 人。
   功能2 記錄未配班人員：未來 2 週某天某時段未配班只剩 1 位專員，記「YYYY/MM/DD 下午-1」，
-  寫到獨立行事曆（SCHEDULE_NOTICE_CALENDAR_ID）；還沒設定時先寫 tpe@、jenny@lemonclean.com.tw。
+  只寫排程行事曆（SCHEDULE_NOTICE_CALENDAR_ID），不寫 tpe@／jenny@。
 
 規則：
 - 檸檬人是占位用的，不算專員（不建保留單、也不算進只剩 1 人）。
@@ -39,16 +41,20 @@ CALENDAR_PREFIX = "【未配班剩1人】"
 NOTICE_CALENDAR_ENV = "SCHEDULE_NOTICE_CALENDAR_ID"
 
 
-# 獨立行事曆還沒建之前，先記在原本的行事曆（與檸檬人待換專員相同）
-DEFAULT_CALENDAR_IDS = ("tpe@lemonclean.com.tw", "jenny@lemonclean.com.tw")
 
 
-def notice_calendar_ids(default: tuple = DEFAULT_CALENDAR_IDS) -> tuple:
-    """SCHEDULE_NOTICE_CALENDAR_ID（逗號分隔）；沒設定時用 default。"""
+def notice_calendar_ids() -> tuple:
+    """SCHEDULE_NOTICE_CALENDAR_ID（逗號分隔）。只記這個排程行事曆，不再寫 tpe@／jenny@。"""
     import os
 
-    ids = tuple(x.strip() for x in os.getenv(NOTICE_CALENDAR_ENV, "").split(",") if x.strip())
-    return ids or tuple(default)
+    return tuple(x.strip() for x in os.getenv(NOTICE_CALENDAR_ENV, "").split(",") if x.strip())
+
+
+def require_notice_calendar_ids() -> tuple:
+    ids = notice_calendar_ids()
+    if not ids:
+        raise RuntimeError(f"尚未設定排程行事曆 {NOTICE_CALENDAR_ENV}（不再寫 tpe@／jenny@）")
+    return ids
 _PERIOD_RE = re.compile(r"\d{1,2}:\d{2}-\d{1,2}:\d{2}")
 _COUNT_RE = re.compile(r"未配班\s*(\d+)\s*人")
 

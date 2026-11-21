@@ -131,7 +131,10 @@ def _render_record(lookup, region: str) -> None:
         st.dataframe(pd.DataFrame([{"日期": r["date"], "時段": r["group"], "專員": r["name"], "勾班時數": r["hours"]}
                                    for r in rows]), width="stretch", hide_index=True)
     ids = us.notice_calendar_ids()
-    st.caption("記入：" + "、".join(ids))
+    if not ids:
+        st.warning(f"尚未設定排程行事曆（Streamlit Secrets {us.NOTICE_CALENDAR_ENV}），無法記入行事曆。")
+        return
+    st.caption("記入排程行事曆：" + "、".join(ids))
     if st.button("記入行事曆", width="stretch", key="unassigned_record_write"):
         from zoneinfo import ZoneInfo
 
