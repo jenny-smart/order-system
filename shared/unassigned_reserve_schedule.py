@@ -3,6 +3,8 @@
 
 更新記錄：
 2026-11-22
+- 結果記到排程行事曆 SCHEDULE_NOTICE_CALENDAR_ID：標題「【未配班保留單】台北 成立 N 張…（MM/DD）」；
+  內容跟今天最新一則一樣就不新增（留最早那則），有變才再新增一則。沒設定行事曆只略過、不算失敗。
 - 加入合併單人保留單：同時段 2 張以上 1 人保留單先取消，再重新成立 N 人單。
 - 區間日期接受 2027/01/22、2027/1/22 等寫法（repository variable 填斜線會失敗）。
 - 新增（Jenny）。由 tool-system 的 Cloud Schedule Router 依主控表「排程設定」
@@ -33,6 +35,38 @@ TZ = ZoneInfo("Asia/Taipei")
 REGIONS = ("台北",)
 RESERVE_START, RESERVE_END = "2027-01-22", "2027-02-04"
 CITY = {"台北": "台北市", "台中": "台中市"}
+CALENDAR_PREFIX = "【未配班保留單】"
+
+
+def build_calendar_event(region: str, results: list, date_start: str, date_end: str, now: datetime) -> dict:
+    ok = [r for r in results if r.get("success")]
+    bad = [r for r in results if not r.get("success") and r.get("message") != "已無未配班專員"]
+    lines = []
+    for r in ok:
+        lines.append(f"✅ {r.get('service_date')} {r.get('group')} {r.get('period', '')} "
+                     f"{r.get('person', 0)}人 {r.get('order_no', '')}".rstrip())
+    for r in bad:
+        lines.append(f"❌ {r.get('service_date')} {r.get('group')}：{r.get('message', '')}".rstrip())
+    if not lines:
+        lines = ["（沒有需要成立的保留單）"]
+    lines += ["", f"範圍：{region} {date_start}～{date_end}（不含檸檬人、晚上時段）"]
+    title = f"成立 {len(ok)} 張" + (f"、未成立 {len(bad)} 個時段" if bad else "")
+    return dict(summary=f"{CALENDAR_PREFIX}{region} {title}（{now:%m/%d}）", description="\n".join(lines),
+                start=now, reminder_minutes=[0], replace_prefix=f"{CALENDAR_PREFIX}{region}")
+
+
+def write_calendar(event: dict, service_factory=None, calendar_ids=None) -> list:
+    """記到排程行事曆（內容沒變不新增）；沒設定行事曆或寫失敗只回報，不影響保留單結果。"""
+    from shared.notice_calendar import MISSING_MESSAGE, notice_calendar_ids, write_if_changed
+
+    calendar_ids = tuple(calendar_ids) if calendar_ids is not None else notice_calendar_ids()
+    if not calendar_ids:
+        return [MISSING_MESSAGE]
+    try:
+        messages, _ok = write_if_changed(event, calendar_ids, service_factory)
+    except Exception as exc:
+        messages = [f"⚠️ 記入行事曆失敗：{type(exc).__name__}: {exc}"]
+    return messages
 
 
 def parse_day(value: str) -> date:
@@ -102,7 +136,8 @@ def _run_region(env: str, region: str, email: str, password: str, date_start: st
 
 
 def run(env: str = "prod", today: date | None = None, regions=REGIONS, start: str = "", end: str = "",
-        run_region=None, log: Callable[[str], None] = lambda t: print(t, flush=True)) -> dict:
+        run_region=None, log: Callable[[str], None] = lambda t: print(t, flush=True),
+        service_factory=None, calendar_ids=None) -> dict:
     import orders  # noqa: F401  （與其他排程相同的載入順序）
     from accounts import ACCOUNTS
 
@@ -139,6 +174,9 @@ def run(env: str = "prod", today: date | None = None, regions=REGIONS, start: st
                 f"{r.get('person', 0)}人 {r.get('order_no', '')} {r.get('message', '')}".rstrip())
         summary = f"{date_start}～{date_end}：成立 {len(ok)} 張" + (f"、未成立 {len(bad)} 個時段" if bad else "")
         log(f"{region}：{summary}")
+        for m in write_calendar(build_calendar_event(region, results, date_start, date_end, datetime.now(TZ)),
+                                service_factory=service_factory, calendar_ids=calendar_ids):
+            log(m)
         _log("失敗" if bad else "成功", region, summary + ("；" + "；".join(
             f"{r.get('service_date')} {r.get('group')}：{r.get('message')}" for r in bad) if bad else ""))
         out[region] = {"results": results}
