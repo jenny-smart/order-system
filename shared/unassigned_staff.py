@@ -3,6 +3,10 @@
 
 更新記錄：
 2026-11-22
+- 合併單人保留單（Jenny）：同一天同一時段（上午／下午／全天）有 2 張以上「1 人」的系統保留單，
+  先全部取消（客人備註改「取消系統保留單」），再依未配班重新成立一張 N 人保留單（時數取最短）。
+  排程與頁面「確定成立」都會做：合併 → 成立 → 再檢查一次合併 → 有取消就再成立。
+2026-11-22
 - 只寫排程行事曆 SCHEDULE_NOTICE_CALENDAR_ID，拿掉 tpe@／jenny@ 預設；沒設定時報錯、不寫任何行事曆。
 2026-11-21
 - 新增（Jenny）。
@@ -274,6 +278,79 @@ def create_reserve_orders(*, env_name: str, lookup_result, region: str, address:
         done(key, period="", person=0, success=False, order_no="", message=f"超過 {max_rounds} 輪仍未完成")
     results.sort(key=lambda r: (r["service_date"], GROUPS.index(r["group"])))
     return results
+
+
+# ---------------------------------------------------------------------------
+# 合併單人保留單：同時段 2 張以上 1 人保留單 → 取消後重新成立 N 人單
+# ---------------------------------------------------------------------------
+def _staff_names(value) -> List[str]:
+    return [n.strip() for n in re.split(r"\s*[Xx×]\s*|[,，、/]+", str(value or "")) if n.strip()]
+
+
+def find_single_reserve_groups(env_name: str, backend_email: str, backend_password: str,
+                               date_start: str, date_end: str, finder=None) -> Dict[tuple, List[Dict]]:
+    """(日期, 時段組) → 2 張以上的 1 人系統保留單（只取可取消、已付款的）。"""
+    from function.reserve_cancel import find_reserve_orders
+    from function.reserve_optimizer import RESERVE_PHONE_DEFAULT
+
+    finder = finder or find_reserve_orders
+    rows = finder(env_name, backend_email, backend_password, RESERVE_PHONE_DEFAULT, date_start, date_end,
+                  memo_filter="僅系統保留單")
+    groups: Dict[tuple, List[Dict]] = {}
+    for row in rows or []:
+        if not row.get("cancel_eligible"):
+            continue
+        period = re.sub(r"\s+", "", str(row.get("period") or ""))
+        info = PERIOD_INFO.get(period)
+        if not info or len(_staff_names(row.get("staff"))) != 1:
+            continue
+        groups.setdefault((str(row.get("service_date") or ""), info[0]), []).append(row)
+    return {k: v for k, v in sorted(groups.items()) if len(v) >= 2}
+
+
+def cancel_single_reserve_groups(env_name: str, backend_email: str, backend_password: str,
+                                 groups: Dict[tuple, List[Dict]], canceller=None,
+                                 log: Callable[[str], None] = lambda _t: None) -> List[Dict]:
+    """取消各組的 1 人保留單；回傳取消結果（含 ok／message）。"""
+    from function.reserve_cancel import cancel_reserve_orders
+
+    canceller = canceller or cancel_reserve_orders
+    out: List[Dict] = []
+    for (day, group), rows in groups.items():
+        names = "、".join(f"{r.get('order_no')}({r.get('staff')})" for r in rows)
+        log(f"{day} {group} 有 {len(rows)} 張 1 人保留單，取消後合併：{names}")
+        try:
+            results = canceller(env_name, backend_email, backend_password, rows, len(rows))
+        except Exception as exc:
+            results = [{**r, "ok": False, "message": f"取消失敗：{exc}"} for r in rows]
+        for r in results:
+            out.append({**r, "merge_group": group})
+    return out
+
+
+def merge_and_create(*, env_name: str, backend_email: str, backend_password: str, lookup_result, region: str,
+                     address: str, date_start: str, date_end: str, payway: str = "儲值金",
+                     get_html: Optional[Callable[[str], str]] = None, finder=None, canceller=None, creator=None,
+                     log: Callable[[str], None] = lambda _t: None) -> Dict[str, List[Dict]]:
+    """合併單人保留單 → 依未配班成立保留單 → 再檢查一次合併，有取消就再成立。"""
+    get_html = get_html or _schedule_getter(lookup_result)
+    creator = creator or create_reserve_orders
+    cancelled: List[Dict] = []
+    created: List[Dict] = []
+    for step in range(2):
+        groups = find_single_reserve_groups(env_name, backend_email, backend_password, date_start, date_end, finder)
+        if groups:
+            cancelled += cancel_single_reserve_groups(env_name, backend_email, backend_password, groups, canceller, log)
+        elif step == 1:
+            break
+        plan = build_plan(scan_range(get_html, date_start, date_end))
+        if step == 0 and not groups and not plan:
+            break
+        if plan:
+            log(f"{len(plan)} 個日期時段有未配班，成立保留單")
+            created += creator(env_name=env_name, lookup_result=lookup_result, region=region, address=address,
+                               plan=plan, payway=payway, get_html=get_html, log=log)
+    return {"cancelled": cancelled, "created": created}
 
 
 # ---------------------------------------------------------------------------
