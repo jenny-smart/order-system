@@ -1,9 +1,12 @@
 # ============================================================
 # 檔名：ordersapp.py
-# 版本：v8.88
+# 版本：v8.89
 # 模組：服務訂單系統主畫面／統一功能選單
-# 最後更新：2026-11-21
+# 最後更新：2026-11-22
 #
+# v8.89
+# - orders.py 載入失敗（GitHub 更新後熱重載留下殘缺模組，KeyError: 'shared'）時，
+#   先清掉 orders／quick_order／shared.*／function.* 再匯入一次；仍失敗才顯示錯誤並提示 Reboot app。
 # v8.88
 # - 新增獨立功能「未配班檢查」（function/unassigned_staff_page.py），放在 B 類「檸檬人統計」下方：
 #   ① 成立保留單：日期區間內有未配班就成立檸檬保留單，同一天同一時段合成一張（人數＝人數、時數取最短）。
@@ -68,11 +71,24 @@ import importlib
 import streamlit as st
 from datetime import date, timedelta
 
+def _purge_stale_modules():
+    """GitHub 更新後 Streamlit 熱重載可能留下殘缺的 shared／function 套件（KeyError: 'shared'），清掉再匯入一次。"""
+    import sys
+
+    for _name in list(sys.modules):
+        if _name in ("orders", "quick_order", "shared", "function") or _name.startswith(("shared.", "function.")):
+            sys.modules.pop(_name, None)
+
+
 try:
     import orders as orders_core
-except Exception as e:
-    st.error(f"orders.py 載入失敗：{type(e).__name__}: {e}")
-    st.stop()
+except Exception:
+    _purge_stale_modules()
+    try:
+        import orders as orders_core
+    except Exception as e:
+        st.error(f"orders.py 載入失敗：{type(e).__name__}: {e}（請到 Streamlit Cloud 按 Reboot app）")
+        st.stop()
 
 # 功能頁（function/*.py）在匯入時以 from orders import ... 取用的函式。
 _REQUIRED_ORDERS_NAMES = [
