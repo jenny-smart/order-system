@@ -2,6 +2,7 @@
 """未配班檢查頁：① 成立保留單 ② 記錄未配班人員（只剩 1 人的時段）。
 
 變更紀錄
+- 2026-11-22：① 確認改成兩段按鈕（成立 N 張 → 確定成立／取消），取代勾選框（正式機勾不起來）。
 - 2026-11-22：① 預設日期＝保留單排程區間（2027/01/22～02/04）；① 也有每小時排程（shared/unassigned_reserve_schedule.py）。
 - 2026-11-21：新增。邏輯在 shared/unassigned_staff.py；
   ② 的每日排程在 shared/unassigned_staff_schedule.py。
@@ -71,9 +72,17 @@ def _render_reserve(env, lookup, get_region_by_address) -> None:
             try:
                 summary = us.scan_range(us._schedule_getter(lookup), start.isoformat(), end.isoformat())
                 st.session_state.unassigned_reserve_plan = us.build_plan(summary)
+                st.session_state.unassigned_reserve_armed = False
                 st.session_state.pop("unassigned_reserve_result", None)
             except Exception as exc:
                 st.error(f"讀取班表失敗：{exc}")
+    result = st.session_state.get("unassigned_reserve_result")
+    if result:
+        st.markdown("**上次成立結果**")
+        st.dataframe(pd.DataFrame([{"結果": "✅" if r.get("success") else "❌", "日期": r.get("service_date", ""),
+                                    "時段": f"{r.get('group', '')} {r.get('period', '')}", "人數": r.get("person", 0),
+                                    "訂單編號": r.get("order_no", ""), "專員": r.get("staff", ""),
+                                    "說明": r.get("message", "")} for r in result]), width="stretch", hide_index=True)
     plan = st.session_state.get("unassigned_reserve_plan")
     if plan is None:
         return
@@ -83,8 +92,22 @@ def _render_reserve(env, lookup, get_region_by_address) -> None:
     st.dataframe(pd.DataFrame([{"日期": p["service_date"], "時段": p["group"], "保留單": f"{p['period']} {p['person']}人{p['hours']}小時",
                                 "未配班（勾班時數）": p["staff"]} for p in plan]), width="stretch", hide_index=True)
     total = len(plan)
-    confirm = st.checkbox(f"我確認要在{_env_label(env)}成立以上 {total} 張檸檬保留單", key="unassigned_reserve_confirm")
-    if st.button("確認成立保留單", type="primary", width="stretch", disabled=not confirm, key="unassigned_reserve_run"):
+    # 兩段按鈕確認（不用勾選框：正式機上勾選框勾不起來）
+    if not st.session_state.get("unassigned_reserve_armed"):
+        if st.button(f"成立以上 {total} 張檸檬保留單", type="primary", width="stretch", key="unassigned_reserve_arm"):
+            st.session_state.unassigned_reserve_armed = True
+            st.rerun()
+        return
+    st.warning(f"確定要在{_env_label(env)}成立以上 {total} 張檸檬保留單？")
+    c_ok, c_cancel = st.columns(2)
+    with c_cancel:
+        if st.button("取消", width="stretch", key="unassigned_reserve_cancel"):
+            st.session_state.unassigned_reserve_armed = False
+            st.rerun()
+    with c_ok:
+        run_now = st.button("確定成立", type="primary", width="stretch", key="unassigned_reserve_run")
+    if run_now:
+        st.session_state.unassigned_reserve_armed = False
         status = st.status("成立保留單中（每輪先重讀班表）…", expanded=True)
         try:
             results = us.create_reserve_orders(env_name=env, lookup_result=lookup, region=region, address=address,
@@ -101,12 +124,6 @@ def _render_reserve(env, lookup, get_region_by_address) -> None:
         st.session_state.unassigned_reserve_result = results
         st.session_state.pop("unassigned_reserve_plan", None)
         st.rerun()
-    result = st.session_state.get("unassigned_reserve_result")
-    if result:
-        st.dataframe(pd.DataFrame([{"結果": "✅" if r.get("success") else "❌", "日期": r.get("service_date", ""),
-                                    "時段": f"{r.get('group', '')} {r.get('period', '')}", "人數": r.get("person", 0),
-                                    "訂單編號": r.get("order_no", ""), "專員": r.get("staff", ""),
-                                    "說明": r.get("message", "")} for r in result]), width="stretch", hide_index=True)
 
 
 def _render_record(lookup, region: str) -> None:
