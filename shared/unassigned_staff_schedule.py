@@ -3,6 +3,8 @@
 
 更新記錄：
 2026-11-22
+- 行事曆不再「同一天只留最新一則」：內容跟今天最新一則一樣就不新增（留最早那則），有變才再新增一則。
+2026-11-22
 - 只寫排程行事曆 SCHEDULE_NOTICE_CALENDAR_ID，不再預設 tpe@／jenny@。
 2026-11-21
 - 新增（Jenny）。由 tool-system 的 Cloud Schedule Router 依主控表「排程設定」
@@ -60,23 +62,10 @@ def _scan_region(env: str, email: str, password: str, date_start: str, date_end:
 
 
 def write_calendar(event: dict, calendar_ids, service_factory=None) -> tuple[list[str], int]:
-    from shared.atm_match_reconcile_schedule import _calendar_service, _insert_event, calendar_auth_label, service_for
+    """2026-11-22：內容沒變就不新增（留當天最早那則），有變才再新增一則。"""
+    from shared.notice_calendar import write_if_changed
 
-    service_factory = service_factory or _calendar_service
-    messages, ok = [], 0
-    for calendar_id in calendar_ids:
-        try:
-            _insert_event(service_for(service_factory, calendar_id), calendar_id, **event)
-            messages.append(f"已記入行事曆 {calendar_id}")
-            ok += 1
-        except Exception as exc:
-            hint = ""
-            try:
-                hint = f"（{calendar_auth_label(calendar_id)}）"
-            except Exception:
-                pass
-            messages.append(f"⚠️ 記入行事曆 {calendar_id} 失敗{hint}：{type(exc).__name__}: {exc}")
-    return messages, ok
+    return write_if_changed(event, calendar_ids, service_factory)
 
 
 def run(env: str = "prod", today: date | None = None, regions=REGIONS, days: int = DEFAULT_DAYS,
