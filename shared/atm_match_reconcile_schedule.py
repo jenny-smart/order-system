@@ -113,6 +113,28 @@ def build_calendar_events(result: dict, now: datetime) -> list[dict]:
 HERS_CALENDAR_ID = "jenny@hers.com.tw"
 
 
+def _secret(name: str) -> str:
+    """環境變數優先；Streamlit 上 secrets 不一定轉成環境變數，再讀 st.secrets（2026-11-22）。"""
+    value = os.getenv(name, "").strip()
+    if value:
+        return value
+    try:
+        import streamlit as st
+
+        raw = st.secrets.get(name, "")
+        return raw.strip() if isinstance(raw, str) else ""
+    except Exception:
+        return ""
+
+
+def calendar_auth_label(calendar_id: str) -> str:
+    """寫入這個行事曆會用哪個身分（失敗訊息用）。"""
+    key = "GOOGLE_HERS_CALENDAR_REFRESH_TOKEN" if calendar_id == HERS_CALENDAR_ID else "GOOGLE_CALENDAR_REFRESH_TOKEN"
+    if _oauth_calendar_credentials(calendar_id) is not None:
+        return f"用 {key} 授權"
+    return f"用服務帳號（沒讀到 {key}＋GOOGLE_CALENDAR_CLIENT_ID／SECRET）"
+
+
 def _oauth_calendar_credentials(calendar_id: str):
     """
     Jenny 本人授權的行事曆憑證（與 tool-system calendar_notify 相同的 Secrets）：
@@ -123,9 +145,9 @@ def _oauth_calendar_credentials(calendar_id: str):
     from google.oauth2.credentials import Credentials as OAuthCredentials
 
     key = "GOOGLE_HERS_CALENDAR_REFRESH_TOKEN" if calendar_id == HERS_CALENDAR_ID else "GOOGLE_CALENDAR_REFRESH_TOKEN"
-    refresh_token = os.getenv(key, "").strip()
-    client_id = (os.getenv("GOOGLE_CALENDAR_CLIENT_ID", "") or os.getenv("GOOGLE_OAUTH_CLIENT_ID", "")).strip()
-    client_secret = (os.getenv("GOOGLE_CALENDAR_CLIENT_SECRET", "") or os.getenv("GOOGLE_OAUTH_CLIENT_SECRET", "")).strip()
+    refresh_token = _secret(key)
+    client_id = _secret("GOOGLE_CALENDAR_CLIENT_ID") or _secret("GOOGLE_OAUTH_CLIENT_ID")
+    client_secret = _secret("GOOGLE_CALENDAR_CLIENT_SECRET") or _secret("GOOGLE_OAUTH_CLIENT_SECRET")
     if not (refresh_token and client_id and client_secret):
         return None
     return OAuthCredentials(token=None, refresh_token=refresh_token, token_uri="https://oauth2.googleapis.com/token",
