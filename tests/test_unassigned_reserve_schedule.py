@@ -16,6 +16,12 @@ class RangeTest(unittest.TestCase):
         self.assertEqual(job.date_range(date(2027, 1, 25)), ("2027-01-26", "2027-02-04"))
         self.assertIsNone(job.date_range(date(2027, 2, 4)))
 
+    def test_slash_dates_accepted(self):
+        with patch.dict("os.environ", {"UNASSIGNED_RESERVE_START": "2027/01/22", "UNASSIGNED_RESERVE_END": "2027/2/4"}):
+            self.assertEqual(job.date_range(date(2026, 11, 22)), ("2027-01-22", "2027-02-04"))
+        with self.assertRaises(ValueError):
+            job.parse_day("1/22")
+
     def test_variable_override(self):
         with patch.dict("os.environ", {"UNASSIGNED_RESERVE_START": "2027-01-10", "UNASSIGNED_RESERVE_END": "2027-01-12"}):
             self.assertEqual(job.date_range(date(2026, 11, 22)), ("2027-01-10", "2027-01-12"))

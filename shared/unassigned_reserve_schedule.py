@@ -3,6 +3,7 @@
 
 更新記錄：
 2026-11-22
+- 區間日期接受 2027/01/22、2027/1/22 等寫法（repository variable 填斜線會失敗）。
 - 新增（Jenny）。由 tool-system 的 Cloud Schedule Router 依主控表「排程設定」
   （功能代號 unassigned_reserve_create，08:30～17:30 每小時）派送
   .github/workflows/unassigned-reserve-schedule.yml。
@@ -31,14 +32,24 @@ RESERVE_START, RESERVE_END = "2027-01-22", "2027-02-04"
 CITY = {"台北": "台北市", "台中": "台中市"}
 
 
+def parse_day(value: str) -> date:
+    """2027-01-22、2027/01/22、2027/1/22、2027.1.22 都可以（2026-11-22）。"""
+    import re
+
+    m = re.fullmatch(r"\s*(\d{4})\s*[-/.]\s*(\d{1,2})\s*[-/.]\s*(\d{1,2})\s*", str(value or ""))
+    if not m:
+        raise ValueError(f"日期格式看不懂：{value!r}（請填 2027/01/22 或 2027-01-22）")
+    return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+
+
 def date_range(today: date, start: str = "", end: str = "") -> tuple[str, str] | None:
     """保留單區間；開始日早於明天就從明天起，已經過了結束日回傳 None。"""
     import os
 
     start = (start or os.getenv("UNASSIGNED_RESERVE_START", "") or RESERVE_START).strip()
     end = (end or os.getenv("UNASSIGNED_RESERVE_END", "") or RESERVE_END).strip()
-    first = max(date.fromisoformat(start), today + timedelta(days=1))
-    last = date.fromisoformat(end)
+    first = max(parse_day(start), today + timedelta(days=1))
+    last = parse_day(end)
     return None if first > last else (first.isoformat(), last.isoformat())
 
 
@@ -137,7 +148,7 @@ def main():
     parser.add_argument("--start", default="", help=f"保留單開始日（空白＝{RESERVE_START}）")
     parser.add_argument("--end", default="", help=f"保留單結束日（空白＝{RESERVE_END}）")
     args = parser.parse_args()
-    today = date.fromisoformat(args.date) if args.date.strip() else None
+    today = parse_day(args.date) if args.date.strip() else None
     regions = tuple(r.strip() for r in args.regions.split(",") if r.strip()) or REGIONS
     try:
         run(env=args.env, today=today, regions=regions, start=args.start.strip(), end=args.end.strip())
