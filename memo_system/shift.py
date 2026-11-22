@@ -9,6 +9,9 @@
 2. submit_shift_payload 加上 month 參數，POST URL 帶 ?month=YYYY-MM。
 3. clear_person_shift_dates 確認當月有勾選才送出，無勾選直接略過。
 
+v2026.11.22-1：清空未配班檸檬人時，若該檸檬人當天另一個時段排在訂單上（含檸檬保留單），
+只保留訂單時段的勾選（例 全8 → 下3），不再整天清空（整天清空後台不會存，未配班會一直留著）。
+
 v2026.11.20-1：新增 count_order_lemons_range／format_lemon_progress：
 掃描 /schedule，統計每日上午／下午／全天「非檸檬保留單」訂單裡的檸檬人
 （灰底未配班名單不算；同一位客人當天多張單且客服備註有「檸檬人勿動」的合併訂單也不算），
@@ -528,11 +531,56 @@ def date_range(date_start: str, date_end: str) -> List[str]:
     return days
 
 
+_SLOT_LABELS = {(slot, value): label for label, (slot, value) in TYPE_MAP.items()}
+
+
+def _slot_label(slot: str, value: str) -> str:
+    return _SLOT_LABELS.get((slot, value), f"{slot}={value}")
+
+
+def period_to_slot(period: str) -> Optional[tuple]:
+    """班表時段（例 14:00-17:00）→ 排班勾選 (slot, value)；全天時段 → ("all", "6"／"8")。"""
+    m = re.search(r"(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})", str(period or ""))
+    if not m:
+        return None
+    value = f"{int(m.group(1)):02d}{m.group(2)}-{int(m.group(3)):02d}{m.group(4)}"
+    for slot, v in TYPE_MAP.values():
+        if v == value:
+            return slot, v
+    start, end = int(m.group(1)) * 60 + int(m.group(2)), int(m.group(3)) * 60 + int(m.group(4))
+    if start < 12 * 60 < end:  # 跨中午＝全天
+        return "all", "8" if end - start > 7 * 60 else "6"
+    return None
+
+
+def _slot_minutes(value: str) -> int:
+    m = re.fullmatch(r"(\d{2})(\d{2})-(\d{2})(\d{2})", value or "")
+    if not m:
+        return int(value) * 60 if str(value).isdigit() else 0  # 全天：6／8 小時
+    return (int(m.group(3)) * 60 + int(m.group(4))) - (int(m.group(1)) * 60 + int(m.group(2)))
+
+
+def keep_slots_for_periods(periods) -> Dict[str, str]:
+    """這天訂單用到的時段 → 要保留的勾選 {slot: value}；有全天就只留全天，同半天取較長的時段。"""
+    keep: Dict[str, str] = {}
+    for period in periods or []:
+        sv = period_to_slot(period)
+        if not sv:
+            continue
+        slot, value = sv
+        if slot not in keep or _slot_minutes(value) > _slot_minutes(keep[slot]):
+            keep[slot] = value
+    if "all" in keep:
+        return {"all": keep["all"]}
+    return keep
+
+
 def clear_person_shift_dates(
     session: requests.Session,
     name: str,
     dates_to_clear: List[str],
     ui_logger=None,
+    keep_slots: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> Dict:
     """
     清空指定人員在 dates_to_clear 這些日期的整天排班並儲存。
@@ -568,13 +616,21 @@ def clear_person_shift_dates(
             # 先計算這個月起迄範圍內有哪些日期真的有勾選
             removed_keys = []
             month_cleared_dates = []
+            keep_entries: Dict[str, str] = {}
             for d in dates:
+                keep = {f"{d}_{slot}": value for slot, value in ((keep_slots or {}).get(d) or {}).items()}
+                keep_entries.update(keep)
                 day_had_entry = False
                 for slot in ALL_SLOTS:
                     key = f"{d}_{slot}"
-                    if key in existing:
+                    if key in existing and keep.get(key) != existing[key]:
                         removed_keys.append(key)
                         day_had_entry = True
+                if any(existing.get(k) != v for k, v in keep.items()):
+                    day_had_entry = True
+                if keep:
+                    log(f"ℹ️ [{name} {d}] 當天另有訂單，保留訂單時段：" + "、".join(
+                        _slot_label(k.split("_", 1)[1], v) for k, v in keep.items()))
                 if day_had_entry:
                     result["cleared_dates"].append(d)
                     month_cleared_dates.append(d)
@@ -586,7 +642,7 @@ def clear_person_shift_dates(
                 log(f"ℹ️ [{name} {month}] 查詢範圍內這個月沒有任何已勾選的排班，略過")
                 continue
 
-            merged = merge_shift_entries(existing, {}, clear_dates=dates)
+            merged = merge_shift_entries(existing, keep_entries, clear_dates=dates)
             submit_shift_payload(
                 session, cleaner_id, token, merged,
                 month=month,
@@ -845,9 +901,12 @@ def find_unassigned_lemon_bookings(
     r.raise_for_status()
     actual_query_date = _parse_schedule_query_date(r.text, query_date)
     entries = parse_unassigned_lemon_entries(r.text, actual_query_date)
+    usage = parse_order_lemon_usage(r.text, actual_query_date)
     log(f"在 {query_date} 所在那週的清潔班表裡，找到 {len(entries)} 筆未配班清單中的檸檬人佔用紀錄")
     for e in entries:
-        log(f"  - {e['date']}　{e['name']}（原始文字：{e['raw']}）")
+        e["order_periods"] = usage.get((e["date"], e["name"]), [])
+        extra = f"；當天訂單時段 {'、'.join(e['order_periods'])}" if e["order_periods"] else ""
+        log(f"  - {e['date']}　{e['name']}（原始文字：{e['raw']}）{extra}")
     return entries
 
 
@@ -858,13 +917,18 @@ def clear_unassigned_lemon_bookings(
 ) -> List[Dict]:
     log = make_logger(ui_logger)
     by_name: Dict[str, List[str]] = {}
+    keep_by_name: Dict[str, Dict[str, Dict[str, str]]] = {}
     for e in entries:
         by_name.setdefault(e["name"], []).append(e["date"])
+        keep = keep_slots_for_periods(e.get("order_periods"))
+        if keep:  # 當天另一個時段排在訂單上（含檸檬保留單）：只留訂單時段，不整天清空
+            keep_by_name.setdefault(e["name"], {})[e["date"]] = keep
 
     results = []
     for name, dates in by_name.items():
         log(f"\n===== 清空檸檬人：{name}（{sorted(set(dates))}）=====")
-        res = clear_person_shift_dates(session, name, sorted(set(dates)), ui_logger=ui_logger)
+        res = clear_person_shift_dates(session, name, sorted(set(dates)), ui_logger=ui_logger,
+                                       keep_slots=keep_by_name.get(name))
         results.append(res)
     return results
 
@@ -990,6 +1054,40 @@ def parse_order_lemon_entries(html: str, query_date: str) -> List[Dict]:
     for e in results:  # 同一位客人當天在班表上共有幾張單（合併訂單判斷用）
         e["same_day_orders"] = day_orders.get((e["date"], _norm_name(e["customer"])), 1)
     return results
+
+
+def parse_order_lemon_usage(html: str, query_date: str) -> Dict[tuple, List[str]]:
+    """/schedule 一週班表：{(日期, 檸檬人): [訂單時段...]}，含檸檬保留單、不含灰底未配班名單。"""
+    soup = BeautifulSoup(html or "", "html.parser")
+    usage: Dict[tuple, List[str]] = {}
+    for table in soup.find_all("table"):
+        periods: List[str] = []
+        for tr in table.find_all("tr"):
+            cells = tr.find_all(["td", "th"], recursive=False)
+            if not cells:
+                continue
+            texts = [re.sub(r"\s+", "", c.get_text(" ", strip=True)) for c in cells]
+            if any(_PERIOD_RE.fullmatch(t) for t in texts[1:]):
+                periods = [t if _PERIOD_RE.fullmatch(t) else "" for t in texts]
+                continue
+            if not periods:
+                continue
+            date_val = _row_label_to_date(cells[0].get_text(" ", strip=True), query_date)
+            if not date_val:
+                continue
+            for idx, cell in enumerate(cells[1:], start=1):
+                period = periods[idx] if idx < len(periods) else ""
+                if not period:
+                    continue
+                cell = BeautifulSoup(str(cell), "html.parser")  # 複本：_parse_cell_orders 會拿掉灰底名單
+                for order in _parse_cell_orders(cell):
+                    for raw in order["staff"]:
+                        parsed = parse_lemon_label(raw)
+                        if parsed:
+                            lst = usage.setdefault((date_val, parsed["name"]), [])
+                            if period not in lst:
+                                lst.append(period)
+    return usage
 
 
 def _norm_name(name: str) -> str:
