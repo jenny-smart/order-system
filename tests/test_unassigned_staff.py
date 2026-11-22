@@ -135,7 +135,7 @@ class LemonCountCalendarTest(unittest.TestCase):
         with patch.dict("os.environ", {"SCHEDULE_NOTICE_CALENDAR_ID": "notice@x", "LEMON_REN_COUNT_CALENDAR_IDS": ""}), \
              patch("shared.atm_match_reconcile_schedule._insert_event", side_effect=lambda _s, cid, **_k: seen.append(cid)):
             lrc.write_calendar({}, service_factory=lambda _c: None)
-        self.assertEqual(seen, ["notice@x"])
+        self.assertEqual(seen, ["notice@x", "tpe@lemonclean.com.tw"])  # 2026-11-22：排程行事曆＋tpe@
 
 
 if __name__ == "__main__":
