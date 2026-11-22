@@ -2,6 +2,7 @@
 """未配班檢查頁：① 成立保留單 ② 記錄未配班人員（只剩 1 人的時段）。
 
 變更紀錄
+- 2026-11-22：① 專員全是檸檬人的保留單一併取消。
 - 2026-11-22：① 確定成立前後會合併單人保留單（同時段 2 張以上 1 人單 → 取消後成立 N 人單）。
 - 2026-11-22：① 確認改成兩段按鈕（成立 N 張 → 確定成立／取消），取代勾選框（正式機勾不起來）。
 - 2026-11-22：① 預設日期＝保留單排程區間（2027/01/22～02/04）；① 也有每小時排程（shared/unassigned_reserve_schedule.py）。
@@ -50,7 +51,7 @@ def _render_reserve(env, lookup, get_region_by_address, backend_email: str = "",
     st.caption("日期區間內只要有未配班就成立保留單：同一天同一時段（上午／下午／全天）合成一張，"
                "人數＝人數、時數取最短（1人2小時＋1人3小時 → 2人2小時；1 人也成立 1人單）。"
                "後台查不到這麼多人時（例如有人不服務保留地址），人數減 1 再試。"
-               "同一天同一時段已有 2 張以上 1 人保留單時，會先取消再合併成一張 N 人保留單。")
+               "同一天同一時段已有 2 張以上 1 人保留單時，會先取消再合併成一張 N 人保留單；專員全是檸檬人的保留單會取消。")
     addresses = member_addresses(lookup)
     if not addresses:
         st.error("保留會員沒有可用地址。")
@@ -81,7 +82,7 @@ def _render_reserve(env, lookup, get_region_by_address, backend_email: str = "",
     result = st.session_state.get("unassigned_reserve_result")
     if result:
         st.markdown("**上次成立結果**")
-        st.dataframe(pd.DataFrame([{"結果": "✅" if r.get("success") else ("🗑️" if r.get("message") == "已取消（合併）" else "❌"), "日期": r.get("service_date", ""),
+        st.dataframe(pd.DataFrame([{"結果": "✅" if r.get("success") else ("🗑️" if str(r.get("message", "")).startswith("已取消（") else "❌"), "日期": r.get("service_date", ""),
                                     "時段": f"{r.get('group', '')} {r.get('period', '')}", "人數": r.get("person", 0),
                                     "訂單編號": r.get("order_no", ""), "專員": r.get("staff", ""),
                                     "說明": r.get("message", "")} for r in result]), width="stretch", hide_index=True)
@@ -119,16 +120,17 @@ def _render_reserve(env, lookup, get_region_by_address, backend_email: str = "",
             results = out["created"] + [
                 {"success": False, "service_date": c.get("service_date", ""), "group": c.get("merge_group", ""),
                  "period": c.get("period", ""), "order_no": c.get("order_no", ""),
-                 "message": ("已取消（合併）" if c.get("ok") else f"合併取消失敗：{c.get('message', '')}")}
+                 "message": (("已取消（檸檬人）" if c.get("merge_group") == "檸檬人" else "已取消（合併）") if c.get("ok")
+                             else f"取消失敗：{c.get('message', '')}")}
                 for c in out["cancelled"]
             ]
             from shared.execution_log_service import log_execution
 
             ok = sum(1 for r in out["created"] if r.get("success"))
             merged = sum(1 for c in out["cancelled"] if c.get("ok"))
-            status.update(label=f"完成：成立 {ok} 張" + (f"、合併取消 {merged} 張 1 人保留單" if merged else ""), state="complete", expanded=False)
-            log_execution(function_name="未配班成立保留單", status="成功" if all(r.get("success") or r.get("message") == "已取消（合併）" for r in results) else "失敗",
-                          area=region, target=address, message=f"{start}～{end}：成立 {ok} 張、合併取消 {merged} 張")
+            status.update(label=f"完成：成立 {ok} 張" + (f"、取消 {merged} 張（合併 1 人單／檸檬人單）" if merged else ""), state="complete", expanded=False)
+            log_execution(function_name="未配班成立保留單", status="成功" if all(r.get("success") or str(r.get("message", "")).startswith("已取消（") for r in results) else "失敗",
+                          area=region, target=address, message=f"{start}～{end}：成立 {ok} 張、取消 {merged} 張（合併／檸檬人）")
         except Exception as exc:
             results = [{"success": False, "message": f"執行失敗：{exc}"}]
             status.update(label="執行失敗", state="error", expanded=True)

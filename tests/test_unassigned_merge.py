@@ -18,6 +18,9 @@ ROWS = [
     row("C2", "2027-01-24", "09:00-11:00", "林阿花"),
     row("D1", "2027-01-25", "09:00-16:00", "甲"),
     row("D2", "2027-01-25", "09:00-18:00", "乙", eligible=False),  # 不可取消 → 不算
+    row("L1", "2027-01-26", "09:00-12:00", "檸檬人1 X 檸檬人2"),  # 全檸檬人 → 取消
+    row("L2", "2027-01-26", "09:00-11:00", "檸檬人3"),             # 全檸檬人 → 取消，也不算 1 人單
+    row("M1", "2027-01-26", "14:00-17:00", "陳靜怡 X 檸檬人1"),    # 有正式專員 → 不動
 ]
 
 
@@ -26,6 +29,11 @@ class FindGroupsTest(unittest.TestCase):
         groups = us.find_single_reserve_groups("prod", "e", "p", "2027-01-22", "2027-02-04", finder=lambda *a, **k: ROWS)
         self.assertEqual(list(groups), [("2027-01-23", "上午")])
         self.assertEqual([r["order_no"] for r in groups[("2027-01-23", "上午")]], ["A1", "A2"])
+
+
+class LemonOnlyTest(unittest.TestCase):
+    def test_lemon_only(self):
+        self.assertEqual([r["order_no"] for r in us.lemon_only_reserves(ROWS)], ["L1", "L2"])
 
 
 class MergeAndCreateTest(unittest.TestCase):
@@ -64,9 +72,10 @@ class MergeAndCreateTest(unittest.TestCase):
                                       get_html=get_html, finder=finder, canceller=canceller, creator=creator)
         finally:
             us.scan_range = orig
-        self.assertEqual(state["cancelled"], ["A1", "A2"])
+        self.assertEqual(state["cancelled"], ["L1", "L2", "A1", "A2"])
         self.assertEqual(created, [[("2027-01-23", "上午", 2, 3)]])
-        self.assertEqual([c["order_no"] for c in out["cancelled"]], ["A1", "A2"])
+        self.assertEqual([(c["order_no"], c["merge_group"]) for c in out["cancelled"]],
+                         [("L1", "檸檬人"), ("L2", "檸檬人"), ("A1", "上午"), ("A2", "上午")])
         self.assertEqual(out["created"], [{"success": True, "order_no": "N1"}])
 
     def test_nothing_to_do_scans_once(self):

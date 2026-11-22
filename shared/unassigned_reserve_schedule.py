@@ -17,7 +17,8 @@
 - 後台查不到這麼多人時人數減 1 再試。
 - 保留會員 0939592628、儲值金；地址用該區的保留地址（台北：信義路四段210號4樓、台中：館前路19號4樓）。
 - 備註、「保留單紀錄」工作表沿用檸檬保留單建單；結果寫執行 Log。
-- 同一天同一時段有 2 張以上 1 人保留單：先取消，再重新成立 N 人保留單（shared/unassigned_staff.merge_and_create）。
+- 同一天同一時段有 2 張以上 1 人保留單：先取消，再重新成立 N 人保留單；專員全是檸檬人的保留單取消
+  （shared/unassigned_staff.merge_and_create）。
 """
 from __future__ import annotations
 
@@ -95,7 +96,7 @@ def _run_region(env: str, region: str, email: str, password: str, date_start: st
         log(f"{mark} 取消 {c.get('service_date')} {c.get('period', '')} {c.get('order_no')} {c.get('message', '')}".rstrip())
     return out["created"] + [
         {"service_date": c.get("service_date"), "group": c.get("merge_group"), "period": c.get("period", ""),
-         "success": False, "person": 0, "order_no": c.get("order_no", ""), "message": f"合併取消失敗：{c.get('message', '')}"}
+         "success": False, "person": 0, "order_no": c.get("order_no", ""), "message": f"取消失敗（{c.get('merge_group')}）：{c.get('message', '')}"}
         for c in out["cancelled"] if not c.get("ok")
     ]
 
