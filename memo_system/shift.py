@@ -1103,11 +1103,11 @@ def count_order_lemons_range(
     end = date.fromisoformat(date_end)
     if end < start:
         start, end = end, start
-    tomorrow = memo.today_tw().date() + timedelta(days=1)
-    if start < tomorrow:  # 只統計今天以後（已服務的單不算待換）
-        start = tomorrow
+    today = memo.today_tw().date()
+    if start < today:  # 日期不小於今天（今天以前已服務的單不算待換）
+        start = today
     if end < start:
-        log(f"{date_start} ~ {date_end} 都不在明天以後，不統計")
+        log(f"{date_start} ~ {date_end} 都在今天以前，不統計")
         return {"days": [], "entries": [], "excluded": [], "merged_kept": []}
     s_text, e_text = start.isoformat(), end.isoformat()
 

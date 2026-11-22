@@ -7,15 +7,17 @@
 2026-11-21
 - 行事曆改寫到獨立行事曆 SCHEDULE_NOTICE_CALENDAR_ID（與「記錄未配班人員」共用），
   不再寫 tpe@／jenny@，避免干擾；尚未設定時才沿用 tpe@、jenny@。
+2026-11-22
+- 統計範圍改為今天～＋3 個月月底（日期不小於當日，含今天）。
 2026-11-20
-- 統計範圍改為明天～＋3 個月月底（日期要大於今天）；執行紀錄不再每行印兩次。
+- 統計範圍改為明天～＋3 個月月底；執行紀錄不再每行印兩次。
 - 新增（Jenny）。由 tool-system 的 Cloud Schedule Router 依主控表「排程設定」
   （功能代號 lemon_ren_count）派送 .github/workflows/lemon-ren-count-schedule.yml。
 
 規則：
 - 等同 ordersapp【檸檬人統計】：memo_system.shift.count_order_lemons_range（同一套程式）。
   不算檸檬保留單、灰底未配班名單、合併訂單（同一客人當天多張單且客服備註有「檸檬人勿動」）。
-- 統計範圍＝明天～＋3 個月的月底（例：11/20 執行 → 11/21～隔年 02/28）；今天以前已服務的不算。
+- 統計範圍＝今天～＋3 個月的月底（例：11/22 執行 → 11/22～隔年 02/28）；日期不小於今天。
 - 預設只跑台北（台北後台帳號 accounts.ACCOUNTS）。
 - 結果記一則行事曆到獨立行事曆 SCHEDULE_NOTICE_CALENDAR_ID（不再寫 tpe@、jenny@）：
   標題「【檸檬人待換專員】台北 N 天 M 人次（MM/DD）」，內容＝「檸檬人待換專員進度：」文字；
@@ -41,12 +43,12 @@ CALENDAR_PREFIX = "【檸檬人待換專員】"
 
 
 def date_range(today: date, months: int = DEFAULT_MONTHS) -> tuple[str, str]:
-    """明天～＋months 個月的月底（含）。"""
+    """今天～＋months 個月的月底（含）。"""
     total = today.year * 12 + (today.month - 1) + months
     year, month = divmod(total, 12)
     month += 1
     end = date(year, month, calendar.monthrange(year, month)[1])
-    return (today + timedelta(days=1)).isoformat(), end.isoformat()
+    return today.isoformat(), end.isoformat()
 
 
 def _log(status: str, area: str, message: str, traceback_text: str = "") -> None:
@@ -78,7 +80,7 @@ def build_calendar_event(region: str, result: dict, date_start: str, date_end: s
     lines = [format_lemon_progress(result.get("days") or [])]
     if not days:
         lines.append("（沒有待換專員的檸檬人）")
-    lines += ["", f"統計範圍：{region} {date_start}～{date_end}（明天起；不含檸檬保留單、未配班名單、合併訂單）"]
+    lines += ["", f"統計範圍：{region} {date_start}～{date_end}（今天起；不含檸檬保留單、未配班名單、合併訂單）"]
     return dict(
         summary=f"{CALENDAR_PREFIX}{region} {len(days)} 天 {total} 人次（{now:%m/%d}）",
         description="\n".join(lines),
