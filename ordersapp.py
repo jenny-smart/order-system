@@ -1,9 +1,14 @@
 # ============================================================
 # 檔名：ordersapp.py
-# 版本：v8.88
+# 版本：v8.90
 # 模組：服務訂單系統主畫面／統一功能選單
-# 最後更新：2026-11-21
+# 最後更新：2026-11-22
 #
+# v8.90
+# - 「評價預約成單」從 F 類移到 A 類（建單／成單流程），放在「批次建單優化＋雲端批次成單」下方。
+# v8.89
+# - orders.py 載入失敗（GitHub 更新後熱重載留下殘缺模組，KeyError: 'shared'）時，
+#   先清掉 orders／quick_order／shared.*／function.* 再匯入一次；仍失敗才顯示錯誤並提示 Reboot app。
 # v8.88
 # - 新增獨立功能「未配班檢查」（function/unassigned_staff_page.py），放在 B 類「檸檬人統計」下方：
 #   ① 成立保留單：日期區間內有未配班就成立檸檬保留單，同一天同一時段合成一張（人數＝人數、時數取最短）。
@@ -68,11 +73,24 @@ import importlib
 import streamlit as st
 from datetime import date, timedelta
 
+def _purge_stale_modules():
+    """GitHub 更新後 Streamlit 熱重載可能留下殘缺的 shared／function 套件（KeyError: 'shared'），清掉再匯入一次。"""
+    import sys
+
+    for _name in list(sys.modules):
+        if _name in ("orders", "quick_order", "shared", "function") or _name.startswith(("shared.", "function.")):
+            sys.modules.pop(_name, None)
+
+
 try:
     import orders as orders_core
-except Exception as e:
-    st.error(f"orders.py 載入失敗：{type(e).__name__}: {e}")
-    st.stop()
+except Exception:
+    _purge_stale_modules()
+    try:
+        import orders as orders_core
+    except Exception as e:
+        st.error(f"orders.py 載入失敗：{type(e).__name__}: {e}（請到 Streamlit Cloud 按 Reboot app）")
+        st.stop()
 
 # 功能頁（function/*.py）在匯入時以 from orders import ... 取用的函式。
 _REQUIRED_ORDERS_NAMES = [
@@ -215,6 +233,7 @@ FUNCTION_OPTIONS = [
     ("批次建單：從 Google Sheet 逐列建立訂單、寄確認信、同步日曆。", "orders", "批次建單（Google Sheet）"),
     ("批次建單優化：儲值金訂單依同一人＋同一地址分組，可一次複選多個日期／時段建單。", "orders", "批次建單優化"),
     ("批次建單優化＋雲端批次成單：沿用批次優化核心，由雲端背景持續成單至完成。", "orders", "批次建單優化＋雲端批次成單"),
+    ("評價預約成單：內勤工作表單「評價預約」指定列，依表上日期（各約一單／擇一）交給雲端成單，寫回訂單編號與結果。", "orders", "評價預約成單"),
     ("檸檬保留單建單：依日期區間、時段與保留率分析班表並批次成立保留單。", "orders", "檸檬保留單建單"),
     ("檸檬保留單取消：依期間、複選時段與客人備註安全篩選並批次取消保留單。", "orders", "檸檬保留單取消"),
     ("檸檬保留刪除地址：只留信義路、館前路兩個地址，其他不再使用的客人地址一次刪除。", "orders", "檸檬保留刪除地址"),
@@ -252,7 +271,6 @@ FUNCTION_OPTIONS = [
     ("會員喜好設定：輸入電話查會員，設定喜愛專員性別與喜愛／不喜愛專員。", "orders", "會員喜好設定"),
     ("評價管理客訴：評價為尚可／不滿意，或滿意但意見有負面內容，登記到內勤工作表單「清潔客訴」。", "orders", "評價管理客訴"),
     ("整理預約下次服務：搜尋評價日期區間內有填預約下次服務的評價並整理名單。", "orders", "整理預約下次服務"),
-    ("評價預約成單：內勤工作表單「評價預約」指定列，依表上日期（各約一單／擇一）交給雲端成單，寫回訂單編號與結果。", "orders", "評價預約成單"),
     ("整理姓名／電話連結：任一工作表指定姓名／電話欄，姓名加 LINE 連結、電話加訂單管理電話查詢連結。", "orders", "整理姓名／電話連結"),
     ("更新建議下次服務時間：依地址＋電話查後台最近3次服務日期並寫回 Sheet。", "orders", "更新建議下次服務時間"),
     # ---------- G. 財務功能 ----------
