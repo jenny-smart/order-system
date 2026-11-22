@@ -30,26 +30,29 @@ class LemonRenCountScheduleTest(unittest.TestCase):
             "檸檬人待換專員進度：\n02/04-下午-1\n02/17-上午-1，下午-1\n"))
         self.assertNotIn("王上惠", ev["description"])  # 只放排除後的結果
 
-    def test_writes_only_notice_calendar_and_reports_each(self):
+    def test_writes_notice_calendar_and_tpe(self):
         written = []
 
         def fake_insert(_service, calendar_id, **_event):
-            if calendar_id.startswith("bad"):
+            if calendar_id.startswith("tpe"):
                 raise PermissionError("403")
             written.append(calendar_id)
 
-        env = {"SCHEDULE_NOTICE_CALENDAR_ID": "notice@group.calendar.google.com,bad@x", "LEMON_REN_COUNT_CALENDAR_IDS": ""}
+        env = {"SCHEDULE_NOTICE_CALENDAR_ID": "notice@group.calendar.google.com", "LEMON_REN_COUNT_CALENDAR_IDS": ""}
         with patch.dict("os.environ", env), \
              patch("shared.atm_match_reconcile_schedule._insert_event", side_effect=fake_insert):
             msgs, ok = job.write_calendar({"summary": "x"}, service_factory=lambda _cid: MagicMock())
         self.assertEqual(ok, 1)
         self.assertEqual(written, ["notice@group.calendar.google.com"])
-        self.assertTrue(any("bad@x 失敗" in m for m in msgs))
+        self.assertTrue(any("tpe@lemonclean.com.tw 失敗" in m for m in msgs))
 
-    def test_no_notice_calendar_raises_no_tpe_fallback(self):
-        with patch.dict("os.environ", {"SCHEDULE_NOTICE_CALENDAR_ID": "", "LEMON_REN_COUNT_CALENDAR_IDS": ""}):
-            with self.assertRaises(RuntimeError):
-                job.write_calendar({"summary": "x"}, service_factory=lambda _cid: MagicMock())
+    def test_no_notice_calendar_still_writes_tpe(self):
+        written = []
+        with patch.dict("os.environ", {"SCHEDULE_NOTICE_CALENDAR_ID": "", "LEMON_REN_COUNT_CALENDAR_IDS": ""}), \
+             patch("shared.atm_match_reconcile_schedule._insert_event",
+                   side_effect=lambda _s, cid, **_e: written.append(cid)):
+            _msgs, ok = job.write_calendar({"summary": "x"}, service_factory=lambda _cid: MagicMock())
+        self.assertEqual((ok, written), (1, ["tpe@lemonclean.com.tw"]))
 
     def test_run_dry_run(self):
         with patch.dict("accounts.ACCOUNTS", {"台北": {"email": "a", "password": "b"}}), \

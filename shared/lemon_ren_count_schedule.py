@@ -3,6 +3,9 @@
 
 更新記錄：
 2026-11-22
+- 除了排程行事曆 SCHEDULE_NOTICE_CALENDAR_ID，也記一份到 tpe@lemonclean.com.tw（EXTRA_CALENDAR_IDS）；
+  兩個各自回報，有一個寫成功就不算失敗。
+2026-11-22
 - 只寫排程行事曆 SCHEDULE_NOTICE_CALENDAR_ID，拿掉 tpe@／jenny@ 預設；沒設定時報錯。
 2026-11-21
 - 行事曆改寫到獨立行事曆 SCHEDULE_NOTICE_CALENDAR_ID（與「記錄未配班人員」共用），
@@ -19,7 +22,7 @@
   不算檸檬保留單、灰底未配班名單、合併訂單（同一客人當天多張單且客服備註有「檸檬人勿動」）。
 - 統計範圍＝今天～＋3 個月的月底（例：11/22 執行 → 11/22～隔年 02/28）；日期不小於今天。
 - 預設只跑台北（台北後台帳號 accounts.ACCOUNTS）。
-- 結果記一則行事曆到獨立行事曆 SCHEDULE_NOTICE_CALENDAR_ID（不再寫 tpe@、jenny@）：
+- 結果記一則行事曆到排程行事曆 SCHEDULE_NOTICE_CALENDAR_ID 與 tpe@lemonclean.com.tw：
   標題「【檸檬人待換專員】台北 N 天 M 人次（MM/DD）」，內容＝「檸檬人待換專員進度：」文字；
   同一天重跑只留最新一則。SCHEDULE_NOTICE_CALENDAR_ID 優先，沒設定才看 LEMON_REN_COUNT_CALENDAR_IDS。
 - 只讀取、不修改後台；統計失敗或行事曆全部寫不進去時 exit 1。
@@ -40,6 +43,8 @@ REGIONS = ("台北",)
 DEFAULT_MONTHS = 3
 # 行事曆：shared/notice_calendar.py（SCHEDULE_NOTICE_CALENDAR_ID）
 CALENDAR_PREFIX = "【檸檬人待換專員】"
+# 2026-11-22 Jenny：除了排程行事曆，也要記 tpe@lemonclean.com.tw（需共用給 jenny@lemonclean.com.tw「變更活動」）
+EXTRA_CALENDAR_IDS = ("tpe@lemonclean.com.tw",)
 
 
 def date_range(today: date, months: int = DEFAULT_MONTHS) -> tuple[str, str]:
@@ -94,9 +99,12 @@ def write_calendar(event: dict, service_factory=None, calendar_ids=None) -> tupl
 
     service_factory = service_factory or _calendar_service
     if calendar_ids is None:
-        from shared.notice_calendar import require_notice_calendar_ids
+        from shared.notice_calendar import MISSING_MESSAGE, notice_calendar_ids
 
-        calendar_ids = require_notice_calendar_ids("LEMON_REN_COUNT_CALENDAR_IDS")
+        notice_ids = notice_calendar_ids("LEMON_REN_COUNT_CALENDAR_IDS")
+        calendar_ids = tuple(dict.fromkeys(notice_ids + EXTRA_CALENDAR_IDS))  # 排程行事曆＋tpe@，去重
+        if not notice_ids:
+            print(MISSING_MESSAGE, flush=True)
     messages, ok = [], 0
     for calendar_id in calendar_ids:
         try:
