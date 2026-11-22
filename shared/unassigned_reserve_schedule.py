@@ -3,6 +3,7 @@
 
 更新記錄：
 2026-11-22
+- 加入合併單人保留單：同時段 2 張以上 1 人保留單先取消，再重新成立 N 人單。
 - 區間日期接受 2027/01/22、2027/1/22 等寫法（repository variable 填斜線會失敗）。
 - 新增（Jenny）。由 tool-system 的 Cloud Schedule Router 依主控表「排程設定」
   （功能代號 unassigned_reserve_create，08:30～17:30 每小時）派送
@@ -16,6 +17,8 @@
 - 後台查不到這麼多人時人數減 1 再試。
 - 保留會員 0939592628、儲值金；地址用該區的保留地址（台北：信義路四段210號4樓、台中：館前路19號4樓）。
 - 備註、「保留單紀錄」工作表沿用檸檬保留單建單；結果寫執行 Log。
+- 同一天同一時段有 2 張以上 1 人保留單：先取消，再重新成立 N 人保留單；專員全是檸檬人的保留單取消
+  （shared/unassigned_staff.merge_and_create）。
 """
 from __future__ import annotations
 
@@ -80,18 +83,22 @@ def pick_address(region: str, addresses: list[str]) -> str:
 def _run_region(env: str, region: str, email: str, password: str, date_start: str, date_end: str,
                 log: Callable[[str], None]) -> list[dict]:
     from function.reserve_optimizer import login_reserve_member, member_addresses
-    from shared.unassigned_staff import _schedule_getter, build_plan, create_reserve_orders, scan_range
+    from shared.unassigned_staff import merge_and_create
 
     lookup = login_reserve_member(env, email, password)
     address = pick_address(region, member_addresses(lookup))
-    plan = build_plan(scan_range(_schedule_getter(lookup), date_start, date_end))
-    log(f"{region}：保留地址 {address}；{len(plan)} 個日期時段有未配班")
-    for p in plan:
-        log(f"  {p['service_date']} {p['group']} {p['period']} {p['person']}人{p['hours']}小時：{p['staff']}")
-    if not plan:
-        return []
-    return create_reserve_orders(env_name=env, lookup_result=lookup, region=region, address=address,
-                                 plan=plan, payway="儲值金", log=log)
+    log(f"{region}：保留地址 {address}")
+    out = merge_and_create(env_name=env, backend_email=email, backend_password=password, lookup_result=lookup,
+                           region=region, address=address, date_start=date_start, date_end=date_end,
+                           payway="儲值金", log=log)
+    for c in out["cancelled"]:
+        mark = "🗑️" if c.get("ok") else "❌"
+        log(f"{mark} 取消 {c.get('service_date')} {c.get('period', '')} {c.get('order_no')} {c.get('message', '')}".rstrip())
+    return out["created"] + [
+        {"service_date": c.get("service_date"), "group": c.get("merge_group"), "period": c.get("period", ""),
+         "success": False, "person": 0, "order_no": c.get("order_no", ""), "message": f"取消失敗（{c.get('merge_group')}）：{c.get('message', '')}"}
+        for c in out["cancelled"] if not c.get("ok")
+    ]
 
 
 def run(env: str = "prod", today: date | None = None, regions=REGIONS, start: str = "", end: str = "",
