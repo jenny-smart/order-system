@@ -25,7 +25,9 @@ def _split(value: str) -> tuple:
 
 def notice_calendar_ids(*legacy_envs: str) -> tuple:
     """排程行事曆 ID；沒設定時才看各功能的舊變數；都沒有回傳 ()。"""
-    ids = _split(os.getenv(NOTICE_CALENDAR_ENV, ""))
+    from shared.atm_match_reconcile_schedule import _secret
+
+    ids = _split(_secret(NOTICE_CALENDAR_ENV))
     for name in legacy_envs:
         if ids:
             break

@@ -60,7 +60,7 @@ def _scan_region(env: str, email: str, password: str, date_start: str, date_end:
 
 
 def write_calendar(event: dict, calendar_ids, service_factory=None) -> tuple[list[str], int]:
-    from shared.atm_match_reconcile_schedule import _calendar_service, _insert_event, service_for
+    from shared.atm_match_reconcile_schedule import _calendar_service, _insert_event, calendar_auth_label, service_for
 
     service_factory = service_factory or _calendar_service
     messages, ok = [], 0
@@ -70,7 +70,12 @@ def write_calendar(event: dict, calendar_ids, service_factory=None) -> tuple[lis
             messages.append(f"已記入行事曆 {calendar_id}")
             ok += 1
         except Exception as exc:
-            messages.append(f"⚠️ 記入行事曆 {calendar_id} 失敗：{type(exc).__name__}: {exc}")
+            hint = ""
+            try:
+                hint = f"（{calendar_auth_label(calendar_id)}）"
+            except Exception:
+                pass
+            messages.append(f"⚠️ 記入行事曆 {calendar_id} 失敗{hint}：{type(exc).__name__}: {exc}")
     return messages, ok
 
 
