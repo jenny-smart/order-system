@@ -9,7 +9,7 @@
   行事曆紀錄（ATM 對帳、客人備註、儲值金客服備註空白、官網評價、檸檬人待換專員、記錄未配班人員）
   全部改記這個行事曆。
 - 優先順序：SCHEDULE_NOTICE_CALENDAR_ID → 各功能自己的舊變數（ATM_CALENDAR_ID 等，只在前者沒設定時用）。
-- 都沒設定時回傳空 tuple：不再退回 tpe@／jenny@。
+- 都沒設定時用 DEFAULT_NOTICE_CALENDAR_ID（2026-11-23），不再退回 tpe@／jenny@。
 - 寫入憑證：行事曆 ID 不是 jenny@hers.com.tw 時用 GOOGLE_CALENDAR_REFRESH_TOKEN（jenny@lemonclean.com.tw 授權），
   所以這個行事曆要能讓 jenny@lemonclean.com.tw 編輯活動。
 """
@@ -18,6 +18,8 @@ from __future__ import annotations
 import os
 
 NOTICE_CALENDAR_ENV = "SCHEDULE_NOTICE_CALENDAR_ID"
+# 2026-11-23 Jenny：排程日曆（jenny@lemonclean.com.tw 擁有）；環境讀不到 secret 時用這個（與 tool-system 相同）
+DEFAULT_NOTICE_CALENDAR_ID = "c_a0817c73e9200275a30c8ef72e4c7716dec7a0c29e87abdd87395b768fd17731@group.calendar.google.com"
 MISSING_MESSAGE = f"⚠️ 尚未設定排程行事曆 {NOTICE_CALENDAR_ENV}，沒有記入行事曆"
 
 
@@ -34,7 +36,7 @@ def notice_calendar_ids(*legacy_envs: str) -> tuple:
         if ids:
             break
         ids = _split(os.getenv(name, ""))
-    return ids
+    return ids or (DEFAULT_NOTICE_CALENDAR_ID,)
 
 
 def require_notice_calendar_ids(*legacy_envs: str) -> tuple:
