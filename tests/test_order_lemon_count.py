@@ -9,7 +9,7 @@ from memo_system import shift
 
 
 def setUpModule():
-    # 統計只算明天以後：測試固定「今天」＝2026-11-20
+    # 統計只算今天起：測試固定「今天」＝2026-11-20
     global _today_patch
     _today_patch = patch.object(shift.memo, "today_tw", return_value=datetime(2026, 11, 20))
     _today_patch.start()
@@ -162,6 +162,6 @@ class ReserveAttributionTest(unittest.TestCase):
         resp = MagicMock(text=MERGED_SCHEDULE)  # 11-23 的班表
         with patch.object(shift.memo, "session_get", return_value=resp):
             result = shift.count_order_lemons_range(None, "2026-11-01", "2026-11-23")
-        self.assertEqual(result["days"][0]["日期"], "2026-11-21")
+        self.assertEqual(result["days"][0]["日期"], "2026-11-20")  # 含今天
         with patch.object(shift.memo, "today_tw", return_value=datetime(2026, 11, 25)):
             self.assertEqual(shift.count_order_lemons_range(None, "2026-11-01", "2026-11-23")["days"], [])
