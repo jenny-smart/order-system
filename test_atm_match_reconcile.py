@@ -471,7 +471,7 @@ def test_write_calendar_uses_notice_calendar_only(monkeypatch):
     assert msgs == ["已記入行事曆 notice@group.calendar.google.com：【ATM對帳】今日完成"]
 
 
-def test_write_calendar_without_notice_calendar_writes_nothing(monkeypatch):
+def test_write_calendar_without_notice_secret_uses_default_calendar(monkeypatch):
     from shared import atm_match_reconcile_schedule as job
 
     monkeypatch.setenv("SCHEDULE_NOTICE_CALENDAR_ID", "")
@@ -481,8 +481,9 @@ def test_write_calendar_without_notice_calendar_writes_nothing(monkeypatch):
     done = {"region": "台北", "row": 5, "order_no": "LC1", "name": "甲", "amount": 4800}
     msgs = job.write_calendar({"台北": {"reconcile": {"completed": [done], "no_invoice": []}}},
                               now=datetime(2026, 11, 6, 8, 12, tzinfo=TZ), service_factory=lambda: service)
-    assert events.inserted == []
-    assert "SCHEDULE_NOTICE_CALENDAR_ID" in msgs[0]
+    from shared.notice_calendar import DEFAULT_NOTICE_CALENDAR_ID
+
+    assert DEFAULT_NOTICE_CALENDAR_ID in msgs[0]  # 2026-11-23：讀不到 secret 也寫排程日曆
 
 
 def test_preview_lists_rows_for_confirmation(monkeypatch):

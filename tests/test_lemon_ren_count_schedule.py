@@ -46,13 +46,15 @@ class LemonRenCountScheduleTest(unittest.TestCase):
         self.assertEqual(written, ["notice@group.calendar.google.com"])
         self.assertTrue(any("tpe@lemonclean.com.tw 失敗" in m for m in msgs))
 
-    def test_no_notice_calendar_still_writes_tpe(self):
+    def test_no_notice_secret_uses_default_and_tpe(self):
         written = []
         with patch.dict("os.environ", {"SCHEDULE_NOTICE_CALENDAR_ID": "", "LEMON_REN_COUNT_CALENDAR_IDS": ""}), \
              patch("shared.atm_match_reconcile_schedule._insert_event",
                    side_effect=lambda _s, cid, **_e: written.append(cid)):
             _msgs, ok = job.write_calendar({"summary": "x"}, service_factory=lambda _cid: MagicMock())
-        self.assertEqual((ok, written), (1, ["tpe@lemonclean.com.tw"]))
+        from shared.notice_calendar import DEFAULT_NOTICE_CALENDAR_ID
+
+        self.assertEqual((ok, written), (2, [DEFAULT_NOTICE_CALENDAR_ID, "tpe@lemonclean.com.tw"]))
 
     def test_run_dry_run(self):
         with patch.dict("accounts.ACCOUNTS", {"台北": {"email": "a", "password": "b"}}), \

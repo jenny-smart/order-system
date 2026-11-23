@@ -96,11 +96,11 @@ class ScheduleTest(unittest.TestCase):
     def test_range_is_next_two_weeks(self):
         self.assertEqual(sch.date_range(date(2026, 11, 23)), ("2026-11-24", "2026-12-07"))
 
-    def test_requires_notice_calendar_no_tpe_fallback(self):
+    def test_without_secret_uses_default_notice_calendar(self):
+        from shared.notice_calendar import DEFAULT_NOTICE_CALENDAR_ID
+
         with patch.dict("os.environ", {"SCHEDULE_NOTICE_CALENDAR_ID": ""}):
-            self.assertEqual(us.notice_calendar_ids(), ())
-            with self.assertRaises(RuntimeError):
-                self._run()
+            self.assertEqual(us.notice_calendar_ids(), (DEFAULT_NOTICE_CALENDAR_ID,))
 
     def test_writes_only_dedicated_calendar(self):
         written = []
