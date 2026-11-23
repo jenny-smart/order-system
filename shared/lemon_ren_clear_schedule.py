@@ -2,6 +2,8 @@
 """排班管理「清空檸檬人」自動排程：每日 12:30、18:00 清空未配班清單中的檸檬人。
 
 更新記錄：
+2026-11-24
+- 結果最後加一行「合計／清空檸檬人：共 N 人，移除 M 筆勾選」（行事曆顯示共清掉多少人）。
 2026-11-20
 - 新增（Jenny）。由 tool-system 的 Cloud Schedule Router 依主控表「排程設定」
   （功能代號 lemon_ren_clear）派送 .github/workflows/lemon-ren-clear-schedule.yml。
@@ -112,6 +114,10 @@ def run(env: str = "prod", today: date | None = None, regions=REGIONS, months: i
     log("\n===== 結果 =====")
     for region, item in result.items():  # 每區一行
         log(summary(region, item))
+    # 2026-11-24 Jenny：行事曆要看得到共清掉多少人
+    done = [i for i in result.values() if not i.get("skipped") and not i.get("error")]
+    log(f"合計／清空檸檬人：共 {sum(int(i.get('people') or 0) for i in done)} 人，"
+        f"移除 {sum(int(i.get('slots') or 0) for i in done)} 筆勾選")
     failed = [r for r, i in result.items() if i.get("error") or i.get("errors")]
     if failed:
         raise RuntimeError("清空檸檬人失敗：" + "、".join(failed))
