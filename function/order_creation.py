@@ -619,6 +619,7 @@ def render_old_customer(backend_email, backend_password, env):
                         # v8.15：開始新的一次建單嘗試前，先清空上一次殘留的舊結果。
                         st.session_state.q_order_result = {}
                         st.session_state.old_results_multi = []
+                        st.session_state.old_combined_line_message = ""
                         _multi_results = []
                         try:
                             _old_invoice_kwargs = (
@@ -663,6 +664,8 @@ def render_old_customer(backend_email, backend_password, env):
                                     message=str(e), traceback_text=traceback.format_exc(),
                                 )
                         st.session_state.old_results_multi = _multi_results
+                        with st.spinner("產生合併 LINE 訊息中…"):
+                            st.session_state.old_combined_line_message = combined_line_message_for_results(_multi_results, env)
                         if len(_multi_results) == 1 and _multi_results[0]["ok"]:
                             # 只有 1 筆時，沿用原本單筆的詳細結果卡呈現方式
                             st.session_state.q_order_result = _multi_results[0]["result"]
@@ -711,10 +714,9 @@ def render_old_customer(backend_email, backend_password, env):
                 st.success(f"✅ 第{_i}筆：{res['order_no']}　{res.get('date')} {res.get('period')}　專員：{res.get('staff') or '（無班表資料）'}")
                 if res.get("address_mismatch_warning"):
                     st.warning(res["address_mismatch_warning"])
-                if res.get("line_message"):
-                    copy_button(f"複製第{_i}筆 LINE 訊息", res["line_message"], f"copy_old_multi_line_{_i}")
             else:
                 st.error(f"❌ 第{_i}筆（{r.get('date')} {r.get('period')}）失敗：{r.get('error')}")
+        render_multi_line_messages(old_results_multi, st.session_state.get("old_combined_line_message") or "", "copy_old_multi")
 
     order_result = st.session_state.get("q_order_result")
     if order_result:
@@ -773,6 +775,50 @@ def render_old_customer(backend_email, backend_password, env):
             copy_button("複製 LINE 訊息", line_message, "copy-line-message")
         with col_memo:
             st.text_area("N-J Memo", NJ_MEMO, height=200, label_visibility="collapsed", key="nj_memo_order_result")
+
+
+
+def combined_line_message_for_results(results, env_name):
+    """一次建立多筆訂單（舊客／新客）時，把成功的訂單合併成一則 LINE 訊息。
+
+    沿用 LINE 通知產生器的合併邏輯（後台查回每筆訂單的時段/金額/車馬費），
+    格式與「合併通知」一致。成功不到 2 筆時回傳空字串（沿用單筆訊息）。
+    """
+    ok_results = [r["result"] for r in results or [] if r.get("ok") and (r.get("result") or {}).get("order_no")]
+    if len(ok_results) < 2:
+        return ""
+    first = ok_results[0]
+    try:
+        _info, message = qo.build_combined_line_message_from_order_nos(
+            env_name, "", "", [r["order_no"] for r in ok_results],
+            fallback_region=first.get("region") or "台北",
+            session=first.get("session"),
+        )
+        return message
+    except Exception as e:
+        return f"（合併 LINE 訊息產生失敗：{e}，請改用下方各筆訊息）"
+
+
+def render_multi_line_messages(results, combined_message, key_prefix):
+    """多筆結果的 LINE 訊息：有合併訊息時顯示合併版，各筆訊息收進展開區。"""
+    per_order = [(i, r["result"]) for i, r in enumerate(results, start=1) if r.get("ok") and r["result"].get("line_message")]
+    merged_ok = bool(combined_message) and not combined_message.startswith("（合併 LINE 訊息產生失敗")
+    if combined_message:
+        st.markdown("#### 💬 合併 LINE 訊息")
+        if merged_ok:
+            st.text_area("合併 LINE 訊息", combined_message, height=380, label_visibility="collapsed", key=f"{key_prefix}_combined_text")
+            copy_button("複製合併 LINE 訊息", combined_message, f"{key_prefix}_combined_copy")
+        else:
+            st.warning(combined_message)
+    if not per_order:
+        return
+    if merged_ok:
+        with st.expander("各筆單獨 LINE 訊息"):
+            for i, res in per_order:
+                copy_button(f"複製第{i}筆 LINE 訊息", res["line_message"], f"{key_prefix}_line_{i}")
+    else:
+        for i, res in per_order:
+            copy_button(f"複製第{i}筆 LINE 訊息", res["line_message"], f"{key_prefix}_line_{i}")
 
 
 def render_new_customer(backend_email, backend_password, env):
@@ -925,6 +971,7 @@ def render_new_customer(backend_email, backend_password, env):
         # 舊的成功結果還留在畫面上跟新的錯誤訊息重疊混淆。
         st.session_state.nc_result = {}
         st.session_state.nc_results_multi = []
+        st.session_state.nc_combined_line_message = ""
         st.session_state.nc_pending_old = None
         if not nc_raw.strip():
             st.error("請貼上客人資料")
@@ -1007,6 +1054,7 @@ def render_new_customer(backend_email, backend_password, env):
                 elif _nc_lookup is not None:
                     try:
                         st.session_state.nc_results_multi = []
+                        st.session_state.nc_combined_line_message = ""
                         _nc_multi_results = []
                         for _ei, _entry in enumerate(nc_entries, start=1):
                             with st.spinner(f"建立會員 → 查詢地址 → 建單（第 {_ei}/{len(nc_entries)} 筆：{_entry['date']} {_entry['period']} {_entry['person']}人{_entry['hour']}小時）…"):
@@ -1071,6 +1119,8 @@ def render_new_customer(backend_email, backend_password, env):
                                         message=str(_e_entry), traceback_text=traceback.format_exc(),
                                     )
                         st.session_state.nc_results_multi = _nc_multi_results
+                        with st.spinner("產生合併 LINE 訊息中…"):
+                            st.session_state.nc_combined_line_message = combined_line_message_for_results(_nc_multi_results, env)
                         if len(_nc_multi_results) == 1 and _nc_multi_results[0]["ok"]:
                             # 只有 1 筆時，沿用原本單筆的詳細結果卡呈現方式
                             st.session_state.nc_result = _nc_multi_results[0]["result"]
@@ -1153,6 +1203,8 @@ def render_new_customer(backend_email, backend_password, env):
                         message=str(e), traceback_text=traceback.format_exc(),
                     )
             st.session_state.nc_results_multi = _pending_results
+            with st.spinner("產生合併 LINE 訊息中…"):
+                st.session_state.nc_combined_line_message = combined_line_message_for_results(_pending_results, env)
             if len(_pending_results) == 1 and _pending_results[0]["ok"]:
                 st.session_state.nc_result = _pending_results[0]["result"]
             st.session_state.nc_pending_old = None
@@ -1175,10 +1227,9 @@ def render_new_customer(backend_email, backend_password, env):
                     st.warning(res["existing_member_warning"])
                 if res.get("address_mismatch_warning"):
                     st.warning(res["address_mismatch_warning"])
-                if res.get("line_message"):
-                    copy_button(f"複製第{_i}筆 LINE 訊息", res["line_message"], f"copy_nc_multi_line_{_i}")
             else:
                 st.error(f"❌ 第{_i}筆（{r.get('date')} {r.get('period')}）失敗：{r.get('error')}")
+        render_multi_line_messages(_nc_multi, st.session_state.get("nc_combined_line_message") or "", "copy_nc_multi")
 
     # 顯示建單結果
     _r = st.session_state.get("nc_result", {})
