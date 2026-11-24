@@ -316,16 +316,16 @@ def _values(row: Dict) -> List:
     )]
 
 
-# 高雄 N/O 維持下拉選單的寫法（2026-11-15 Jenny）：清潔／服務費用；家電訂單 N 為「家電」
-KAOHSIUNG_CATEGORY = {"居家清潔": "清潔", "家電清潔": "家電", "水洗清潔": "水洗"}
-KAOHSIUNG_FEE = "服務費用"
+# N/O 依 ATM 工作表下拉選單的寫法：N＝清潔、O＝服務費用（家電／水洗訂單 N 為「家電」／「水洗」）
+# 2026-11-15 Jenny：高雄先改；2026-11-25 Jenny：ATM 待付款填入 ATM 工作表時，所有地區一律 N 清潔、O 服務費用
+SHEET_CATEGORY = {"居家清潔": "清潔", "家電清潔": "家電", "水洗清潔": "水洗"}
+SHEET_FEE = "服務費用"
+KAOHSIUNG_CATEGORY, KAOHSIUNG_FEE = SHEET_CATEGORY, SHEET_FEE  # 舊名相容
 
 
 def _sheet_values(row: Dict, region: str = "") -> Dict[str, List]:
-    """依訂單編號覆蓋銀行列：I 與 K:O。"""
-    category, detail = row["service_category"], row["service_detail"]
-    if region == "高雄":
-        category, detail = KAOHSIUNG_CATEGORY.get(category, "清潔"), KAOHSIUNG_FEE
+    """依訂單編號覆蓋銀行列：I 與 K:O（N/O 一律用下拉選單的值，不分地區）。"""
+    category, detail = SHEET_CATEGORY.get(row["service_category"], "清潔"), SHEET_FEE
     return {
         "I": [row["service_month"]],
         "K:O": [row["name"], row["net_amount"], row["last5"], category, detail],
