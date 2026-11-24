@@ -2,6 +2,10 @@
 """整理姓名／電話連結：任一 Google Sheet 工作表，姓名加 LINE 聊天連結、電話加後台訂單管理電話查詢連結。
 
 更新記錄：
+2026-11-25
+- 新增「地址欄（可留空）」：姓名或電話空白、地址有值的列，用地址在後台訂單管理搜尋，回填姓名／電話並加連結；
+  已有的姓名／電話不覆蓋；同地址多位客人或查不到的列不回填，預覽時列出略過原因。
+- 快速帶入：評價預約（台北）地址 E、評價預約（台中）地址 B。
 2026-11-11（新增）
 - 輸入 Google Sheet 網址或 ID、工作表名稱、姓名欄、電話欄（LINE 欄可選）、起訖列。
 - 先預覽要改的儲存格，確認後才寫入；已經是連結（=HYPERLINK）的不動。
@@ -14,9 +18,9 @@ from function.ui_common import step, info_panel
 
 PRESETS = {
     "自訂": None,
-    "清潔客訴（台北／台中）": dict(tab="清潔客訴", name="G", phone="H", line="", first=3),
-    "評價預約（台北）": dict(tab="評價預約", name="C", phone="D", line="K", first=2),
-    "評價預約（台中）": dict(tab="評價預約", name="A", phone="E", line="J", first=1),
+    "清潔客訴（台北／台中）": dict(tab="清潔客訴", name="G", phone="H", line="", address="", first=3),
+    "評價預約（台北）": dict(tab="評價預約", name="C", phone="D", line="K", address="E", first=2),
+    "評價預約（台中）": dict(tab="評價預約", name="A", phone="E", line="J", address="B", first=1),
 }
 
 
@@ -27,6 +31,7 @@ def _apply_preset():
         st.session_state.sl_name = preset["name"]
         st.session_state.sl_phone = preset["phone"]
         st.session_state.sl_line = preset["line"]
+        st.session_state.sl_address = preset["address"]
         st.session_state.sl_first = preset["first"]
     st.session_state.pop("sl_plan", None)
 
@@ -39,6 +44,8 @@ def render(backend_email, backend_password, env):
         "姓名加上 LINE 聊天連結，電話加上後台訂單管理的電話查詢連結。",
         "可用在任何工作表：貼 Google Sheet 網址或 ID，填工作表名稱與欄位字母。",
         "LINE 網址：有填 LINE 欄就用該列的網址，沒有就用電話查後台訂單（請先在上方輸入後台帳密）。",
+        "有填地址欄時：姓名或電話空白的列，會用地址在後台訂單管理搜尋，回填姓名／電話並加連結（已有的不覆蓋）。",
+        "同地址查到多位客人、或查不到訂單的列不會回填，預覽下方會列出原因。",
         "已經是連結的儲存格不會改；先按「預覽」確認，再按「寫入」。",
         "服務帳號需要有該試算表的編輯權限。",
     ])
@@ -46,7 +53,7 @@ def render(backend_email, backend_password, env):
     st.selectbox("快速帶入", list(PRESETS), key="sl_preset", on_change=_apply_preset)
     st.text_input("Google Sheet 網址或 ID", key="sl_sheet",
                   placeholder="https://docs.google.com/spreadsheets/d/…")
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c4b = st.columns(5)
     with c1:
         st.text_input("工作表名稱", key="sl_tab")
     with c2:
@@ -55,6 +62,8 @@ def render(backend_email, backend_password, env):
         st.text_input("電話欄", key="sl_phone", placeholder="例如 H")
     with c4:
         st.text_input("LINE 欄（可留空）", key="sl_line")
+    with c4b:
+        st.text_input("地址欄（可留空）", key="sl_address")
     c5, c6 = st.columns(2)
     with c5:
         st.number_input("起始列", min_value=1, step=1, key="sl_first")
@@ -70,6 +79,8 @@ def render(backend_email, backend_password, env):
             phone_col = rs.col_index(st.session_state.sl_phone)
             line_text = str(st.session_state.get("sl_line", "") or "").strip()
             line_col = rs.col_index(line_text) if line_text else 0
+            address_text = str(st.session_state.get("sl_address", "") or "").strip()
+            address_col = rs.col_index(address_text) if address_text else 0
             key = rs.spreadsheet_key(st.session_state.sl_sheet)
             tab = str(st.session_state.sl_tab or "").strip()
             if not tab:
@@ -79,10 +90,11 @@ def render(backend_email, backend_password, env):
             with st.spinner("讀取工作表、查詢 LINE 連結中…（筆數多時需要一點時間）"):
                 ws = build_gsheet_client().open_by_key(key).worksheet(tab)
                 session, base_url = rs.login_session(backend_email.strip(), backend_password.strip(), env)
+                skipped: list = []
                 updates = rs.plan_sheet_links(ws, session, base_url, name_col, phone_col,
                                               int(st.session_state.sl_first), int(st.session_state.sl_last or 0),
-                                              line_col)
-            st.session_state.sl_plan = {"key": key, "tab": tab, "updates": updates}
+                                              line_col, address_col=address_col, skipped=skipped)
+            st.session_state.sl_plan = {"key": key, "tab": tab, "updates": updates, "skipped": skipped}
         except Exception as exc:
             st.error(f"預覽失敗：{exc}")
 
@@ -90,12 +102,22 @@ def render(backend_email, backend_password, env):
     if plan is None:
         return
     updates = plan["updates"]
+    skipped = plan.get("skipped") or []
+    if skipped:
+        with st.expander(f"⚠️ 地址查詢略過 {len(skipped)} 列（未回填）", expanded=not updates):
+            st.dataframe(skipped, use_container_width=True, hide_index=True)
     if not updates:
         st.info("沒有需要更新的儲存格（都已是連結，或查不到電話／LINE）。")
         return
-    names = sum(1 for u in updates if "chat.line.biz" in u["values"][0][0])
-    st.success(f"將更新 {len(updates)} 格：姓名 LINE 連結 {names} 格、電話查詢連結 {len(updates) - names} 格")
-    st.dataframe([{"儲存格": u["range"], "新內容": u["values"][0][0]} for u in updates[:500]],
+    names = sum(1 for u in updates if u.get("kind") == "name_link")
+    phones = sum(1 for u in updates if u.get("kind") == "phone_link")
+    filled = sum(1 for u in updates if u.get("source"))
+    msg = f"將更新 {len(updates)} 格：姓名 LINE 連結 {names} 格、電話查詢連結 {phones} 格"
+    if filled:
+        msg += f"（其中 {filled} 格由地址查詢回填）"
+    st.success(msg)
+    st.dataframe([{"儲存格": u["range"], "來源": u.get("source", ""), "新內容": u["values"][0][0]}
+                  for u in updates[:500]],
                  use_container_width=True, hide_index=True)
     if len(updates) > 500:
         st.caption(f"只顯示前 500 格（共 {len(updates)} 格）")

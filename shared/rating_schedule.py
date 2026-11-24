@@ -2,6 +2,9 @@
 """官網評價自動登記（雲端排程，上班日）＋整理電話／姓名連結。
 
 更新記錄：
+2026-11-25
+- 「整理姓名／電話連結」新增地址欄（可留空）：姓名或電話空白、地址有值的列，用地址在後台訂單管理（關鍵字）搜尋，
+  回填空白的姓名／電話（已有的不覆蓋）並加上 LINE／電話查詢連結；同地址查到多位客人或查不到時不回填，列在預覽的略過清單。
 2026-11-22
 - 行事曆改記排程行事曆 SCHEDULE_NOTICE_CALENDAR_ID（shared/notice_calendar.py），不再記 jenny@hers.com.tw／jenny@lemonclean.com.tw；
   沒設定時只回報、不寫任何行事曆。
@@ -592,28 +595,129 @@ def line_url_by_phone(session, phone: str, cache: dict) -> str:
     return cache[phone]
 
 
+def address_key(text) -> str:
+    """地址比對用：全形轉半形、臺→台、去空白與開頭郵遞區號。"""
+    import unicodedata
+
+    s = unicodedata.normalize("NFKC", str(text or "")).replace("臺", "台")
+    s = re.sub(r"\s+", "", s)
+    return re.sub(r"^\d{3,6}", "", s)
+
+
+def _card_address_key(item: dict) -> str:
+    """卡片上完整的地址行（memo 的地址解析遇到「一樓」這類國字樓層會截在「號」，改取整行）。"""
+    short = address_key(item.get("address"))
+    if not short:
+        return ""
+    for line in str(item.get("row_text") or "").splitlines():
+        k = address_key(line)
+        if k.startswith(short):
+            return k
+    return short
+
+
+def pick_customers_by_address(items: list[dict], address: str) -> list[dict]:
+    """訂單列表（memo.parse_purchase_list_page 格式）→ 同地址的客人，依電話去重（保留最新一筆）。
+
+    先找地址完全相同的訂單；沒有才放寬為互相包含（例如表上少寫樓層）。
+    回傳 [{"name","phone","line_url","order_no"}]，有 LINE 連結的優先。
+    """
+    key = address_key(address)
+    if not key:
+        return []
+    keyed = [(x, _card_address_key(x)) for x in items]
+    exact = [x for x, k in keyed if k == key]
+    pool = exact or [x for x, k in keyed if k and (key in k or k in key)]
+    people: dict[str, dict] = {}
+    for x in pool:
+        phone = normalize_phone(x.get("phone"))
+        if not phone:
+            continue
+        cur = people.get(phone)
+        if cur is None:
+            people[phone] = {"name": str(x.get("name") or "").strip(), "phone": phone,
+                             "line_url": str(x.get("line_url") or "").strip(), "order_no": x.get("order_no", "")}
+        else:
+            cur["name"] = cur["name"] or str(x.get("name") or "").strip()
+            cur["line_url"] = cur["line_url"] or str(x.get("line_url") or "").strip()
+    return list(people.values())
+
+
+def customers_by_address(session, address: str, cache: dict) -> list[dict]:
+    """後台訂單管理用地址（關鍵字欄）搜尋，回傳同地址的客人（同一個地址只查一次）。"""
+    import orders
+    import quick_order as qo
+    from memo_system import memo
+    from shared.backend_client import PURCHASE_FILTER_PARAMS_TEMPLATE
+
+    key = address_key(address)
+    if not key:
+        return []
+    if key not in cache:
+        params = dict(PURCHASE_FILTER_PARAMS_TEMPLATE)
+        params["keyword"] = str(address).strip()
+        resp = session.get(orders.PURCHASE_URL, params=params, headers=qo.HEADERS, allow_redirects=True)
+        items = memo.parse_purchase_list_page(resp.text) if resp.status_code == 200 else []
+        cache[key] = pick_customers_by_address(items, address)
+    return cache[key]
+
+
+def _hyperlink_label(value: str) -> str:
+    m = re.search(r'"([^"]*)"\s*\)\s*$', value)
+    return m.group(1) if m else ""
+
+
 def relink_updates(formulas: list[list], name_col: int, phone_col: int, first_row: int, base_url: str,
-                   lookup, line_col: int = 0, last_row: int = 0) -> list[dict]:
-    """回傳要更新的儲存格（已經是 HYPERLINK 的不動）。lookup(phone) → LINE 網址。"""
+                   lookup, line_col: int = 0, last_row: int = 0, address_col: int = 0,
+                   address_lookup=None, skipped: list | None = None) -> list[dict]:
+    """回傳要更新的儲存格（已經是 HYPERLINK 的不動）。lookup(phone) → LINE 網址。
+
+    有指定地址欄時：姓名或電話空白、且地址有值的列，先用 address_lookup(地址) 查後台訂單，
+    回填空白的姓名／電話（已有的不覆蓋），再照原規則加連結。
+    同地址查到多位客人無法判斷、或查不到時不回填，記到 skipped。
+    每筆 update 另帶 kind（name_link／phone_link）與 source（""／"地址查詢"），寫入前會拿掉。
+    """
     updates = []
     end = last_row or len(formulas)
     for idx in range(first_row - 1, min(end, len(formulas))):
         row = formulas[idx]
         cell = lambda c: str(row[c - 1]).strip() if c - 1 < len(row) else ""  # noqa: E731
         name, phone_raw = cell(name_col), cell(phone_col)
-        phone = "" if phone_raw.upper().startswith("=HYPERLINK") else normalize_phone(phone_raw)
-        if phone_raw.upper().startswith("=HYPERLINK"):
-            m = re.search(r'"([^"]*)"\s*\)\s*$', phone_raw)
-            phone_for_line = normalize_phone(m.group(1)) if m else ""
-        else:
-            phone_for_line = phone
+        phone_is_link = phone_raw.upper().startswith("=HYPERLINK")
+        phone = "" if phone_is_link else normalize_phone(phone_raw)
+        phone_for_line = normalize_phone(_hyperlink_label(phone_raw)) if phone_is_link else phone
+        name_from_addr = phone_from_addr = False
+        addr_line_url = ""
+
+        address = cell(address_col) if address_col else ""
+        if address_lookup and address and not address.startswith("=") and (not name or not phone_raw):
+            people = address_lookup(address)
+            if phone_for_line:
+                people = [p for p in people if p["phone"] == phone_for_line]
+            if len(people) == 1:
+                found = people[0]
+                if not name and found["name"]:
+                    name, name_from_addr = found["name"], True
+                if not phone_raw and found["phone"]:
+                    phone = phone_for_line = found["phone"]
+                    phone_from_addr = True
+                addr_line_url = found["line_url"]
+            elif skipped is not None:
+                reason = (f"同地址有 {len(people)} 位客人：" + "、".join(p["name"] or p["phone"] for p in people)
+                          if people else "後台查無此地址的訂單")
+                skipped.append({"列": idx + 1, "地址": address, "原因": reason})
+
         if phone and len(phone) >= 9:
-            updates.append({"range": f"{_col_letter(phone_col)}{idx + 1}", "values": [[phone_cell(base_url, phone)]]})
+            updates.append({"range": f"{_col_letter(phone_col)}{idx + 1}", "values": [[phone_cell(base_url, phone)]],
+                            "kind": "phone_link", "source": "地址查詢" if phone_from_addr else ""})
         if name and not name.startswith("="):
             line_url = cell(line_col) if line_col and "chat.line.biz" in cell(line_col) else ""
-            line_url = line_url or (lookup(phone_for_line) if phone_for_line else "")
-            if line_url:
-                updates.append({"range": f"{_col_letter(name_col)}{idx + 1}", "values": [[name_cell(name, line_url)]]})
+            line_url = line_url or addr_line_url or (lookup(phone_for_line) if phone_for_line else "")
+            if line_url or name_from_addr:
+                updates.append({"range": f"{_col_letter(name_col)}{idx + 1}",
+                                "values": [[name_cell(name, line_url)]],
+                                "kind": "name_link" if line_url else "name_text",
+                                "source": "地址查詢" if name_from_addr else ""})
     return updates
 
 
@@ -651,26 +755,34 @@ def login_session(email: str, password: str, env: str = "prod"):
 
 
 def plan_sheet_links(ws, session, base_url: str, name_col: int, phone_col: int, first_row: int,
-                     last_row: int = 0, line_col: int = 0) -> list[dict]:
-    """任一工作表：回傳要更新的儲存格（姓名→LINE 連結、電話→訂單管理電話查詢連結）。"""
+                     last_row: int = 0, line_col: int = 0, address_col: int = 0,
+                     skipped: list | None = None) -> list[dict]:
+    """任一工作表：回傳要更新的儲存格（姓名→LINE 連結、電話→訂單管理電話查詢連結）。
+
+    address_col：有指定時，姓名或電話空白的列先用地址查後台訂單管理回填（skipped 收集查不到／多位客人的列）。
+    """
     from memo_system.memo import with_retry
 
-    width = max(name_col, phone_col, line_col or 0)
+    width = max(name_col, phone_col, line_col or 0, address_col or 0)
     end = last_row or ws.row_count
     formulas = with_retry(ws.get, f"A1:{_col_letter(width)}{end}", value_render_option="FORMULA")
     if not last_row:
-        cols = (name_col, phone_col)
+        cols = (name_col, phone_col) + ((address_col,) if address_col else ())
         last_row = last_row_by_columns(formulas, cols)
     cache: dict = {}
+    addr_cache: dict = {}
+    address_lookup = (lambda a: customers_by_address(session, a, addr_cache)) if address_col else None
     return relink_updates(formulas, name_col, phone_col, first_row, base_url,
-                          lambda p: line_url_by_phone(session, p, cache), line_col=line_col, last_row=last_row)
+                          lambda p: line_url_by_phone(session, p, cache), line_col=line_col, last_row=last_row,
+                          address_col=address_col, address_lookup=address_lookup, skipped=skipped)
 
 
 def apply_updates(ws, updates: list[dict]) -> None:
     from memo_system.memo import with_retry
 
-    for i in range(0, len(updates), 200):
-        with_retry(ws.batch_update, updates[i:i + 200], value_input_option="USER_ENTERED")
+    clean = [{"range": u["range"], "values": u["values"]} for u in updates]
+    for i in range(0, len(clean), 200):
+        with_retry(ws.batch_update, clean[i:i + 200], value_input_option="USER_ENTERED")
 
 
 def relink(env: str = "prod", regions=REGIONS, dry_run: bool = False) -> dict:

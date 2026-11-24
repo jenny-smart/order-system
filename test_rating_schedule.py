@@ -192,6 +192,60 @@ class RelinkTest(unittest.TestCase):
         lookup.assert_not_called()
 
 
+class AddressFillTest(unittest.TestCase):
+    ADDR = "新北市汐止區民族二街84巷46號一樓"
+
+    def test_blank_name_phone_filled_from_address(self):
+        formulas = [["", "評價日期", "姓名", "電話", "地址"],
+                    ["", "", "", "", self.ADDR],
+                    ["", "", "已填", "", "台北市內湖區南京東路六段389號7樓"]]
+        lookup = MagicMock(return_value="")
+
+        def by_addr(addr):
+            if addr == self.ADDR:
+                return [{"name": "陳淑惠", "phone": "0939727251", "line_url": LINE, "order_no": "LC1"}]
+            return [{"name": "甲", "phone": "0911000000", "line_url": "", "order_no": "LC2"},
+                    {"name": "乙", "phone": "0922000000", "line_url": "", "order_no": "LC3"}]
+
+        skipped = []
+        ups = rs.relink_updates(formulas, 3, 4, 2, BASE, lookup, address_col=5,
+                                address_lookup=by_addr, skipped=skipped)
+        ranges = {u["range"]: u for u in ups}
+        self.assertEqual(ranges["C2"]["values"][0][0], f'=HYPERLINK("{LINE}","陳淑惠")')
+        self.assertIn("phone=0939727251", ranges["D2"]["values"][0][0])
+        self.assertEqual(ranges["C2"]["source"], "地址查詢")
+        self.assertNotIn("C3", ranges)  # 多位客人：不回填、既有姓名不動
+        self.assertNotIn("D3", ranges)
+        self.assertEqual(len(skipped), 1)
+        self.assertIn("2 位客人", skipped[0]["原因"])
+        lookup.assert_not_called()  # LINE 已從地址查詢的訂單取得
+
+    def test_existing_values_not_overwritten_and_no_lookup_when_complete(self):
+        formulas = [["王", "0911222333", self.ADDR]]
+        by_addr = MagicMock(return_value=[])
+        ups = rs.relink_updates(formulas, 1, 2, 1, BASE, MagicMock(return_value=""), address_col=3,
+                                address_lookup=by_addr)
+        by_addr.assert_not_called()
+        self.assertEqual({u["range"] for u in ups}, {"B1"})
+
+    def test_pick_customers_by_address_from_backend_html(self):
+        html = f"""<table><tbody><tr><td>LC00123</td><td>代客預訂：Jenny
+            <a href="/member?keyword=0939727251">陳淑惠</a><br>0939727251<br>jo99@foxmail.com<br>
+            <a href="{LINE}">LINE</a><br>新北市汐止區民族二街84巷46號一樓<br>已付款</td><td>2026-01-26</td></tr>
+            <tr><td>LC00124</td><td><a href="/member?keyword=0911000000">別人</a><br>0911000000<br>
+            新北市汐止區民族二街84巷46號三樓</td><td>2026-01-20</td></tr></tbody></table>"""
+        from memo_system import memo
+
+        people = rs.pick_customers_by_address(memo.parse_purchase_list_page(html), "新北市汐止區民族二街84巷46號一樓 ")
+        self.assertEqual(people, [{"name": "陳淑惠", "phone": "0939727251", "line_url": LINE, "order_no": "LC00123"}])
+        self.assertEqual(rs.address_key("臺北市 內湖區１號"), "台北市內湖區1號")
+
+    def test_apply_updates_strips_extra_keys(self):
+        ws = MagicMock()
+        rs.apply_updates(ws, [{"range": "A1", "values": [["x"]], "kind": "name_link", "source": "地址查詢"}])
+        self.assertEqual(ws.batch_update.call_args[0][0], [{"range": "A1", "values": [["x"]]}])
+
+
 if __name__ == "__main__":
     unittest.main()
 
