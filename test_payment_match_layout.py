@@ -101,11 +101,11 @@ def test_continuation_rows_missing_marks_review():
     assert updates["P3"][0].startswith("待確認：5 筆訂單加總，但下方列非空")
 
 
-def test_taoyuan_keeps_backend_category_and_detail():
+def test_taoyuan_uses_sheet_dropdown_category_and_fee():
     sheet = [_bank(region="桃園"), _bank("2026/10/16 12:11:02", "9,600", "傅以如", region="桃園"),
              [""] * 20, _cand("2026.11", "LC00217496", "傅以如", 9600, "2026-10-16 13:00")]
     _, updates, _ = _run("桃園", sheet)
-    assert updates["K2:O2"][3:] == ["居家清潔", "清潔服務"]
+    assert updates["K2:O2"][3:] == ["清潔", "服務費用"]  # 2026-11-25 Jenny：N 清潔、O 服務費用
 
 
 def test_search_results_used_without_pasting_to_ks():
