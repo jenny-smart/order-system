@@ -1,8 +1,12 @@
 # ============================================================
 # 檔名：ordersapp.py
-# 版本：v8.92
+# 版本：v8.93
 # 模組：服務訂單系統主畫面／統一功能選單
 # 最後更新：2026-11-25
+#
+# v8.93
+# - 「整理預約下次服務」改名「評價管理預約下次服務」；搜尋結果可寫入內勤工作表單「評價預約」，
+#   姓名帶 LINE 連結、電話帶查詢連結、地址取自該次評價訂單（與每日排程共用 rating_schedule.append_bookings）。
 #
 # v8.92
 # - 「整理姓名／電話連結」新增地址欄：姓名或電話空白時用地址查後台訂單管理，回填姓名／電話並加連結。
@@ -274,7 +278,7 @@ FUNCTION_OPTIONS = [
     ("會員手機查詢：貼上姓名／LINE 或讀取 Google Sheet 指定列，查詢手機並核對會員。", "orders", "會員手機查詢"),
     ("會員喜好設定：輸入電話查會員，設定喜愛專員性別與喜愛／不喜愛專員。", "orders", "會員喜好設定"),
     ("評價管理客訴：評價為尚可／不滿意，或滿意但意見有負面內容，登記到內勤工作表單「清潔客訴」。", "orders", "評價管理客訴"),
-    ("整理預約下次服務：搜尋評價日期區間內有填預約下次服務的評價並整理名單。", "orders", "整理預約下次服務"),
+    ("評價管理預約下次服務：搜尋評價日期區間內有填預約下次服務的評價，整理名單並可寫入「評價預約」（姓名／電話帶連結、地址取自該次評價訂單）。", "orders", "評價管理預約下次服務"),
     ("整理姓名／電話連結：任一工作表指定姓名／電話欄，姓名加 LINE 連結、電話加訂單管理電話查詢連結；姓名或電話空白時可用地址查後台回填。", "orders", "整理姓名／電話連結"),
     ("更新建議下次服務時間：依地址＋電話查後台最近3次服務日期並寫回 Sheet。", "orders", "更新建議下次服務時間"),
     # ---------- G. 財務功能 ----------
@@ -479,7 +483,7 @@ elif mode == "已成單預約完成通知":
     _completed_notice_page.render(backend_email, backend_password, env)
 elif mode == "評價管理客訴":
     _rating_complaint_page.render(backend_email, backend_password, env)
-elif mode == "整理預約下次服務":
+elif mode == "評價管理預約下次服務":
     _next_appointment_page.render(backend_email, backend_password, env)
 elif mode == "評價預約成單":
     _rating_booking_order_page.render(backend_email, backend_password, env)
