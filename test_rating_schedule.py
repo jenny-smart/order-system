@@ -246,6 +246,28 @@ class AddressFillTest(unittest.TestCase):
         self.assertEqual(ws.batch_update.call_args[0][0], [{"range": "A1", "values": [["x"]]}])
 
 
+class AppendBookingsTest(unittest.TestCase):
+    def test_writes_name_phone_address_with_links_and_skips_existing(self):
+        from unittest.mock import patch
+
+        ws = MagicMock(row_count=50, id=9)
+        ws.get.return_value = [["", "評價日期", "姓名"], ["", "", "舊", "", "", "", "", "", "", "LC0001"]]
+        sheet = MagicMock(id="SID")
+        r = {"評價日期": "2026-11-20", "姓名": "陳淑惠", "電話": "0939727251", "地址": "新北市汐止區民族二街84巷46號一樓",
+             "預約下次日期": "2026-12-01", "預約下次時間": "09:00-12:00", "服務日期及時間": "x", "服務人數": "2人",
+             "訂單編號": "LC0002", "LINE": LINE, "評價時間": "2026-11-20 10:00:00"}
+        dup = dict(r, 訂單編號="LC0001")
+        with patch.object(rs, "get_tab", return_value=(sheet, ws)):
+            out = rs.append_bookings("台北", [r, dup], BASE)
+        rows = ws.insert_rows.call_args[0][0]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][2], f'=HYPERLINK("{LINE}","陳淑惠")')
+        self.assertIn("phone=0939727251", rows[0][3])
+        self.assertEqual(rows[0][4], "新北市汐止區民族二街84巷46號一樓")
+        self.assertEqual(out["saved"], 1)
+        self.assertEqual(out["existing"], ["LC0001"])
+
+
 if __name__ == "__main__":
     unittest.main()
 

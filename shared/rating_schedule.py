@@ -3,6 +3,7 @@
 
 更新記錄：
 2026-11-25
+- 評價預約寫入抽成 append_bookings，排程與手動功能「評價管理預約下次服務」共用（姓名／電話帶連結、地址一起寫入）。
 - 「整理姓名／電話連結」新增地址欄（可留空）：姓名或電話空白、地址有值的列，用地址在後台訂單管理（關鍵字）搜尋，
   回填空白的姓名／電話（已有的不覆蓋）並加上 LINE／電話查詢連結；同地址查到多位客人或查不到時不回填，列在預覽的略過清單。
 2026-11-22
@@ -499,7 +500,6 @@ def _complaint_region(region: str, env: str, window, dry_run: bool, item: dict) 
 
 def _booking_region(region: str, env: str, window, dry_run: bool, item: dict) -> None:
     import quick_order as qo
-    from memo_system.memo import with_retry
 
     _, base_url, email, password = _login(region, env)
     with contextlib.redirect_stdout(io.StringIO()):
@@ -508,25 +508,36 @@ def _booking_region(region: str, env: str, window, dry_run: bool, item: dict) ->
     targets = [r for r in found if in_window(r.get("評價時間", ""), window)]
     print(f"QUERY {region} 預約下次服務 {len(found)} 筆，區間內 {len(targets)} 筆", flush=True)
     item["found"] = len(targets)
+    item.update(append_bookings(region, targets, base_url, dry_run))
+    print(f"SAVE {region} 評價預約新增 {item['saved']} 筆（已在名單略過 {len(targets) - item['saved']} 筆）", flush=True)
+
+
+def append_bookings(region: str, targets: list[dict], base_url: str, dry_run: bool = False) -> dict:
+    """預約下次服務名單（quick_order.fetch_rating_next_appointments 格式）→ 插到「評價預約」主名單之後。
+
+    姓名（LINE 連結）／電話（訂單管理電話查詢連結）／地址一起寫入；已在名單（訂單編號）的略過。
+    排程（booking）與手動功能「評價管理預約下次服務」共用。
+    """
+    from memo_system.memo import with_retry
+
     layout = BOOKING_LAYOUTS[region]
     spreadsheet, ws = get_tab(region, BOOKING_TAB)
-    item["sheet_url"] = f"https://docs.google.com/spreadsheets/d/{spreadsheet.id}/edit#gid={ws.id}"
     values = with_retry(ws.get, f"A1:{_col_letter(max(layout['width'], 11))}{ws.row_count}")
     key_idx = layout["key_col"] - 1
     seen = {str(row[key_idx]).strip() for row in values if key_idx < len(row) and str(row[key_idx]).strip()}
-    rows, summary = [], []
+    rows, summary, existing = [], [], []
     for r in targets:
         if r.get("訂單編號") in seen:
+            existing.append(r.get("訂單編號"))
             continue
         seen.add(r.get("訂單編號"))
         rows.append(build_booking_row(region, r, base_url))
         summary.append(f"{r.get('評價時間', '')[:16]} {r.get('姓名', '')} 預約 {r.get('預約下次日期', '')} "
                        f"{r.get('預約下次時間', '')}（上次 {r.get('訂單編號', '')}）")
-    item["summary_lines"] = summary
     if rows and not dry_run:
         insert_after(ws, main_list_end(values, layout["first_row"]), rows)
-    item["saved"] = len(rows)
-    print(f"SAVE {region} 評價預約新增 {len(rows)} 筆（已在名單略過 {len(targets) - len(rows)} 筆）", flush=True)
+    return {"sheet_url": f"https://docs.google.com/spreadsheets/d/{spreadsheet.id}/edit#gid={ws.id}",
+            "summary_lines": summary, "saved": len(rows), "existing": existing}
 
 
 def run(job: str, env: str = "prod", today: date | None = None, regions=REGIONS, dry_run: bool = False,

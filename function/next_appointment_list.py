@@ -1,5 +1,13 @@
 # -*- coding: utf-8 -*-
-"""整理預約下次服務。"""
+"""評價管理預約下次服務（原「整理預約下次服務」）。
+
+更新記錄：
+2026-11-25
+- 改名「評價管理預約下次服務」。
+- 搜尋結果可直接寫入該區內勤工作表單「評價預約」分頁（主名單之後插列，與每日排程同一套寫法）：
+  姓名帶 LINE 聊天連結、電話帶訂單管理電話查詢連結，地址一起寫入；地址取自該次評價的訂單編號那張訂單。
+  已在名單（訂單編號）的略過；查詢訂單失敗的列不寫入。
+"""
 
 import streamlit as st
 
@@ -8,11 +16,13 @@ from function.ui_common import step, info_panel, copy_button
 
 
 def render(backend_email, backend_password, env):
-    step("3", "整理預約下次服務")
+    step("3", "評價管理預約下次服務")
     info_panel("使用說明", [
         "搜尋「評價日期」區間內、有勾選預約下次服務的評價紀錄。",
         "每一筆會回頭查詢被評價的訂單本身，抓出電話/地址/服務日期時數/人數。",
         "查詢筆數多時（例如整月）會需要一點時間，請耐心等候。",
+        "按「寫入評價預約」會插到該區內勤工作表單「評價預約」主名單之後：姓名帶 LINE 連結、電話帶查詢連結，地址取自被評價的那張訂單。",
+        "已在名單（同訂單編號）的不會重複寫入；查詢訂單失敗的列不寫入。",
     ])
     rn_col1, rn_col2 = st.columns(2)
     with rn_col1:
@@ -32,6 +42,7 @@ def render(backend_email, backend_password, env):
                         date_e=rn_date_e.strftime("%Y-%m-%d") if rn_date_e else "",
                     )
                 st.session_state.rn_results = rn_results
+                st.session_state.pop("rn_write_result", None)
             except Exception as e:
                 st.error(f"搜尋失敗：{e}")
 
@@ -82,3 +93,44 @@ def render(backend_email, backend_password, env):
             )
             copy_button("複製整理結果（文字訊息用）", rn_text, "copy_rn_results")
             copy_button("複製整理結果（貼到 Google Sheets 用，會自動分欄，含 LINE 網址）", rn_tsv, "copy_rn_results_tsv")
+            _render_write(rn_results, env)
+
+
+def _render_write(rn_results, env):
+    """寫入內勤工作表單「評價預約」：姓名／電話帶連結，地址一起寫。"""
+    from shared import rating_schedule as rs
+
+    writable = [r for r in rn_results if not str(r.get("服務日期及時間", "")).startswith("⚠️")]
+    failed = len(rn_results) - len(writable)
+    st.divider()
+    region_default = "台北"
+    try:
+        from accounts import ACCOUNTS
+        from orders import get_region_by_address
+
+        first_addr = next((r.get("地址") for r in writable if r.get("地址")), "")
+        region_default = get_region_by_address(first_addr, ACCOUNTS) or "台北" if first_addr else "台北"
+    except Exception:
+        pass
+    regions = list(rs.BOOKING_LAYOUTS)
+    region = st.selectbox("寫入地區（內勤工作表單「評價預約」）", regions,
+                          index=regions.index(region_default) if region_default in regions else 0, key="rn_region")
+    if failed:
+        st.warning(f"有 {failed} 筆查詢訂單失敗，不會寫入。")
+    if st.button(f"✍️ 寫入{region}「評價預約」（{len(writable)} 筆，已在名單的會略過）", key="rn_write_btn",
+                 type="primary", use_container_width=True, disabled=not writable):
+        try:
+            import quick_order as qo
+
+            base_url = qo._configure_environment(env)
+            with st.spinner("寫入評價預約中…"):
+                st.session_state.rn_write_result = rs.append_bookings(region, writable, base_url)
+        except Exception as e:
+            st.error(f"寫入失敗：{e}")
+    result = st.session_state.get("rn_write_result")
+    if result:
+        msg = f"✅ 已寫入 {result['saved']} 筆"
+        if result.get("existing"):
+            msg += f"；已在名單略過 {len(result['existing'])} 筆（{'、'.join(result['existing'])}）"
+        st.success(msg)
+        st.markdown(f"[開啟評價預約分頁]({result['sheet_url']})")
