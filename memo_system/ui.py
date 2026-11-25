@@ -68,6 +68,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
     payment_match = importlib.reload(payment_match)
     from . import change_order
     from . import change_order_fill
+    from . import invoice_change
     from shared import calendar_phone_search
 
     def default_region_from_email(email_value):
@@ -1692,6 +1693,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         "僅開車馬費發票", "異動費(待收款)", "異動費(待退款)",
         "異動平日轉週末(待收款)", "異動週末轉平日(待退款)",
         "加時(待收款)", "減時(待退款)", "客訴(待退款)", "物損(待退款)",
+        *invoice_change.INVOICE_SCENARIOS, *invoice_change.VIP_REFUND_SCENARIOS,
     ]
 
     DAY_TYPE_OPTIONS = ["異動平日轉週末(待收款)", "異動週末轉平日(待退款)"]
@@ -1725,6 +1727,102 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
             parts.append(f"<b>退款金額：</b>${row.get('_refund_amount', row.get('_calc_amount', ''))}")
             return "<br>".join(parts) + "<br>"
         return f"<b>試算金額：</b>${row.get('_calc_amount','')}<br>"
+
+    def render_invoice_scenario_inputs(scenario, selected_orders):
+        """待處理發票／VIP 退券情境的輸入欄位；回傳試算需要的參數。"""
+        ic = invoice_change
+        params = {}
+        if scenario == ic.SCENARIO_INVOICE_INFO:
+            st.caption("鯨躍「變更發票資料」直接改；統編不能在這裡改，請改選「統編錯誤/二聯三聯互轉」。")
+            params["changes"] = {f: st.text_input(f"新{f}（不改留白）", key=f"co_inv_info_{f}") for f in ic.INFO_FIELDS}
+        elif scenario == ic.SCENARIO_CARRIER:
+            params["carrier_type"] = st.selectbox("新載具", ic.CARRIER_TYPES, key="co_inv_carrier_type")
+            params["carrier_code"] = "" if params["carrier_type"] == "紙本發票" else st.text_input(
+                "載具號碼", placeholder="手機條碼例：/VMVA4EV", key="co_inv_carrier_code").strip().upper()
+        elif scenario == ic.SCENARIO_REISSUE:
+            params["kind"] = st.radio("類型", ic.REISSUE_KINDS, horizontal=True, key="co_inv_reissue_kind")
+            if params["kind"] != "三聯轉二聯":
+                params["tax_id"] = st.text_input("正確統編", key="co_inv_tax_id").strip()
+                params["company"] = st.text_input("公司名稱（發票抬頭）", key="co_inv_company").strip()
+            st.caption("原發票全額折讓，再重開正確的發票（不作廢）。")
+        elif scenario == ic.SCENARIO_MERGE:
+            params["copy_type"] = st.radio("新發票", ["二聯", "三聯"], horizontal=True, key="co_inv_merge_copy")
+            if params["copy_type"] == "三聯":
+                params["tax_id"] = st.text_input("統編", key="co_inv_merge_tax_id").strip()
+                params["company"] = st.text_input("公司名稱（發票抬頭）", key="co_inv_merge_company").strip()
+            st.caption(f"已勾選 {len(selected_orders)} 筆；每張原發票全額折讓，合開一張新發票。")
+        elif scenario in ic.VIP_REFUND_SCENARIOS:
+            params["initiated_by"] = "customer" if scenario == ic.SCENARIO_VIP_REFUND_CUSTOMER else "company"
+            if len(selected_orders) > 1:
+                st.caption(f"VIP 退券以第一筆勾選的訂單 {selected_orders[0]['order_no']} 建立一列。")
+            params["original_invoice"] = st.text_input("原儲值發票號碼", key="co_vip_invoice").strip().upper()
+            params["has_tax_id"] = st.checkbox("原儲值發票有統編（三聯）", key="co_vip_tax_id")
+            p1, p2 = st.columns(2)
+            with p1: params["orig_payway"] = st.selectbox("原儲值付款方式", ["信用卡", "ATM", "現金"], key="co_vip_payway")
+            with p2: params["paid_on"] = st.date_input("原儲值付款日", key="co_vip_paid_on")
+            params["converted"] = st.checkbox("之前是 VIP 時數轉成儲值金（已使用服務要反推原價）", key="co_vip_converted")
+            if params["converted"]:
+                import pandas as pd
+                params["paid_amount"] = st.number_input("實付儲值金額", min_value=0, step=100, key="co_vip_paid_amount")
+                st.caption("已使用的服務（反推原價：非大掃除每 2 人 2 小時平日 $2,310／週末 $2,710，大掃除依各年度一般客價）")
+                editor = st.data_editor(
+                    pd.DataFrame({"服務日期": [None], "人數": [2], "時數": [2.0]}),
+                    num_rows="dynamic", use_container_width=True, key="co_vip_used",
+                    column_config={"服務日期": st.column_config.DateColumn("服務日期", format="YYYY/MM/DD"),
+                                   "人數": st.column_config.NumberColumn("人數", min_value=1, step=1),
+                                   "時數": st.column_config.NumberColumn("時數", min_value=0.5, step=0.5)})
+                used = []
+                for _, r in editor.iterrows():
+                    d = r.get("服務日期")
+                    if d is None or pd.isna(d):
+                        continue
+                    used.append({"service_date": pd.Timestamp(d).date(), "persons": float(r.get("人數") or 0),
+                                 "hours": float(r.get("時數") or 0)})
+                params["used_services"] = used
+            else:
+                params["stored_balance"] = st.number_input("儲值金餘額（不含購物金）", min_value=0, step=100, key="co_vip_balance")
+            params["shopping_credit"] = 0
+            if params["initiated_by"] == "company":
+                params["shopping_credit"] = st.number_input("協商返還購物金金額", min_value=0, step=100, key="co_vip_credit")
+            else:
+                st.caption("客人主動退：購物金不返還。")
+        return params
+
+    def build_invoice_scenario_rows(scenario, selected_orders, params, service_note):
+        ic = invoice_change
+        today_text = change_order._today_taipei_str()
+
+        def service_text(o):
+            return change_order._format_service_datetime(o.get("service_date"), o.get("period_text", ""))
+
+        def customer_type(o):
+            return change_order._customer_type_from_order(o)
+
+        if scenario == ic.SCENARIO_MERGE:
+            return ic.build_merge_rows(
+                selected_orders, params["copy_type"], params.get("tax_id", ""), params.get("company", ""),
+                {o["order_no"]: service_text(o) for o in selected_orders}, today_text,
+                {o["order_no"]: customer_type(o) for o in selected_orders})
+        if scenario in ic.VIP_REFUND_SCENARIOS:
+            order = selected_orders[0]
+            refund = ic.calc_vip_refund(
+                params["initiated_by"], paid_amount=params.get("paid_amount", 0),
+                used_services=params.get("used_services"), converted_from_hours=params["converted"],
+                stored_balance=params.get("stored_balance", 0), shopping_credit_refund=params["shopping_credit"])
+            payway = ic.refund_payway(params["orig_payway"], params["paid_on"], change_order.today_taipei())
+            return [ic.build_vip_refund_row(order, refund, params["initiated_by"], params["original_invoice"],
+                                            payway, params["has_tax_id"], service_text(order), today_text, service_note)]
+        rows = []
+        for o in selected_orders:
+            if scenario == ic.SCENARIO_INVOICE_INFO:
+                rows.append(ic.build_info_change_row(o, params["changes"], service_text(o), today_text, customer_type(o)))
+            elif scenario == ic.SCENARIO_CARRIER:
+                rows.append(ic.build_carrier_change_row(o, params["carrier_type"], params["carrier_code"],
+                                                        service_text(o), today_text, customer_type(o)))
+            elif scenario == ic.SCENARIO_REISSUE:
+                rows.append(ic.build_reissue_row(o, params["kind"], params.get("tax_id", ""), params.get("company", ""),
+                                                 service_text(o), today_text, customer_type(o)))
+        return rows
 
     def render_change_order_section():
         step("3", "選擇服務異動步驟")
@@ -1896,6 +1994,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                     _default_dir = 1 if (_orig and _orig.weekday() >= 5) else 0
                     also_day_type = st.radio("互轉方向", DAY_TYPE_OPTIONS, index=_default_dir, horizontal=True, key="co_day_type_dir")
                     st.caption("異動費與平日／週末差額會各寫一列，金額分開計算、分開回填。")
+            invoice_params = render_invoice_scenario_inputs(scenario, selected_orders)
         with c2:
             customer_type = "一般"
             st.caption("啟用自訂價格後，客戶類別依會員儲值金（含購物金）餘額自動判定。")
@@ -1909,6 +2008,13 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         if calc_btn:
             try:
                 co_log("===== 開始試算 ====="); calc_rows = []
+                if scenario in invoice_change.INVOICE_SCENARIOS or scenario in invoice_change.VIP_REFUND_SCENARIOS:
+                    if scenario in invoice_change.INVOICE_SCENARIOS:
+                        for order in selected_orders:
+                            change_order.refresh_pricing_balance(order, get_session(ui_logger=co_log))
+                    calc_rows = build_invoice_scenario_rows(scenario, selected_orders, invoice_params, service_note)
+                    st.session_state.co_calc_rows = calc_rows
+                    co_log(f"✅ 試算完成，共 {len(calc_rows)} 筆"); st.rerun()
                 for order in selected_orders:
                     change_order.refresh_pricing_balance(order, get_session(ui_logger=co_log))
                     if scenario == "僅開車馬費發票":
