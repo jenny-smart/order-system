@@ -266,6 +266,11 @@ class AppendBookingsTest(unittest.TestCase):
         self.assertEqual(rows[0][4], "新北市汐止區民族二街84巷46號一樓")
         self.assertEqual(out["saved"], 1)
         self.assertEqual(out["existing"], ["LC0001"])
+        # 只用插列：插在主名單最後一列（第 2 列）之後，下方原有資料整段往下移；不覆寫任何既有儲存格
+        self.assertEqual(ws.insert_rows.call_args.kwargs["row"], 3)
+        ws.update.assert_not_called()
+        ws.batch_update.assert_not_called()
+        ws.update_cells.assert_not_called()
 
 
 if __name__ == "__main__":
