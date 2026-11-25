@@ -45,6 +45,12 @@ def test_reissue_is_allowance_not_void():
         ic.build_reissue_row(ORDER, "更正統編", "1234567", "檸檬公司", *ARGS)
 
 
+def test_tax_id_correction_does_not_issue_allowance():
+    row = ic.build_reissue_row(ORDER3, "更正統編", "87654321", "檸檬公司", *ARGS)
+    assert "改為三聯 統編87654321 檸檬公司" in row["J"] and "折讓" not in row["J"]
+    assert row["_calc_amount"] == 0 and "買家發票補通知" in row["J"] and row["C"] == "發票更正統編"
+
+
 def test_merge_rows_one_per_order():
     rows = ic.build_merge_rows([ORDER, ORDER3], "三聯", "12345678", "檸檬公司",
                                {}, "2026/11/25", {})

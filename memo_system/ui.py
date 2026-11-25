@@ -1733,7 +1733,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         ic = invoice_change
         params = {}
         if scenario == ic.SCENARIO_INVOICE_INFO:
-            st.caption("鯨躍「變更發票資料」直接改；統編不能在這裡改，請改選「統編錯誤/二聯三聯互轉」。")
+            st.caption("鯨躍「變更發票資料」直接改；統編請改選「統編錯誤/二聯三聯互轉」。")
             params["changes"] = {f: st.text_input(f"新{f}（不改留白）", key=f"co_inv_info_{f}") for f in ic.INFO_FIELDS}
         elif scenario == ic.SCENARIO_CARRIER:
             params["carrier_type"] = st.selectbox("新載具", ic.CARRIER_TYPES, key="co_inv_carrier_type")
@@ -1744,7 +1744,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
             if params["kind"] != "三聯轉二聯":
                 params["tax_id"] = st.text_input("正確統編", key="co_inv_tax_id").strip()
                 params["company"] = st.text_input("公司名稱（發票抬頭）", key="co_inv_company").strip()
-            st.caption("原發票全額折讓，再重開正確的發票（不作廢）。")
+            st.caption("更正統編：直接改統編，不開折讓。二聯三聯互轉：原發票全額折讓，再重開正確的發票（不作廢）。")
         elif scenario == ic.SCENARIO_MERGE:
             params["copy_type"] = st.radio("新發票", ["二聯", "三聯"], horizontal=True, key="co_inv_merge_copy")
             if params["copy_type"] == "三聯":

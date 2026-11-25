@@ -3,7 +3,8 @@
 服務異動：待處理發票情境（鯨躍電子發票後台的處理方式）
 
 規則（2026-11-25 Jenny 確認）
-- 發票不直接作廢；金額、統編、二聯三聯、合併開立一律走「折讓＋重開」。
+- 發票不直接作廢；金額、二聯三聯互轉、合併開立一律走「折讓＋重開」。
+- 統編打錯只要改統編，不用開折讓（2026-11-25 Jenny 確認）。
 - 鯨躍「變更發票資料」只能改買家名稱／地址／Email／電話／備註，統編鎖住不能改。
 - 載具用「載具變更－手機條碼／自然人憑證／鯨躍發票卡」或「變更紙本發票」。
 - 變更完成 6 小時後才能補通知：有統編（三聯）→ 買家發票補通知（B2B）；
@@ -35,12 +36,13 @@ STATUS_VIP_REFUND = "VIP待退券"
 TYPE_INVOICE_INFO = "發票資料變更"
 TYPE_CARRIER = "發票載具變更"
 TYPE_REISSUE = "發票折讓重開"
+TYPE_TAX_ID = "發票更正統編"
 TYPE_MERGE = "合併開立發票"
 TYPE_VIP_REFUND = "VIP退券"
 
 SCENARIO_INVOICE_INFO = "發票資料變更(地址/名稱/Email/電話)"
 SCENARIO_CARRIER = "發票載具變更"
-SCENARIO_REISSUE = "統編錯誤/二聯三聯互轉(折讓重開)"
+SCENARIO_REISSUE = "統編錯誤/二聯三聯互轉"
 SCENARIO_MERGE = "合併開立發票(折讓重開)"
 SCENARIO_VIP_REFUND_CUSTOMER = "VIP退券(客人主動)"
 SCENARIO_VIP_REFUND_COMPANY = "VIP退券(我方主動)"
@@ -148,7 +150,7 @@ def build_carrier_change_row(order, carrier_type: str, carrier_code: str,
 
 def build_reissue_row(order, kind: str, tax_id: str, company: str,
                       service_text: str, today_text: str, customer_type: str) -> dict:
-    """統編錯誤／二聯三聯互轉：原發票全額折讓，再重開正確的發票。"""
+    """統編錯誤：直接改統編，不開折讓。二聯三聯互轉：原發票全額折讓，再重開正確的發票。"""
     if kind not in REISSUE_KINDS:
         raise ValueError(f"不支援的重開類型：{kind}")
     new_has_tax_id = kind != "三聯轉二聯"
@@ -161,8 +163,16 @@ def build_reissue_row(order, kind: str, tax_id: str, company: str,
         target = f"三聯 統編{tax_id.strip()} {company.strip()}"
     else:
         target = "二聯"
-    amount = int(order.get("total") or 0)
     row = _base_row(order, service_text, today_text, customer_type)
+    if kind == "更正統編":
+        # 2026-11-25 Jenny：統編打錯只要改統編，不用開折讓
+        row.update({
+            "B": STATUS_PENDING_INVOICE, "C": TYPE_TAX_ID,
+            "J": f"更正統編：原發票{order.get('invoice_no') or ''}改為{target}；{notify_text(True)}",
+            "_calc_amount": 0, "_calc_note": "金額不變，只改統編（不開折讓）",
+        })
+        return row
+    amount = int(order.get("total") or 0)
     row.update({
         "B": STATUS_PENDING_INVOICE, "C": TYPE_REISSUE,
         "J": (f"{kind}：原發票{order.get('invoice_no') or ''}全額折讓 ${amount:,}，"
