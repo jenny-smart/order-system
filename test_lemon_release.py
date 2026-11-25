@@ -19,14 +19,15 @@ def sess(html):
 
 class ReleaseTest(unittest.TestCase):
     def test_parse_unassigned_lemons_only_from_unassigned_block(self):
+        # 班表名稱＝區域編號＋檸檬人N＋星等：4檸檬人50＝檸檬人5
         self.assertEqual(shifts.schedule_unassigned_lemons(sess(SCHEDULE), 'b', '2026-11-18', '14:00-18:00'),
-                         {'檸檬人50', '檸檬人40', '檸檬人30'})
+                         {'檸檬人5', '檸檬人4', '檸檬人3'})
 
     def test_releases_only_unused_added_lemons(self):
-        added = [('1', '檸檬人10'), ('2', '檸檬人20'), ('3', '檸檬人30'), ('4', '檸檬人40'), ('5', '檸檬人50')]
+        added = [('1', '檸檬人1'), ('2', '檸檬人2'), ('3', '檸檬人3'), ('4', '檸檬人4'), ('5', '檸檬人5')]
         with patch.object(shifts, '_remove_cleaner_shift', return_value=(True, '')) as rm:
             res = shifts.release_unused_lemon_shifts(sess(SCHEDULE), 'b', '2026-11-18', '14:00-18:00', added)
-        self.assertEqual(sorted(c.args[3] for c in rm.call_args_list), ['檸檬人30', '檸檬人40', '檸檬人50'])
+        self.assertEqual(sorted(c.args[3] for c in rm.call_args_list), ['檸檬人3', '檸檬人4', '檸檬人5'])
         self.assertIn('已取消勾班', res['message'])
 
     def test_unknown_schedule_releases_all_only_when_failed(self):

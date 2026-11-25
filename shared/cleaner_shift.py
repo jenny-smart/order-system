@@ -12,6 +12,12 @@ quick_order.py 版本：判斷班別代碼時會多考慮欄位所屬的群組�
 排除），且保留其既有班別、只新增目標時段；絕不拆解、改動其他客人已經配好班的專員。
 
 Change Log
+v2026.11.25-1
+- 修正：已勾班且排在別人訂單裡的檸檬人被當成可補，造成「已補勾」卻查不到時段。
+  補勾前先讀當日班表（共用 memo_system.shift.parse_order_lemon_usage）：
+  在時段重疊的訂單中 → 換下一位；已勾班但在未配班 → 已算入可派人數，不重複勾。
+- 修正：班表名稱「區域編號＋檸檬人N＋星等」（例 3檸檬人10＝檸檬人1）誤讀成檸檬人10，
+  改用共用 parse_lemon_label；成單後取消未用到檸檬人的比對也一併修正。
 v2026.11.11-1
 - 修正：訂單失敗時，本次補勾的檸檬人一律取消勾班（舊版只取消班表未配班
   名單裡的，補勾的檸檬人不在此區域時會漏掉）。
@@ -350,6 +356,10 @@ def ensure_lemon_cleaner_shifts(session, base_url, service_date, period_s, perso
     seen_candidate_ids = set()
     min_needed = need
     found_any = False
+    # v2026.11.25-1：先看當日班表——已勾班的檸檬人若排在別張訂單（時段重疊）就換下一位；
+    # 已勾班但在「未配班」的，後台查詢班表已算入可派人數，不重複勾、也不算本次補的。
+    in_orders = schedule_lemons_in_orders(session, base_url, service_date, period_s) or {}
+    unassigned = schedule_unassigned_lemons(session, base_url, service_date, period_s) or set()
     while len(assigned) < need:
         cleaners = _search_lemon_cleaners(session, base_url, target_month=month, min_needed=min_needed)
         fresh = [
@@ -364,6 +374,14 @@ def ensure_lemon_cleaner_shifts(session, base_url, service_date, period_s, perso
                 break
             seen_candidate_ids.add(str(cleaner_id))
             seen_candidate_names.add(str(cleaner_name))
+            if cleaner_name in in_orders:
+                skipped.append({"success": False, "name": cleaner_name, "id": cleaner_id, "already_checked": True,
+                                "reason": f"{service_date} {'、'.join(in_orders[cleaner_name])} 已排在其他訂單，換下一位"})
+                continue
+            if cleaner_name in unassigned:
+                skipped.append({"success": False, "name": cleaner_name, "id": cleaner_id, "already_free": True,
+                                "reason": f"{service_date} {period_s} 已勾班且未配班（已算入可派人數），換下一位"})
+                continue
             result = _set_cleaner_shift_if_available(session, base_url, cleaner_id, cleaner_name, service_date, target_shift_code)
             if result.get("success"):
                 assigned.append(cleaner_name)
@@ -380,12 +398,15 @@ def ensure_lemon_cleaner_shifts(session, base_url, service_date, period_s, perso
     else:
         busy = sum(1 for x in skipped if x.get("already_checked"))
         conflict = sum(1 for x in skipped if x.get("protected_existing_shift"))
-        other = len(skipped) - busy - conflict
+        free = sum(1 for x in skipped if x.get("already_free"))
+        other = len(skipped) - busy - conflict - free
         parts = [f"已檢查 {len(seen_candidate_ids)} 位檸檬人"]
         if busy:
             parts.append(f"{busy} 位該時段已有班")
         if conflict:
             parts.append(f"{conflict} 位時段衝突")
+        if free:
+            parts.append(f"{free} 位已勾班未配班")
         if other:
             parts.append(f"{other} 位讀取／寫入失敗")
         message = f"可用檸檬人不足：需要 {need} 位，只補到 {len(assigned)} 位（{'，'.join(parts)}）"
@@ -460,10 +481,67 @@ def schedule_unassigned_lemons(session, base_url, service_date, period_s):
                 idx = text.find("未配班")
                 if idx < 0:
                     return set()
-                return set(re.findall(r"檸檬人\d+", text[idx:]))
+                return _lemon_names_in_text(text[idx:])
         return None
     except Exception:
         return None
+
+
+def _parse_lemon_label(text):
+    """班表上的檸檬人標籤（區域編號＋檸檬人N＋星等，例「3檸檬人10」＝檸檬人1）。
+    沿用排班管理共用程式 memo_system.shift.parse_lemon_label。"""
+    try:
+        from memo_system.shift import parse_lemon_label
+        return parse_lemon_label(text)
+    except Exception:
+        m = re.fullmatch(r"\d*檸檬人(\d+)(\d)", str(text or "").strip())
+        return {"name": f"檸檬人{m.group(1)}"} if m else None
+
+
+def _lemon_names_in_text(text):
+    names = set()
+    for token in re.findall(r"\d*檸檬人\S+", str(text or "")):
+        parsed = _parse_lemon_label(token)
+        if parsed:
+            names.add(parsed["name"])
+    return names
+
+
+def _period_minutes(period_s):
+    m = re.search(r"(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})", str(period_s or ""))
+    if not m:
+        return None
+    h1, m1, h2, m2 = (int(x) for x in m.groups())
+    return h1 * 60 + m1, h2 * 60 + m2
+
+
+def _periods_overlap(a, b):
+    ra, rb = _period_minutes(a), _period_minutes(b)
+    if not ra or not rb:
+        return str(a or "").replace(" ", "") == str(b or "").replace(" ", "")
+    return ra[0] < rb[1] and rb[0] < ra[1]
+
+
+def schedule_lemons_in_orders(session, base_url, service_date, period_s):
+    """讀 /schedule 當日班表：已排在訂單（含檸檬保留單）且時段與目標重疊的檸檬人。
+    沿用排班管理共用程式 memo_system.shift.parse_order_lemon_usage。讀不到回傳 None。"""
+    try:
+        from memo_system.shift import parse_order_lemon_usage
+        resp = session.get(f"{base_url}/schedule", params={"date": str(service_date), "staffId": ""},
+                           headers=orders.HEADERS, allow_redirects=True)
+        if getattr(resp, "status_code", None) != 200 or not isinstance(resp.text, str):
+            return None
+        usage = parse_order_lemon_usage(resp.text, str(service_date))
+    except Exception:
+        return None
+    busy = {}
+    for (day, name), periods in usage.items():
+        if day != str(service_date):
+            continue
+        hits = [p for p in periods if _periods_overlap(p, period_s)]
+        if hits:
+            busy[name] = hits
+    return busy
 
 
 def _remove_cleaner_shift(session, base_url, cleaner_id, cleaner_name, date_str, target_shift_code):
