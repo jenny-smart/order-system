@@ -2,6 +2,8 @@
 """記錄未配班人員：自動排程。未來 2 週某時段未配班只剩 1 位專員，記到獨立行事曆。
 
 更新記錄：
+2026-11-27
+- 範圍天數改讀頁面設定（主控表參數設定「範圍天數」）；手動執行沒填天數也用頁面設定，沒設定用 14。
 2026-11-22
 - 行事曆不再「同一天只留最新一則」：內容跟今天最新一則一樣就不新增（留最早那則），有變才再新增一則。
 2026-11-22
@@ -68,7 +70,7 @@ def write_calendar(event: dict, calendar_ids, service_factory=None) -> tuple[lis
     return write_if_changed(event, calendar_ids, service_factory)
 
 
-def run(env: str = "prod", today: date | None = None, regions=REGIONS, days: int = DEFAULT_DAYS,
+def run(env: str = "prod", today: date | None = None, regions=REGIONS, days: int | None = None,
         scan=None, service_factory=None, calendar_ids=None, dry_run: bool = False,
         log: Callable[[str], None] = lambda t: print(t, flush=True)) -> dict:
     import orders  # noqa: F401  （與其他排程相同的載入順序）
@@ -78,6 +80,10 @@ def run(env: str = "prod", today: date | None = None, regions=REGIONS, days: int
     scan = scan or _scan_region
     now = datetime.now(TZ)
     today = today or now.date()
+    if not days:  # 2026-11-27：沒指定就讀頁面設定（主控表參數設定「範圍天數」），沒設定用 14
+        from shared.unassigned_settings import load_days
+
+        days = load_days(log=log)
     date_start, date_end = date_range(today, days)
     if calendar_ids is not None:
         calendar_ids = tuple(calendar_ids)
@@ -122,13 +128,14 @@ def main():
     parser.add_argument("--env", default="prod")
     parser.add_argument("--date", default="", help="以這天當作執行日（YYYY-MM-DD，測試用）")
     parser.add_argument("--regions", default=",".join(REGIONS), help="逗號分隔，預設台北")
-    parser.add_argument("--days", type=int, default=DEFAULT_DAYS, help="明天起幾天（預設 14）")
+    parser.add_argument("--days", default="", help="明天起幾天（空白＝頁面設定，沒設定用 14）")
     parser.add_argument("--dry-run", action="store_true", help="只讀班表、不寫行事曆")
     args = parser.parse_args()
     today = date.fromisoformat(args.date) if args.date.strip() else None
     regions = tuple(r.strip() for r in args.regions.split(",") if r.strip()) or REGIONS
     try:
-        run(env=args.env, today=today, regions=regions, days=args.days, dry_run=args.dry_run)
+        days = int(args.days) if str(args.days).strip() else None
+        run(env=args.env, today=today, regions=regions, days=days, dry_run=args.dry_run)
     except Exception as exc:
         _log("失敗", "、".join(regions), str(exc), traceback.format_exc())
         raise

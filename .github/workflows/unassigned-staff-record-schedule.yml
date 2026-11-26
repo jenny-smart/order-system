@@ -14,7 +14,7 @@ on:
     inputs:
       date: {description: "以這天當作執行日（YYYY-MM-DD，空白＝今天）", required: false, default: "", type: string}
       regions: {description: "地區（逗號分隔，空白＝台北）", required: false, default: "", type: string}
-      days: {description: "明天起幾天", required: false, default: "14", type: string}
+      days: {description: "明天起幾天（空白＝頁面設定，沒設定用 14）", required: false, default: "", type: string}
       env: {description: prod / dev, required: false, default: "prod", type: string}
       dry_run: {description: 只讀班表不寫行事曆, required: false, default: false, type: boolean}
       scheduled_slot: {description: 排程設定派送時段（手動執行請留空）, required: false, default: "", type: string}
@@ -52,6 +52,6 @@ jobs:
           RUN_DATE: ${{ inputs.date }}
           RUN_ENV: ${{ inputs.env || 'prod' }}
           REGIONS: ${{ inputs.regions }}
-          DAYS: ${{ inputs.days || '14' }}
+          DAYS: ${{ inputs.days }}
           DRY_RUN: ${{ inputs.dry_run && '--dry-run' || '' }}
         run: python -u -m shared.unassigned_staff_schedule --env "$RUN_ENV" --date "$RUN_DATE" --days "$DAYS" ${REGIONS:+--regions "$REGIONS"} $DRY_RUN
