@@ -15,10 +15,11 @@ class ChangeFeeCutoffTest(unittest.TestCase):
                 self.assertEqual(c._count_workdays_before(date(2026, 10, 8), moment), expected)
 
     def test_weekends_and_holidays(self):
+        # 9/25 中秋、9/26～27 週末、9/28 教師節（2025 起國定假日；依政府辦公日曆，舊內建清單漏列）
         for moment in [datetime(2026, 9, 24, 18), datetime(2026, 9, 25, 10),
                        datetime(2026, 9, 26, 10)]:
-            self.assertEqual(c._change_processing_date(moment), date(2026, 9, 28))
-            self.assertEqual(c._count_workdays_before(date(2026, 9, 29), moment), 1)
+            self.assertEqual(c._change_processing_date(moment), date(2026, 9, 29))
+            self.assertEqual(c._count_workdays_before(date(2026, 9, 30), moment), 1)
 
     def test_timezone_and_default_clock(self):
         moment = datetime(2026, 10, 6, 10, tzinfo=timezone.utc)

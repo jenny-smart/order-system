@@ -1,0 +1,55 @@
+# 每年 12/25～12/31 台北 09:00：把隔年政府辦公日曆補進 config/taiwan_work_calendar.json
+# （已有就不動；12/25 還抓不到時之後每天再試）。有改檔就 commit 到 main，
+# 並觸發 Sync order-system to tool-system，讓 tool-system 的副本一起更新。
+# 排程由 tool-system 主控表「排程設定」（功能代號 work_calendar_yearly）派送，這裡不設 cron。
+name: Work calendar yearly update
+run-name: ${{ inputs.scheduled_slot && format('cloud-{0}', inputs.scheduled_slot) || 'Work calendar yearly update' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      year:
+        description: "要補的年度（空白＝隔年）"
+        required: false
+        default: ""
+      scheduled_slot:
+        description: 排程設定派送時段（手動執行請留空）
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: work-calendar-yearly
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: 補隔年辦公日曆
+        run: python scripts/update_work_calendar.py ${{ inputs.year && format('--year {0}', inputs.year) || '' }}
+      - name: Commit（有改檔才推）
+        id: commit
+        run: |
+          if git diff --quiet -- config/taiwan_work_calendar.json; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"; echo "沒有變更"; exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add config/taiwan_work_calendar.json
+          git commit -m "更新辦公日曆：補上隔年（政府行政機關辦公日曆表）"
+          git push
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+      - name: 同步到 tool-system
+        if: steps.commit.outputs.changed == 'true' && vars.SYNC_TO_TOOL_SYSTEM == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run sync-to-tool-system.yml --ref main
