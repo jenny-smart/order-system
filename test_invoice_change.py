@@ -31,8 +31,12 @@ def test_carrier_validation():
     assert ic.validate_carrier("手機條碼", "/VMVA4EV") == ""
     assert ic.validate_carrier("手機條碼", "VMVA4EV") != ""
     assert ic.validate_carrier("紙本發票", "") == ""
+    assert ic.validate_carrier("會員載具", "a@gmail.com") == ""
+    assert ic.validate_carrier("會員載具", "abc") != ""
     row = ic.build_carrier_change_row(ORDER, "手機條碼", "/VMVA4EV", *ARGS)
-    assert "載具變更-手機條碼" in row["J"] and "「發票補通知」" in row["J"]
+    assert "改為手機條碼 /VMVA4EV" in row["J"] and "折讓重開" in row["J"] and "「發票補通知」" in row["J"]
+    member = ic.build_carrier_change_row(ORDER, "會員載具", "a@gmail.com", *ARGS)
+    assert "改為會員載具 a@gmail.com" in member["J"]
 
 
 def test_reissue_is_allowance_not_void():

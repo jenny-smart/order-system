@@ -6,7 +6,8 @@
 - 發票不直接作廢；金額、二聯三聯互轉、合併開立一律走「折讓＋重開」。
 - 統編打錯只要改統編，不用開折讓（2026-11-25 Jenny 確認）。
 - 鯨躍「變更發票資料」只能改買家名稱／地址／Email／電話／備註，統編鎖住不能改。
-- 載具用「載具變更－手機條碼／自然人憑證／鯨躍發票卡」或「變更紙本發票」。
+- 載具：會員載具（預設 Email）／手機條碼／自然人憑證／鯨躍發票卡／紙本；
+  能否在鯨躍直接改還不確定，J 欄兩種做法都寫（2026-11-26）。
 - 變更完成 6 小時後才能補通知：有統編（三聯）→ 買家發票補通知（B2B）；
   沒統編（二聯）→ 發票補通知。
 - 重複付款只開過一張發票，只要退款、不用處理發票。
@@ -51,12 +52,14 @@ INVOICE_SCENARIOS = [SCENARIO_INVOICE_INFO, SCENARIO_CARRIER, SCENARIO_REISSUE, 
 VIP_REFUND_SCENARIOS = [SCENARIO_VIP_REFUND_CUSTOMER, SCENARIO_VIP_REFUND_COMPANY]
 
 INFO_FIELDS = ["買家名稱", "買家地址", "買家Email", "買家電話"]
-CARRIER_TYPES = ["手機條碼", "自然人憑證", "鯨躍發票卡", "紙本發票"]
+MEMBER_CARRIER = "會員載具"
+CARRIER_TYPES = [MEMBER_CARRIER, "手機條碼", "自然人憑證", "鯨躍發票卡", "紙本發票"]
 REISSUE_KINDS = ["更正統編", "二聯轉三聯", "三聯轉二聯"]
 
 _MOBILE_BARCODE_RE = re.compile(r"^/[0-9A-Z.+\-]{7}$")
 _CITIZEN_CERT_RE = re.compile(r"^[A-Z]{2}[0-9]{14}$")
 _TAX_ID_RE = re.compile(r"^\d{8}$")
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 # ------------------------------------------------------------
@@ -96,6 +99,8 @@ def validate_tax_id(value: str) -> str:
 
 def validate_carrier(carrier_type: str, code: str) -> str:
     code = str(code or "").strip()
+    if carrier_type == MEMBER_CARRIER:
+        return "" if _EMAIL_RE.fullmatch(code) else "會員載具請輸入 Email"
     if carrier_type == "手機條碼" and not _MOBILE_BARCODE_RE.fullmatch(code):
         return "手機條碼須為 8 碼：第 1 碼為 /，其餘為數字、大寫英文或 . - +"
     if carrier_type == "自然人憑證" and not _CITIZEN_CERT_RE.fullmatch(code):
@@ -137,12 +142,13 @@ def build_carrier_change_row(order, carrier_type: str, carrier_code: str,
     error = validate_carrier(carrier_type, carrier_code)
     if error:
         raise ValueError(error)
-    page = "變更紙本發票" if carrier_type == "紙本發票" else f"載具變更-{carrier_type}"
     code = f" {carrier_code.strip()}" if carrier_code and carrier_type != "紙本發票" else ""
+    # 2026-11-26 Jenny：還不確定鯨躍能否直接改載具 → 不指定做法，由處理的人決定
     row = _base_row(order, service_text, today_text, customer_type)
     row.update({
         "B": STATUS_PENDING_INVOICE, "C": TYPE_CARRIER,
-        "J": f"鯨躍「{page}」：改為{carrier_type}{code}；{notify_text(is_triplicate(order))}",
+        "J": (f"載具改為{carrier_type}{code}（鯨躍能直接改就用「載具變更／變更紙本發票」，"
+              f"不能改則全額折讓重開）；{notify_text(is_triplicate(order))}"),
         "_calc_amount": 0, "_calc_note": "金額不變，只改載具",
     })
     return row

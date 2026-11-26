@@ -1738,7 +1738,11 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         elif scenario == ic.SCENARIO_CARRIER:
             params["carrier_type"] = st.selectbox("新載具", ic.CARRIER_TYPES, key="co_inv_carrier_type")
             params["carrier_code"] = "" if params["carrier_type"] == "紙本發票" else st.text_input(
-                "載具號碼", placeholder="手機條碼例：/VMVA4EV", key="co_inv_carrier_code").strip().upper()
+                "會員載具 Email" if params["carrier_type"] == ic.MEMBER_CARRIER else "載具號碼",
+                placeholder="例：name@gmail.com" if params["carrier_type"] == ic.MEMBER_CARRIER else "手機條碼例：/VMVA4EV",
+                key="co_inv_carrier_code").strip()
+            if params["carrier_type"] != ic.MEMBER_CARRIER:
+                params["carrier_code"] = params["carrier_code"].upper()
         elif scenario == ic.SCENARIO_REISSUE:
             params["kind"] = st.radio("類型", ic.REISSUE_KINDS, horizontal=True, key="co_inv_reissue_kind")
             if params["kind"] != "三聯轉二聯":
