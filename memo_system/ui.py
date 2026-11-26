@@ -1750,11 +1750,8 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                 params["company"] = st.text_input("公司名稱（發票抬頭）", key="co_inv_company").strip()
             st.caption("更正統編：直接改統編，不開折讓。二聯三聯互轉：原發票全額折讓，再重開正確的發票（不作廢）。")
         elif scenario == ic.SCENARIO_MERGE:
-            params["copy_type"] = st.radio("新發票", ["二聯", "三聯"], horizontal=True, key="co_inv_merge_copy")
-            if params["copy_type"] == "三聯":
-                params["tax_id"] = st.text_input("統編", key="co_inv_merge_tax_id").strip()
-                params["company"] = st.text_input("公司名稱（發票抬頭）", key="co_inv_merge_company").strip()
-            st.caption(f"已勾選 {len(selected_orders)} 筆；每張原發票全額折讓，合開一張新發票。")
+            st.caption(f"已勾選 {len(selected_orders)} 筆；只寫一列，整合執行時每張原發票全額折讓，"
+                       "以第一張訂單的發票資料合開一張。")
         elif scenario in ic.VIP_REFUND_SCENARIOS:
             params["initiated_by"] = "customer" if scenario == ic.SCENARIO_VIP_REFUND_CUSTOMER else "company"
             if len(selected_orders) > 1:
@@ -1803,10 +1800,8 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
             return change_order._customer_type_from_order(o)
 
         if scenario == ic.SCENARIO_MERGE:
-            return ic.build_merge_rows(
-                selected_orders, params["copy_type"], params.get("tax_id", ""), params.get("company", ""),
-                {o["order_no"]: service_text(o) for o in selected_orders}, today_text,
-                {o["order_no"]: customer_type(o) for o in selected_orders})
+            return ic.build_merge_rows(selected_orders, service_text(selected_orders[0]), today_text,
+                                       customer_type(selected_orders[0]), service_note)
         if scenario in ic.VIP_REFUND_SCENARIOS:
             order = selected_orders[0]
             refund = ic.calc_vip_refund(
@@ -1825,7 +1820,9 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                                                         service_text(o), today_text, customer_type(o)))
             elif scenario == ic.SCENARIO_REISSUE:
                 rows.append(ic.build_reissue_row(o, params["kind"], params.get("tax_id", ""), params.get("company", ""),
-                                                 service_text(o), today_text, customer_type(o)))
+                                                 service_text(o), today_text, customer_type(o), service_note))
+        for row in rows:
+            row.setdefault("K", service_note or "")
         return rows
 
     def render_change_order_section():
