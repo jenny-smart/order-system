@@ -1,17 +1,22 @@
 # 每年 12/25～12/31 台北 09:00：把隔年政府辦公日曆補進 config/taiwan_work_calendar.json
 # （已有就不動；12/25 還抓不到時之後每天再試）。有改檔就 commit 到 main，
 # 並觸發 Sync order-system to tool-system，讓 tool-system 的副本一起更新。
+# 排程由 tool-system 主控表「排程設定」（功能代號 work_calendar_yearly）派送，這裡不設 cron。
 name: Work calendar yearly update
+run-name: ${{ inputs.scheduled_slot && format('cloud-{0}', inputs.scheduled_slot) || 'Work calendar yearly update' }}
 
 on:
-  schedule:
-    - cron: "0 1 25-31 12 *"   # UTC 01:00 ＝ 台北 09:00
   workflow_dispatch:
     inputs:
       year:
         description: "要補的年度（空白＝隔年）"
         required: false
         default: ""
+      scheduled_slot:
+        description: 排程設定派送時段（手動執行請留空）
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: write
