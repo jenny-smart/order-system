@@ -3,9 +3,11 @@
 服務異動：待處理發票情境（鯨躍電子發票後台的處理方式）
 
 規則（2026-11-25 Jenny 確認）
-- 發票不直接作廢；金額、統編、二聯三聯、合併開立一律走「折讓＋重開」。
+- 發票不直接作廢；金額、二聯三聯互轉、合併開立一律走「折讓＋重開」。
+- 統編打錯只要改統編，不用開折讓（2026-11-25 Jenny 確認）。
 - 鯨躍「變更發票資料」只能改買家名稱／地址／Email／電話／備註，統編鎖住不能改。
-- 載具用「載具變更－手機條碼／自然人憑證／鯨躍發票卡」或「變更紙本發票」。
+- 載具：會員載具（預設 Email）／手機條碼／自然人憑證／鯨躍發票卡／紙本；
+  能否在鯨躍直接改還不確定，J 欄兩種做法都寫（2026-11-26）。
 - 變更完成 6 小時後才能補通知：有統編（三聯）→ 買家發票補通知（B2B）；
   沒統編（二聯）→ 發票補通知。
 - 重複付款只開過一張發票，只要退款、不用處理發票。
@@ -35,13 +37,15 @@ STATUS_VIP_REFUND = "VIP待退券"
 TYPE_INVOICE_INFO = "發票資料變更"
 TYPE_CARRIER = "發票載具變更"
 TYPE_REISSUE = "發票折讓重開"
+TYPE_TAX_ID = "發票更正統編"
+TYPE_TRIPLICATE = "二聯轉三聯"   # tool-system TRIPLICATE_DETAILS
 TYPE_MERGE = "合併開立發票"
 TYPE_VIP_REFUND = "VIP退券"
 
 SCENARIO_INVOICE_INFO = "發票資料變更(地址/名稱/Email/電話)"
 SCENARIO_CARRIER = "發票載具變更"
-SCENARIO_REISSUE = "統編錯誤/二聯三聯互轉(折讓重開)"
-SCENARIO_MERGE = "合併開立發票(折讓重開)"
+SCENARIO_REISSUE = "統編錯誤/二聯三聯互轉"
+SCENARIO_MERGE = "合併開立發票"
 SCENARIO_VIP_REFUND_CUSTOMER = "VIP退券(客人主動)"
 SCENARIO_VIP_REFUND_COMPANY = "VIP退券(我方主動)"
 
@@ -49,12 +53,14 @@ INVOICE_SCENARIOS = [SCENARIO_INVOICE_INFO, SCENARIO_CARRIER, SCENARIO_REISSUE, 
 VIP_REFUND_SCENARIOS = [SCENARIO_VIP_REFUND_CUSTOMER, SCENARIO_VIP_REFUND_COMPANY]
 
 INFO_FIELDS = ["買家名稱", "買家地址", "買家Email", "買家電話"]
-CARRIER_TYPES = ["手機條碼", "自然人憑證", "鯨躍發票卡", "紙本發票"]
+MEMBER_CARRIER = "會員載具"
+CARRIER_TYPES = [MEMBER_CARRIER, "手機條碼", "自然人憑證", "鯨躍發票卡", "紙本發票"]
 REISSUE_KINDS = ["更正統編", "二聯轉三聯", "三聯轉二聯"]
 
 _MOBILE_BARCODE_RE = re.compile(r"^/[0-9A-Z.+\-]{7}$")
 _CITIZEN_CERT_RE = re.compile(r"^[A-Z]{2}[0-9]{14}$")
 _TAX_ID_RE = re.compile(r"^\d{8}$")
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 # ------------------------------------------------------------
@@ -94,6 +100,8 @@ def validate_tax_id(value: str) -> str:
 
 def validate_carrier(carrier_type: str, code: str) -> str:
     code = str(code or "").strip()
+    if carrier_type == MEMBER_CARRIER:
+        return "" if _EMAIL_RE.fullmatch(code) else "會員載具請輸入 Email"
     if carrier_type == "手機條碼" and not _MOBILE_BARCODE_RE.fullmatch(code):
         return "手機條碼須為 8 碼：第 1 碼為 /，其餘為數字、大寫英文或 . - +"
     if carrier_type == "自然人憑證" and not _CITIZEN_CERT_RE.fullmatch(code):
@@ -135,72 +143,83 @@ def build_carrier_change_row(order, carrier_type: str, carrier_code: str,
     error = validate_carrier(carrier_type, carrier_code)
     if error:
         raise ValueError(error)
-    page = "變更紙本發票" if carrier_type == "紙本發票" else f"載具變更-{carrier_type}"
     code = f" {carrier_code.strip()}" if carrier_code and carrier_type != "紙本發票" else ""
+    # 2026-11-26 Jenny：還不確定鯨躍能否直接改載具 → 不指定做法，由處理的人決定
     row = _base_row(order, service_text, today_text, customer_type)
     row.update({
         "B": STATUS_PENDING_INVOICE, "C": TYPE_CARRIER,
-        "J": f"鯨躍「{page}」：改為{carrier_type}{code}；{notify_text(is_triplicate(order))}",
+        "J": (f"載具改為{carrier_type}{code}（鯨躍能直接改就用「載具變更／變更紙本發票」，"
+              f"不能改則全額折讓重開）；{notify_text(is_triplicate(order))}"),
         "_calc_amount": 0, "_calc_note": "金額不變，只改載具",
     })
     return row
 
 
 def build_reissue_row(order, kind: str, tax_id: str, company: str,
-                      service_text: str, today_text: str, customer_type: str) -> dict:
-    """統編錯誤／二聯三聯互轉：原發票全額折讓，再重開正確的發票。"""
+                      service_text: str, today_text: str, customer_type: str, service_note: str = "") -> dict:
+    """
+    更正統編：直接改統編，不開折讓（2026-11-25 Jenny）。
+    二聯轉三聯：C 欄寫「二聯轉三聯」、K 欄寫「統編 公司名稱」→ tool-system 清潔異動整合執行自動處理
+    （原發票全額折讓＋開新三聯，K 欄格式同 tools/invoice_center/triplicate.parse_requirements）。
+    三聯轉二聯：tool-system 尚無自動處理，J 欄寫做法。
+    """
     if kind not in REISSUE_KINDS:
         raise ValueError(f"不支援的重開類型：{kind}")
     new_has_tax_id = kind != "三聯轉二聯"
+    buyer = ""
     if new_has_tax_id:
         error = validate_tax_id(tax_id)
         if error:
             raise ValueError(error)
         if not str(company or "").strip():
             raise ValueError("請輸入公司名稱（發票抬頭）")
-        target = f"三聯 統編{tax_id.strip()} {company.strip()}"
-    else:
-        target = "二聯"
-    amount = int(order.get("total") or 0)
+        buyer = f"{tax_id.strip()} {company.strip()}"
+    note = str(service_note or "").strip()
     row = _base_row(order, service_text, today_text, customer_type)
+    if kind == "更正統編":
+        row.update({
+            "B": STATUS_PENDING_INVOICE, "C": TYPE_TAX_ID, "K": note,
+            "J": f"更正統編：原發票{order.get('invoice_no') or ''}改為統編{buyer}；{notify_text(True)}",
+            "_calc_amount": 0, "_calc_note": "金額不變，只改統編（不開折讓）",
+        })
+        return row
+    amount = int(order.get("total") or 0)
+    if kind == "二聯轉三聯":
+        row.update({
+            "B": STATUS_PENDING_INVOICE, "C": TYPE_TRIPLICATE,
+            "K": "\n".join(x for x in (buyer, note) if x),
+            "J": f"二聯轉三聯：原發票{order.get('invoice_no') or ''}全額折讓 ${amount:,}，重開三聯；新發票{notify_text(True)}",
+            "_calc_amount": amount, "_calc_note": f"全額折讓 ${amount:,} ＋ 重開三聯 ${amount:,}（整合執行自動處理）",
+        })
+        return row
     row.update({
-        "B": STATUS_PENDING_INVOICE, "C": TYPE_REISSUE,
-        "J": (f"{kind}：原發票{order.get('invoice_no') or ''}全額折讓 ${amount:,}，"
-              f"重開{target}；新發票{notify_text(new_has_tax_id)}"),
+        "B": STATUS_PENDING_INVOICE, "C": TYPE_REISSUE, "K": note,
+        "J": (f"三聯轉二聯：原發票{order.get('invoice_no') or ''}全額折讓 ${amount:,}，"
+              f"重開二聯；新發票{notify_text(False)}"),
         "_calc_amount": amount, "_calc_note": f"全額折讓 ${amount:,} ＋ 重開 ${amount:,}（不作廢）",
     })
     return row
 
 
-def build_merge_rows(orders: list, copy_type: str, tax_id: str, company: str,
-                     service_texts: dict, today_text: str, customer_types: dict) -> list:
-    """合併開立：每張原發票全額折讓，合開一張新發票；每筆訂單各寫一列。"""
+def build_merge_rows(orders: list, service_text: str, today_text: str, customer_type: str,
+                     service_note: str = "") -> list:
+    """
+    合併開立：只寫一列（G＝第一張訂單，J 列出全部訂單），由 tool-system 清潔異動整合執行處理：
+    每張原發票全額折讓，再以第一張訂單的發票資料合開一張（金額＝各訂單合計），回寫時每張訂單都寫發票號碼。
+    """
     if len(orders) < 2:
         raise ValueError("合併開立請至少勾選 2 筆訂單")
-    has_tax_id = copy_type == "三聯"
-    if has_tax_id:
-        error = validate_tax_id(tax_id)
-        if error:
-            raise ValueError(error)
-        if not str(company or "").strip():
-            raise ValueError("請輸入公司名稱（發票抬頭）")
-    target = f"三聯 統編{tax_id.strip()} {company.strip()}" if has_tax_id else "二聯"
-    total = sum(int(o.get("total") or 0) for o in orders)
+    first = orders[0]
     order_nos = [o["order_no"] for o in orders]
-    rows = []
-    for order in orders:
-        amount = int(order.get("total") or 0)
-        others = "、".join(n for n in order_nos if n != order["order_no"])
-        row = _base_row(order, service_texts.get(order["order_no"], ""), today_text,
-                        customer_types.get(order["order_no"], ""))
-        row.update({
-            "B": STATUS_PENDING_INVOICE, "C": TYPE_MERGE,
-            "J": (f"合併開立：原發票{order.get('invoice_no') or ''}全額折讓 ${amount:,}，"
-                  f"與{others}合開一張{target} 共 ${total:,}；新發票{notify_text(has_tax_id)}"),
-            "_calc_amount": amount, "_calc_note": f"{len(orders)} 筆合計 ${total:,}，合開一張",
-        })
-        rows.append(row)
-    return rows
+    total = sum(int(o.get("total") or 0) for o in orders)
+    row = _base_row(first, service_text, today_text, customer_type)
+    row.update({
+        "B": STATUS_PENDING_INVOICE, "C": TYPE_MERGE, "K": str(service_note or "").strip(),
+        "J": (f"合併開立發票：{'、'.join(order_nos)}（原發票全額折讓，以 {first['order_no']} 的發票資料合開一張 "
+              f"共 ${total:,}）；新發票{notify_text(is_triplicate(first))}"),
+        "_calc_amount": total, "_calc_note": f"{len(orders)} 筆合計 ${total:,}，合開一張",
+    })
+    return [row]
 
 
 # ------------------------------------------------------------

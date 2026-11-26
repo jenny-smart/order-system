@@ -31,27 +31,37 @@ def test_carrier_validation():
     assert ic.validate_carrier("手機條碼", "/VMVA4EV") == ""
     assert ic.validate_carrier("手機條碼", "VMVA4EV") != ""
     assert ic.validate_carrier("紙本發票", "") == ""
+    assert ic.validate_carrier("會員載具", "a@gmail.com") == ""
+    assert ic.validate_carrier("會員載具", "abc") != ""
     row = ic.build_carrier_change_row(ORDER, "手機條碼", "/VMVA4EV", *ARGS)
-    assert "載具變更-手機條碼" in row["J"] and "「發票補通知」" in row["J"]
+    assert "改為手機條碼 /VMVA4EV" in row["J"] and "折讓重開" in row["J"] and "「發票補通知」" in row["J"]
+    member = ic.build_carrier_change_row(ORDER, "會員載具", "a@gmail.com", *ARGS)
+    assert "改為會員載具 a@gmail.com" in member["J"]
 
 
-def test_reissue_is_allowance_not_void():
-    row = ic.build_reissue_row(ORDER, "二聯轉三聯", "12345678", "檸檬公司", *ARGS)
-    assert "全額折讓 $4,800" in row["J"] and "重開三聯 統編12345678 檸檬公司" in row["J"]
-    assert "作廢" not in row["J"] and "買家發票補通知" in row["J"]
+def test_triplicate_row_matches_tool_system_executor():
+    row = ic.build_reissue_row(ORDER, "二聯轉三聯", "12345678", "檸檬有限公司", *ARGS, service_note="客要報帳")
+    # tool-system TRIPLICATE_DETAILS＋parse_requirements：C「二聯轉三聯」、K 第一行「統編 公司名稱」
+    assert row["C"] == "二聯轉三聯" and row["K"].splitlines()[0] == "12345678 檸檬有限公司"
+    assert "全額折讓 $4,800" in row["J"] and "作廢" not in row["J"] and "買家發票補通知" in row["J"]
     to_two = ic.build_reissue_row(ORDER3, "三聯轉二聯", "", "", *ARGS)
-    assert "重開二聯" in to_two["J"] and "「發票補通知」" in to_two["J"]
+    assert "重開二聯" in to_two["J"] and "「發票補通知」" in to_two["J"] and "三聯" not in to_two["C"]
     with pytest.raises(ValueError):
         ic.build_reissue_row(ORDER, "更正統編", "1234567", "檸檬公司", *ARGS)
 
 
-def test_merge_rows_one_per_order():
-    rows = ic.build_merge_rows([ORDER, ORDER3], "三聯", "12345678", "檸檬公司",
-                               {}, "2026/11/25", {})
-    assert len(rows) == 2 and all(r["C"] == "合併開立發票" for r in rows)
-    assert "與LC00000002合開" in rows[0]["J"] and "共 $7,800" in rows[0]["J"]
+def test_tax_id_correction_does_not_issue_allowance():
+    row = ic.build_reissue_row(ORDER3, "更正統編", "87654321", "檸檬公司", *ARGS)
+    assert "改為統編87654321 檸檬公司" in row["J"] and "折讓" not in row["J"]
+    assert row["_calc_amount"] == 0 and "買家發票補通知" in row["J"] and row["C"] == "發票更正統編"
+
+
+def test_merge_writes_single_row_listing_all_orders():
+    rows = ic.build_merge_rows([ORDER, ORDER3], "2026-11-25", "2026/11/25", "一般客")
+    assert len(rows) == 1 and rows[0]["C"] == "合併開立發票" and rows[0]["G"] == "LC00000001"
+    assert "LC00000001、LC00000002" in rows[0]["J"] and "共 $7,800" in rows[0]["J"]
     with pytest.raises(ValueError):
-        ic.build_merge_rows([ORDER], "二聯", "", "", {}, "2026/11/25", {})
+        ic.build_merge_rows([ORDER], "", "2026/11/25", "")
 
 
 def test_credit_card_over_three_months_refunds_by_atm():
