@@ -25,25 +25,16 @@ class OutOfAreaTest(unittest.TestCase):
                 q._query_booking_slot_with_lemon_retry(object(), 'b', '信用卡', {'person': '2'}, 't', SLOT, True)
         self.assertNotIsInstance(ctx.exception, q.OutOfServiceAreaError)
 
-    def test_fallback_books_proxy_address_then_restores(self):
+    def test_out_of_area_does_not_book_proxy_address(self):
         calls = []
-        real = {'address': '新北市林口區A路1號', 'area_id': '9', 'lat': '1', 'lng': '2', 'country_id': '3'}
 
         def impl(*args, **kwargs):
             calls.append(kwargs.get('address', args[4] if len(args) > 4 else None))
-            holder = q._BOOKING_ADDRESS_INFO.get()
-            if len(calls) == 1:
-                holder.update(real)
-                raise q.OutOfServiceAreaError('無可預約人力')
-            return {'order_no': 'LC001', 'address': q.FALLBACK_BOOKING_ADDRESS, 'session': Mock()}
-        with patch.object(q, '_quick_create_order_impl', side_effect=impl), \
-             patch.object(q, '_configure_environment', return_value='b'), \
-             patch.object(q, '_update_order_address', return_value=(True, '')) as upd:
-            res = q.quick_create_order('dev', '信用卡', '台北', {'session': Mock()}, real['address'], '1', '2026-12-30', '09:00-18:00', '8', person='2')
-        self.assertEqual(calls, [real['address'], q.FALLBACK_BOOKING_ADDRESS])
-        self.assertEqual(upd.call_args.args[3]['address'], real['address'])
-        self.assertEqual(res['address'], real['address'])
-        self.assertIn('不在服務區域', res['proxy_address_note'])
+            raise q.OutOfServiceAreaError('無可預約人力')
+        with patch.object(q, '_quick_create_order_impl', side_effect=impl):
+            with self.assertRaises(q.OutOfServiceAreaError):
+                q.quick_create_order('dev', '信用卡', '台北', {'session': Mock()}, '新北市林口區A路1號', '1', '2026-12-30', '09:00-18:00', '8', person='2')
+        self.assertEqual(calls, ['新北市林口區A路1號'])  # 只約客人地址，不改用代約地址
 
     def test_update_order_address_posts_area_fields(self):
         page = ('<meta name="csrf-token" content="tok"><input name="address" value="台北市大安區信義路四段210號4樓">'

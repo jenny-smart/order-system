@@ -43,6 +43,9 @@
 # - 儲值金補價差第二段（客付補差價單）：年節期間（服務金額設定的大掃除
 #   PART1／PART2）總金額一律以一般客（非VIP）單價計，例：2026 第二階段
 #   VIP 4275、一般客 4650 → 補差價單以 4650 計。第一段儲值金清零單不變。
+# v8.71
+# - 取消 v8.70 代約地址：補勾檸檬人後重查仍沒有時段就直接失敗、不送出訂單，
+#   不再改用「台北市大安區信義路四段210號4樓」約。
 # v8.70
 # - 客人地址不在服務區域（補勾檸檬人後重查仍沒有時段）：本次補勾的檸檬人取消，
 #   改用「台北市大安區信義路四段210號4樓」約，成立訂單後再到訂單修改頁把地址
@@ -1210,43 +1213,10 @@ def _update_order_address(session, base_url, order_no, info):
 def quick_create_order(*args, **kwargs):
     """v8.68：包住實際成單；本次補勾的檸檬人成單後沒用到（或訂單失敗）就取消勾班。
 
-    v8.70：客人地址不在服務區域（補勾檸檬人後仍查不到時段）時，改用
-    FALLBACK_BOOKING_ADDRESS 約，成立訂單後再把訂單地址改回客人地址。
+    v8.71：不再改用 FALLBACK_BOOKING_ADDRESS 代約。補勾檸檬人後仍查不到時段就直接失敗，
+    不送出任何訂單（補勾的檸檬人照常取消）。
     """
-    real_info = {}
-    try:
-        return _run_with_lemon_release(args, kwargs, real_info)
-    except OutOfServiceAreaError as first_exc:
-        if not real_info.get("address"):
-            raise
-        if normalize_addr_for_match(real_info["address"]) == normalize_addr_for_match(FALLBACK_BOOKING_ADDRESS):
-            raise
-        bound = dict(zip(_QUICK_CREATE_PARAMS, args))
-        bound.update(kwargs)
-        bound["address"] = FALLBACK_BOOKING_ADDRESS
-        try:
-            result = _run_with_lemon_release((), bound, {})
-        except Exception as second_exc:
-            raise Exception(f"{first_exc}｜改用 {FALLBACK_BOOKING_ADDRESS} 約也失敗：{second_exc}") from second_exc
-    order_no = (result or {}).get("order_no") if isinstance(result, dict) else ""
-    session = (result or {}).get("session") or (bound.get("lookup_result") or {}).get("session")
-    base_url = _configure_environment(bound.get("env_name"))
-    ok, why = _update_order_address(session, base_url, order_no, real_info) if order_no else (False, "沒有訂單編號")
-    msg = (f"此地址不在服務區域，先用 {FALLBACK_BOOKING_ADDRESS} 約成訂單 {order_no}，"
-           + (f"已改回客人地址 {real_info['address']}。" if ok else f"⚠️ 改回客人地址失敗（{why}），請到後台手動改成 {real_info['address']}。")
-           + "車馬費是依代約地址計算，請確認是否需要調整。")
-    if isinstance(result, dict):
-        result["proxy_address_note"] = msg
-        result["address_mismatch_warning"] = "；".join(x for x in (str(result.get("address_mismatch_warning") or ""), msg) if x)
-        if ok:
-            result["address"] = real_info["address"]
-    try:
-        import streamlit as _st
-        (_st.info if ok else _st.warning)(f"📍 {msg}")
-    except Exception:
-        pass
-    return result
-
+    return _run_with_lemon_release(args, kwargs, {})
 
 def _quick_create_order_impl(
     env_name, payway, region, lookup_result, address, clean_type_id,
@@ -4812,6 +4782,7 @@ def _query_booking_slot_with_lemon_retry(session, base_url, payway, data, token,
             "後台查詢班表結果沒有這個時段。"
             + (f"補檸檬人結果：{shift_message}。" if shift_message else "")
             + (f"當天可預約：{others}。" if others else "當天沒有任何可預約時段。")
+            + ("補勾的檸檬人後台仍未算入此地址可派人數，可能此地址不在檸檬人服務區域；未送出訂單。" if out_of_area else "")
         )
     return raw, token, pre
 
