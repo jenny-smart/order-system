@@ -2,6 +2,7 @@
 """未配班檢查頁：① 成立保留單 ② 記錄未配班人員（只剩 1 人的時段）。
 
 變更紀錄
+- 2026-11-26：① 新增「自動排程設定」：保留單開始日／結束日／停止日改在頁面設定（存主控表「參數設定」）。
 - 2026-11-22：① 專員全是檸檬人的保留單一併取消。
 - 2026-11-22：① 確定成立前後會合併單人保留單（同時段 2 張以上 1 人單 → 取消後成立 N 人單）。
 - 2026-11-22：① 確認改成兩段按鈕（成立 N 張 → 確定成立／取消），取代勾選框（正式機勾不起來）。
@@ -45,6 +46,44 @@ def render(backend_email: str, backend_password: str, env: str) -> None:
         _render_record(lookup, (get_region_by_address(addresses[0], ACCOUNTS) if addresses else "") or "台北")
 
 
+def _render_schedule_settings(rs, parse_day, default_start: str, default_end: str) -> tuple[date, date]:
+    """自動排程（每小時）的保留單區間與停止日；存主控表「參數設定」。回傳 (開始日, 結束日)。"""
+    if "unassigned_reserve_settings" not in st.session_state:
+        st.session_state.unassigned_reserve_settings = rs.load(log=lambda m: st.warning(m))
+    saved = st.session_state.unassigned_reserve_settings
+
+    def _day(item: str, default: str = "") -> date | None:
+        try:
+            return parse_day(saved.get(item) or default) if (saved.get(item) or default) else None
+        except ValueError:
+            return parse_day(default) if default else None
+
+    start, end, stop = _day(rs.START_ITEM, default_start), _day(rs.END_ITEM, default_end), _day(rs.STOP_ITEM)
+    with st.expander(f"⏰ 自動排程設定（目前 {rs.fmt(start)}～{rs.fmt(end)}"
+                     f"{'，' + rs.fmt(stop) + ' 起停止' if stop else ''}）", expanded=False):
+        st.caption("每小時排程（08:30～17:30）依這裡的區間自動成立保留單；"
+                   "設定「停止日」後，當天（含）起排程不再自動成立（頁面手動成立不受影響）。存在主控表「參數設定」。")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            new_start = st.date_input("保留單開始日", value=start, key="urs_start")
+        with c2:
+            new_end = st.date_input("保留單結束日", value=end, key="urs_end")
+        with c3:
+            use_stop = st.checkbox("設定停止日", value=stop is not None, key="urs_use_stop")
+            new_stop = st.date_input("自動成立停止日", value=stop or date.today(), key="urs_stop",
+                                     disabled=not use_stop)
+        if st.button("儲存自動排程設定", key="urs_save"):
+            try:
+                rs.save(new_start, new_end, new_stop if use_stop else None)
+                st.session_state.unassigned_reserve_settings = {
+                    rs.START_ITEM: rs.fmt(new_start), rs.END_ITEM: rs.fmt(new_end),
+                    rs.STOP_ITEM: rs.fmt(new_stop) if use_stop else ""}
+                st.success("已儲存，下一次排程起生效")
+            except Exception as exc:
+                st.error(f"儲存失敗：{exc}")
+    return start, end
+
+
 def _render_reserve(env, lookup, get_region_by_address, backend_email: str = "", backend_password: str = "") -> None:
     from function.reserve_optimizer import member_addresses
 
@@ -63,13 +102,15 @@ def _render_reserve(env, lookup, get_region_by_address, backend_email: str = "",
         payway = st.selectbox("付款類型", ["儲值金", "信用卡", "ATM"], index=0, key="unassigned_reserve_payway")
     region = get_region_by_address(address, ACCOUNTS) or "台北"
     d1, d2 = st.columns(2)
-    from shared.unassigned_reserve_schedule import RESERVE_END, RESERVE_START
+    from shared import reserve_settings as rs
+    from shared.unassigned_reserve_schedule import RESERVE_END, RESERVE_START, parse_day
 
-    # 預設＝保留單排程的區間（暫訂 2027/01/22～02/04）
+    saved = _render_schedule_settings(rs, parse_day, RESERVE_START, RESERVE_END)
+    # 預設＝自動排程的區間（頁面設定）
     with d1:
-        start = st.date_input("開始日期", value=date.fromisoformat(RESERVE_START), key="unassigned_reserve_start")
+        start = st.date_input("開始日期", value=saved[0], key="unassigned_reserve_start")
     with d2:
-        end = st.date_input("結束日期", value=date.fromisoformat(RESERVE_END), key="unassigned_reserve_end")
+        end = st.date_input("結束日期", value=saved[1], key="unassigned_reserve_end")
     if st.button("讀取未配班並產生保留計畫", width="stretch", key="unassigned_reserve_scan"):
         with st.spinner("讀取班表中…"):
             try:

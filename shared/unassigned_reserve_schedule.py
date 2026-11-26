@@ -12,8 +12,9 @@
   .github/workflows/unassigned-reserve-schedule.yml。
 
 規則（同「未配班檢查 → ① 成立保留單」，見 shared/unassigned_staff.py）：
-- 範圍：暫訂 2027/01/22～2027/02/04（RESERVE_START／RESERVE_END；可用 repository variable
-  UNASSIGNED_RESERVE_START／UNASSIGNED_RESERVE_END 或手動執行參數改）；開始日早於明天時從明天起，
+- 範圍：在「未配班檢查 → ① 成立保留單」頁面設定（存主控表「參數設定」，2026-11-26 起）；
+  沒設定時用 repository variable UNASSIGNED_RESERVE_START／END，再沒有用 2027/01/22～2027/02/04。
+  頁面也可設「自動成立停止日」：當天（含）起排程不再成立。開始日早於明天時從明天起，
   過了結束日就略過。不算檸檬人、晚上時段。
 - 同一天同一時段（上午／下午／全天）合成一張：人數＝人數、時數取最短；1 人也成立 1人單。
 - 後台查不到這麼多人時人數減 1 再試。
@@ -79,12 +80,17 @@ def parse_day(value: str) -> date:
     return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
 
 
-def date_range(today: date, start: str = "", end: str = "") -> tuple[str, str] | None:
-    """保留單區間；開始日早於明天就從明天起，已經過了結束日回傳 None。"""
+def date_range(today: date, start: str = "", end: str = "", settings: dict | None = None) -> tuple[str, str] | None:
+    """保留單區間；開始日早於明天就從明天起，已經過了結束日回傳 None。
+    順序：手動參數 → 主控表參數設定（頁面設定）→ repository variable → 程式預設。"""
     import os
 
-    start = (start or os.getenv("UNASSIGNED_RESERVE_START", "") or RESERVE_START).strip()
-    end = (end or os.getenv("UNASSIGNED_RESERVE_END", "") or RESERVE_END).strip()
+    from shared.reserve_settings import END_ITEM, START_ITEM
+
+    settings = settings or {}
+    start = (start or settings.get(START_ITEM, "") or os.getenv("UNASSIGNED_RESERVE_START", "")
+             or RESERVE_START).strip()
+    end = (end or settings.get(END_ITEM, "") or os.getenv("UNASSIGNED_RESERVE_END", "") or RESERVE_END).strip()
     first = max(parse_day(start), today + timedelta(days=1))
     last = parse_day(end)
     return None if first > last else (first.isoformat(), last.isoformat())
@@ -137,15 +143,22 @@ def _run_region(env: str, region: str, email: str, password: str, date_start: st
 
 def run(env: str = "prod", today: date | None = None, regions=REGIONS, start: str = "", end: str = "",
         run_region=None, log: Callable[[str], None] = lambda t: print(t, flush=True),
-        service_factory=None, calendar_ids=None) -> dict:
+        service_factory=None, calendar_ids=None, settings: dict | None = None) -> dict:
     import orders  # noqa: F401  （與其他排程相同的載入順序）
     from accounts import ACCOUNTS
+    from shared import reserve_settings
 
     run_region = run_region or _run_region
     today = today or datetime.now(TZ).date()
-    window = date_range(today, start, end)
+    settings = reserve_settings.load(log=log) if settings is None else settings
+    stop_day = reserve_settings.stopped(today, settings)
+    if stop_day:
+        log(f"已設定 {stop_day:%Y/%m/%d} 起停止自動成立保留單，略過")
+        return {"range": None, "result": {}, "stopped": stop_day.isoformat()}
+    window = date_range(today, start, end, settings)
     if window is None:
-        log(f"已過保留單區間（{start or RESERVE_START}～{end or RESERVE_END}），略過")
+        log(f"已過保留單區間（{start or settings.get(reserve_settings.START_ITEM) or RESERVE_START}～"
+            f"{end or settings.get(reserve_settings.END_ITEM) or RESERVE_END}），略過")
         return {"range": None, "result": {}}
     date_start, date_end = window
     log(f"RANGE {date_start} ～ {date_end}（{'、'.join(regions)}）")
@@ -190,8 +203,8 @@ def main():
     parser.add_argument("--env", default="prod")
     parser.add_argument("--date", default="", help="以這天當作執行日（YYYY-MM-DD，測試用）")
     parser.add_argument("--regions", default=",".join(REGIONS), help="逗號分隔，預設台北")
-    parser.add_argument("--start", default="", help=f"保留單開始日（空白＝{RESERVE_START}）")
-    parser.add_argument("--end", default="", help=f"保留單結束日（空白＝{RESERVE_END}）")
+    parser.add_argument("--start", default="", help="保留單開始日（空白＝頁面設定／參數設定）")
+    parser.add_argument("--end", default="", help="保留單結束日（空白＝頁面設定／參數設定）")
     args = parser.parse_args()
     today = parse_day(args.date) if args.date.strip() else None
     regions = tuple(r.strip() for r in args.regions.split(",") if r.strip()) or REGIONS
