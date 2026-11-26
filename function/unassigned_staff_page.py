@@ -2,6 +2,7 @@
 """未配班檢查頁：① 成立保留單 ② 記錄未配班人員（只剩 1 人的時段）。
 
 變更紀錄
+- 2026-11-27：② 可改範圍天數（主控表參數設定）；①② 可改排程時間（主控表排程設定 D 欄）。
 - 2026-11-26：① 新增「自動排程設定」：保留單開始日／結束日／停止日改在頁面設定（存主控表「參數設定」）。
 - 2026-11-22：① 專員全是檸檬人的保留單一併取消。
 - 2026-11-22：① 確定成立前後會合併單人保留單（同時段 2 張以上 1 人單 → 取消後成立 N 人單）。
@@ -46,6 +47,50 @@ def render(backend_email: str, backend_password: str, env: str) -> None:
         _render_record(lookup, (get_region_by_address(addresses[0], ACCOUNTS) if addresses else "") or "台北")
 
 
+def _render_schedule_time(key: str, prefix: str) -> None:
+    """排程時間（主控表「排程設定」D 欄）：區間每隔 N，或固定時間。存檔後下一個時段生效。"""
+    from datetime import time as _time
+
+    from shared import unassigned_settings as uset
+
+    state_key = f"{prefix}_time_text"
+    if state_key not in st.session_state:
+        try:
+            st.session_state[state_key] = uset.load_schedule_time(key)
+        except Exception as exc:
+            st.session_state[state_key] = ""
+            st.warning(f"讀取排程設定失敗：{exc}")
+    current = st.session_state[state_key]
+    st.markdown(f"**排程時間**（目前：{current or '未設定'}）")
+    m = uset._RANGE_RE.match(current or "")
+    mode = st.radio("方式", ["區間", "固定時間"], index=0 if (m or not current) else 1, horizontal=True,
+                    key=f"{prefix}_mode")
+    every_opts = ["每小時", "每2小時", "每3小時", "每30分鐘"]
+    if mode == "區間":
+        c1, c2, c3 = st.columns(3)
+        start = _time(int(m.group(1)), int(m.group(2))) if m else _time(8, 30)
+        end = _time(int(m.group(3)), int(m.group(4))) if m else _time(17, 30)
+        cur_every = (f"每{m.group(5)}{m.group(6)}" if m and m.group(5) else (f"每{m.group(6)}" if m else "每小時"))
+        with c1:
+            t1 = st.time_input("開始", value=start, step=600, key=f"{prefix}_t1")
+        with c2:
+            t2 = st.time_input("結束", value=end, step=600, key=f"{prefix}_t2")
+        with c3:
+            every = st.selectbox("間隔", every_opts, index=every_opts.index(cur_every) if cur_every in every_opts else 0,
+                                 key=f"{prefix}_every")
+        text = uset.build_time_text("區間", f"{t1:%H:%M}", f"{t2:%H:%M}", every)
+    else:
+        raw = st.text_input("時間（多個用逗號，例 08:30,13:30）", value=current if not m else "", key=f"{prefix}_times")
+        text = ",".join(x.strip() for x in raw.replace("，", ",").split(",") if x.strip())
+    if st.button("儲存排程時間", key=f"{prefix}_time_save"):
+        try:
+            uset.save_schedule_time(key, text)
+            st.session_state[state_key] = text
+            st.success(f"已儲存：{text}（下一個時段起生效）")
+        except Exception as exc:
+            st.error(f"儲存失敗：{exc}")
+
+
 def _render_schedule_settings(rs, parse_day, default_start: str, default_end: str) -> tuple[date, date]:
     """自動排程（每小時）的保留單區間與停止日；存主控表「參數設定」。回傳 (開始日, 結束日)。"""
     if "unassigned_reserve_settings" not in st.session_state:
@@ -61,7 +106,7 @@ def _render_schedule_settings(rs, parse_day, default_start: str, default_end: st
     start, end, stop = _day(rs.START_ITEM, default_start), _day(rs.END_ITEM, default_end), _day(rs.STOP_ITEM)
     with st.expander(f"⏰ 自動排程設定（目前 {rs.fmt(start)}～{rs.fmt(end)}"
                      f"{'，' + rs.fmt(stop) + ' 起停止' if stop else ''}）", expanded=False):
-        st.caption("每小時排程（08:30～17:30）依這裡的區間自動成立保留單；"
+        st.caption("排程依這裡的區間自動成立保留單（排程時間在下方設定）；"
                    "設定「停止日」後，當天（含）起排程不再自動成立（頁面手動成立不受影響）。存在主控表「參數設定」。")
         c1, c2, c3 = st.columns(3)
         with c1:
@@ -72,7 +117,7 @@ def _render_schedule_settings(rs, parse_day, default_start: str, default_end: st
             use_stop = st.checkbox("設定停止日", value=stop is not None, key="urs_use_stop")
             new_stop = st.date_input("自動成立停止日", value=stop or date.today(), key="urs_stop",
                                      disabled=not use_stop)
-        if st.button("儲存自動排程設定", key="urs_save"):
+        if st.button("儲存區間與停止日", key="urs_save"):
             try:
                 rs.save(new_start, new_end, new_stop if use_stop else None)
                 st.session_state.unassigned_reserve_settings = {
@@ -81,6 +126,8 @@ def _render_schedule_settings(rs, parse_day, default_start: str, default_end: st
                 st.success("已儲存，下一次排程起生效")
             except Exception as exc:
                 st.error(f"儲存失敗：{exc}")
+        st.divider()
+        _render_schedule_time("unassigned_reserve_create", "urs")
     return start, end
 
 
@@ -181,12 +228,30 @@ def _render_reserve(env, lookup, get_region_by_address, backend_email: str = "",
 
 
 def _render_record(lookup, region: str) -> None:
-    from shared.unassigned_staff_schedule import DEFAULT_DAYS, date_range, write_calendar
+    from shared import unassigned_settings as uset
+    from shared.unassigned_staff_schedule import date_range, write_calendar
 
-    st.caption("未來 2 週某時段未配班只剩 1 位專員，記到行事曆（每日排程：tool-system 排程設定 "
-               "功能代號 unassigned_staff_record）。")
+    if "unassigned_record_days" not in st.session_state:
+        st.session_state.unassigned_record_days = uset.load_days(log=lambda m: st.warning(m))
+    days = int(st.session_state.unassigned_record_days)
+    st.caption(f"明天起 {days} 天內，某時段未配班只剩 1 位專員，記到排程行事曆。")
+    with st.expander(f"⏰ 自動排程設定（範圍：明天起 {days} 天）", expanded=False):
+        st.caption("存在主控表（範圍天數→參數設定、排程時間→排程設定），排程下一次執行起生效。")
+        new_days = st.number_input("範圍天數（明天起幾天）", min_value=1, max_value=60, value=days, step=1,
+                                   key="urr_days")
+        if st.button("儲存範圍天數", key="urr_days_save"):
+            try:
+                uset.save_days(int(new_days))
+                st.session_state.unassigned_record_days = int(new_days)
+                st.session_state.pop("unassigned_record_rows", None)
+                st.success(f"已儲存：明天起 {int(new_days)} 天")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"儲存失敗：{exc}")
+        st.divider()
+        _render_schedule_time("unassigned_staff_record", "urr")
     today = date.today()
-    date_start, date_end = date_range(today, DEFAULT_DAYS)
+    date_start, date_end = date_range(today, days)
     st.info(f"範圍：{date_start}～{date_end}")
     if st.button("讀取只剩 1 人的時段", width="stretch", key="unassigned_record_scan"):
         with st.spinner("讀取班表中…"):
