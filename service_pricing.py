@@ -233,25 +233,25 @@ def _hours_from_period(period):
     return Decimal(minutes) / 60 if minutes > 0 else None
 
 
-def period_price_mismatch(service_date, person, hour, amount, config=None, period=None, tolerance=2):
-    """改期跨期間後金額沒重算的檢查（例：12/31 大掃除 6000 改到 12/4 非大掃除，應為 4800）。
+def price_status(service_date, person, hour, amount, config=None, period=None, tolerance=2):
+    """回傳 (狀態, 提醒文字)。
 
-    金額符合服務日期所屬期間、平假日任一等級（VIP／一般客）的價格 → None。
-    金額不符、但剛好等於其他期間或另一種平假日的價格 → 回傳提醒文字。
-    其他不符（優惠、折抵、合併、補單）不判斷，避免誤報。
+    'ok'：金額符合服務日期所屬期間、平假日任一等級（VIP／一般客）的價格。
+    'other'：不符，但剛好等於其他期間或另一種平假日的價格（改期沒重算）→ 附提醒文字。
+    'skip'：不符也對不上任何價格（優惠、折抵、合併、補單），或資料不足、設定未啟用。
     """
     config = config if config is not None else load_config()
     if not config.get('enabled'):
-        return None
+        return 'skip', None
     try:
         day = as_date(service_date)
         amount = Decimal(str(amount).replace(',', ''))
         person = Decimal(str(person))
         hour = Decimal(str(hour)) if str(hour or '').strip() else _hours_from_period(period)
     except Exception:
-        return None
+        return 'skip', None
     if not hour or person <= 0 or hour <= 0 or amount <= 0:
-        return None
+        return 'skip', None
 
     def total(rate):
         return (Decimal(str(rate)) * person * hour).quantize(Decimal('1'), rounding=ROUND_HALF_UP)
@@ -260,7 +260,7 @@ def period_price_mismatch(service_date, person, hour, amount, config=None, perio
     day_key = 'weekend' if day.weekday() >= 5 else 'weekday'
     expected = {tier: total(config['periods'][current]['rates'][tier][day_key]) for tier in TIER_LABELS}
     if any(abs(amount - value) <= tolerance for value in expected.values()):
-        return None
+        return 'ok', None
     for key, label in PERIODS.items():
         if key != 'normal' and not config['periods'][key]['start']:
             continue
@@ -273,10 +273,19 @@ def period_price_mismatch(service_date, person, hour, amount, config=None, perio
                         should = f"{expected['regular']}"
                     else:
                         should = f"{expected['regular']}（一般客）／{expected['vip']}（VIP）"
-                    return (f"金額異常：{amount} 是{label}{day_label}{tier_label}價；"
-                            f"服務日 {day.strftime('%Y/%m/%d')} 屬{PERIODS[current]}{'假日' if day_key == 'weekend' else '平日'}，"
-                            f"應為 {should}，請重新成立訂單")
-    return None
+                    return 'other', (f"金額異常：{amount} 是{label}{day_label}{tier_label}價；"
+                                     f"服務日 {day.strftime('%Y/%m/%d')} 屬{PERIODS[current]}{'假日' if day_key == 'weekend' else '平日'}，"
+                                     f"應為 {should}，請重新成立訂單")
+    return 'skip', None
+
+
+def period_price_mismatch(service_date, person, hour, amount, config=None, period=None, tolerance=2):
+    """改期跨期間後金額沒重算的檢查（例：12/31 大掃除 6000 改到 12/4 非大掃除，應為 4800）。
+
+    只有金額剛好等於其他期間／另一種平假日的價格才回傳提醒文字，其餘回傳 None，避免誤報。
+    """
+    status, message = price_status(service_date, person, hour, amount, config, period, tolerance)
+    return message if status == 'other' else None
 
 
 def apply_booking_price(payload, tier, config=None):

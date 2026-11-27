@@ -1,8 +1,12 @@
 # ============================================================
 # 檔名：ordersapp.py
-# 版本：v8.93
+# 版本：v8.94
 # 模組：服務訂單系統主畫面／統一功能選單
-# 最後更新：2026-11-25
+# 最後更新：2026-11-28
+#
+# v8.94
+# - 新增獨立功能「金額期間檢查」（function/price_period_check_page.py），放在 D 類「代客預訂LINE比對」下方：
+#   掃訂購日期／服務日期區間的訂單，找出改期跨大掃除期間（或平日↔假日）後金額沒重算、需重新成立的訂單。
 #
 # v8.93
 # - 「整理預約下次服務」改名「評價管理預約下次服務」；搜尋結果可寫入內勤工作表單「評價預約」，
@@ -150,6 +154,7 @@ from function import cleaner_next_day_reminder as _cleaner_next_day_page
 from function import weekend_reminder_page as _weekend_reminder_page
 from function import no_line_link_search as _no_line_link_page
 from function import line_compare_page as _line_compare_page
+from function import price_period_check_page as _price_period_check_page
 from function import customer_memo_query as _customer_memo_page
 from function import bonus_note as _bonus_note_page
 from function import order_creation as _order_creation_page
@@ -269,6 +274,7 @@ FUNCTION_OPTIONS = [
     ("VIP 訂單／Google 日曆同步：同時查詢後台訂單與 Google 日曆，支援異動、取消、暫停與日曆更新。", "orders", "VIP 訂單／Google 日曆同步"),
     ("查詢無LINE連結訂單：搜尋訂購資訊裡沒有LINE連結的訂單。", "orders", "查詢無LINE連結訂單"),
     ("代客預訂LINE比對：撈出訂購日期區間內已付款／待付款的代客預訂訂單，貼到內勤工作表單「line比對」分頁，供比對 LINE 對話。", "orders", "代客預訂LINE比對"),
+    ("金額期間檢查：掃訂購日期／服務日期區間的訂單，找出改期跨大掃除期間（或平日↔假日）後金額沒重算、需重新成立的訂單。", "orders", "金額期間檢查"),
     # ---------- E. LINE 通知／提醒 ----------
     ("批次成單預約完成通知：批次建單後，依排程工作表把同一客人的多筆訂單合成一則 LINE 預約完成通知（先核對日曆與後台），並寫回工作表。", "orders", "已成單預約完成通知"),
     ("LINE 通知產生器：輸入訂單編號（含儲值金購買單）補產生通知訊息，支援多筆同時產生；可選擇標記日曆有無行程。", "orders", "LINE 通知產生器"),
@@ -473,6 +479,8 @@ elif mode == "查詢無LINE連結訂單":
     _no_line_link_page.render(backend_email, backend_password, env)
 elif mode == "代客預訂LINE比對":
     _line_compare_page.render(backend_email, backend_password, env)
+elif mode == "金額期間檢查":
+    _price_period_check_page.render(backend_email, backend_password, env)
 elif mode == "客人備註查詢":
     _customer_memo_page.render(backend_email, backend_password, env)
 elif mode == "儲值獎金備註":
