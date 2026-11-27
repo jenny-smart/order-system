@@ -1,8 +1,12 @@
 # ============================================================
 # 檔名：ordersapp.py
-# 版本：v8.95
+# 版本：v8.96
 # 模組：服務訂單系統主畫面／統一功能選單
 # 最後更新：2026-11-28
+#
+# v8.96
+# - 修正 v8.95 清模組重載時，多個分頁同時匯入 orders／shared.text_parsing 造成 _DeadlockError：
+#   載入改用程序共用的鎖，一次只讓一個分頁載入，失敗清掉重試 3 次。
 #
 # v8.95
 # - 熱重載後 service_pricing 仍是舊版（缺 price_status）時，連同 orders／shared／function 一起清掉重新匯入。
@@ -97,21 +101,43 @@ def _purge_stale_modules():
             sys.modules.pop(_name, None)
 
 
-# GitHub 更新後熱重載不一定會重新載入 service_pricing（曾出現
-# module 'service_pricing' has no attribute 'price_status'）；缺新函式就整批清掉重載。
-import service_pricing as _service_pricing
-if not all(hasattr(_service_pricing, _n) for _n in ("price_status", "period_price_mismatch")):
-    _purge_stale_modules()
+# 同一個 Streamlit 程序裡多個分頁會同時重跑本檔。清模組後若兩個分頁一起重新匯入
+# orders ⇄ shared.text_parsing（互相 import），會出現 _DeadlockError，所以整段載入用
+# 程序共用的鎖（放在 sys 上，熱重載也不會換掉），一次只讓一個分頁載入；失敗清掉重試。
+import sys as _sys
+import threading as _threading
+import time as _time
+
+_IMPORT_LOCK = _sys.__dict__.setdefault("_ordersapp_import_lock", _threading.RLock())
+_PAGE_MODULES = ('function.ui_common', 'function.consistency_check', 'function.calendar_check', 'function.cleaner_next_day_reminder', 'function.weekend_reminder_page', 'function.no_line_link_search', 'function.line_compare_page', 'function.price_period_check_page', 'function.customer_memo_query', 'function.bonus_note', 'function.order_creation', 'function.line_notice_generator', 'function.completed_booking_notice', 'function.next_appointment_list', 'function.rating_complaint_page', 'function.rating_booking_order_page', 'function.sheet_link_tool', 'function.next_service_time_updater', 'function.member_preferences', 'function.member_phone_lookup', 'function.batch_booking_optimized', 'function.cloud_batch_booking', 'function.reserve_menu', 'function.lemon_staff_replacement', 'function.unassigned_staff_page')
+
+
+def _load_modules():
+    with _IMPORT_LOCK:
+        # GitHub 更新後熱重載不一定會重新載入 service_pricing（曾出現
+        # module 'service_pricing' has no attribute 'price_status'）；缺新函式就整批清掉重載。
+        import service_pricing as _service_pricing
+        if not all(hasattr(_service_pricing, _n) for _n in ("price_status", "period_price_mismatch")):
+            _purge_stale_modules()
+        last_error = None
+        for _attempt in range(3):
+            try:
+                core = importlib.import_module("orders")
+                for _name in _PAGE_MODULES:
+                    importlib.import_module(_name)
+                return core
+            except Exception as exc:
+                last_error = exc
+                _purge_stale_modules()
+                _time.sleep(0.5)
+        raise last_error
+
 
 try:
-    import orders as orders_core
-except Exception:
-    _purge_stale_modules()
-    try:
-        import orders as orders_core
-    except Exception as e:
-        st.error(f"orders.py 載入失敗：{type(e).__name__}: {e}（請到 Streamlit Cloud 按 Reboot app）")
-        st.stop()
+    orders_core = _load_modules()
+except Exception as e:
+    st.error(f"orders.py 載入失敗：{type(e).__name__}: {e}（請到 Streamlit Cloud 按 Reboot app）")
+    st.stop()
 
 # 功能頁（function/*.py）在匯入時以 from orders import ... 取用的函式。
 _REQUIRED_ORDERS_NAMES = [
