@@ -3,6 +3,7 @@
 
 更新記錄：
 2026-11-28（新增）
+- scan 加 progress 回呼，頁面顯示逐日進度。
 - 依「訂購日期」或「服務日期」逐日查後台訂單列表，付款狀態只查「已付款」「待付款」。
 - 每筆用（總金額－車馬費）對服務日期所屬期間（非大掃除／大掃除 PART1／PART2）、平假日的
   VIP／一般客價格；金額剛好是其他期間或另一種平假日的價格 → 列為「應重新成立訂單」。
@@ -64,8 +65,11 @@ def check_item(item: dict, config=None) -> dict | None:
     return {"人時": f"{person_note}{hour}小時", "服務金額": amount, "問題": message}
 
 
-def scan(session, start: date, end: date, date_field: str = "訂購日期", log=None, config=None) -> dict:
-    """回傳 {"rows": 有問題的訂單, "scanned": 檢查筆數}。"""
+def scan(session, start: date, end: date, date_field: str = "訂購日期", log=None, config=None, progress=None) -> dict:
+    """回傳 {"rows": 有問題的訂單, "scanned": 檢查筆數}。
+
+    progress(已完成天數, 總天數, 當天, 已檢查筆數, 異常筆數)：每查完一天呼叫一次（開始前先以 0 呼叫）。
+    """
     from memo_system import memo
     import service_pricing
 
@@ -81,7 +85,10 @@ def scan(session, start: date, end: date, date_field: str = "訂購日期", log=
         raise ValueError("「服務金額設定」尚未啟用，無法判斷各期間價格")
     key_s, key_e = DATE_FIELDS[date_field]
     seen, rows = set(), []
-    for day in each_day(start, end):
+    total_days = (end - start).days + 1
+    if progress:
+        progress(0, total_days, start, 0, 0)
+    for index, day in enumerate(each_day(start, end), 1):
         day_total = day_bad = 0
         for status_code, status_name in STATUSES:
             params = memo.blank_list_params()
@@ -108,6 +115,8 @@ def scan(session, start: date, end: date, date_field: str = "訂購日期", log=
                     "訂單連結": f"{memo.BASE_URL}/purchase?orderNo={item['order_no']}",
                 })
         log(f"[{day:%m/%d}] 檢查 {day_total} 筆，金額異常 {day_bad} 筆")
+        if progress:
+            progress(index, total_days, day, len(seen), len(rows))
     return {"rows": rows, "scanned": len(seen)}
 
 

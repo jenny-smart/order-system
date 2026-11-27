@@ -6,6 +6,7 @@
 - 選訂購日期或服務日期區間（預設 11/11～今天），逐筆比對金額與服務日期所屬期間價格。
 - 金額剛好是其他期間（非大掃除／PART1／PART2）或另一種平假日的價格 → 列出，需重新成立訂單。
 - 只查詢，不修改後台。
+- 顯示逐日進度條（第幾天／總天數、已檢查與異常筆數）。
 """
 from datetime import date, datetime
 
@@ -41,9 +42,15 @@ def render(backend_email, backend_password, env):
                 raise ValueError("請先在上方輸入後台帳號密碼")
             memo.set_env(env)
             memo.set_runtime_credentials(backend_email.strip(), backend_password.strip())
-            with st.spinner("查詢後台訂單中…（逐日查詢，區間長會比較久）"):
-                session = memo.login()
-                result = ppc.scan(session, start, end, by, log=logs.append)
+            bar = st.progress(0.0, text="登入後台中…")
+            session = memo.login()
+
+            def show(done, total, day, scanned, bad):
+                text = (f"{by} {day:%m/%d}（第 {min(done + 1, total)}／{total} 天）查詢中…" if done < total
+                        else f"完成 {total}／{total} 天")
+                bar.progress(done / total if total else 1.0, text=f"{text}｜已檢查 {scanned} 筆｜金額異常 {bad} 筆")
+
+            result = ppc.scan(session, start, end, by, log=logs.append, progress=show)
             st.session_state.ppc_result = {"result": result, "by": by, "start": start, "end": end, "logs": logs}
         except Exception as exc:
             st.error(f"檢查失敗：{exc}")
