@@ -522,7 +522,7 @@ BOOKING_ENDPOINT_MAP = {name: booking_flow.route_for(name).path for name in ("�
 
 
 
-from service_pricing import account_balance, customer_tier, unit_price as service_unit_price, apply_booking_price, load_config, makeup_paid_tier
+from service_pricing import account_balance, customer_tier, unit_price as service_unit_price, apply_booking_price, load_config, makeup_paid_tier, period_price_mismatch
 
 TAX_RATE = 1.05
 
@@ -3731,7 +3731,7 @@ def build_combined_line_message_from_order_nos(env_name, backend_email, backend_
             raise Exception(f"訂單 {ono} 是儲值金購買訂單，沒有服務日期/地址，不適合合併，請改用單筆訂單編號查詢。")
         service_date, service_time = _parse_service_date_time_loose(joined)
         actual_time = _extract_actual_service_time(joined)
-        person_extracted, _ = _extract_person_hour_line(joined)
+        person_extracted, hour_extracted = _extract_person_hour_line(joined)
         if not person_extracted:
             person_extracted = _count_staff_from_lines(lines)
         address = _extract_address_line(lines)
@@ -3747,6 +3747,12 @@ def build_combined_line_message_from_order_nos(env_name, backend_email, backend_
             raise Exception(f"訂單 {ono} 無法判斷付款方式，請至後台確認")
         email_match = re.search(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}", joined)
         orders_info.append({"order_no": ono, "service_date": service_date, "period_s": service_time, "actual_period": actual_time, "person": person_extracted, "address": address, "fare": fare, "payway": payway, "service_amount": service_amount, "region": region, "service_label": _extract_service_type_label(lines), "phone": _extract_phone_from_block_lines(lines), "email": email_match.group(0) if email_match else "", "line_url": block.get("line_url", "")})
+        # 改期跨大掃除期間（或平日↔假日）時，金額常常忘了跟著改；在通知時提醒。
+        try:
+            _warning = period_price_mismatch(service_date, person_extracted, hour_extracted, service_amount, period=actual_time or service_time)
+        except Exception:
+            _warning = None
+        orders_info[-1]["price_warning"] = f"{ono} {_warning}" if _warning else ""
     payways = {o["payway"] for o in orders_info if o["payway"]}
     if len(payways) > 1:
         raise Exception(f"合併的訂單付款方式不同（{', '.join(payways)}），請分開輸入分別產生通知。")
@@ -3812,6 +3818,7 @@ def build_combined_line_message_from_order_nos(env_name, backend_email, backend_
         "email": next((o["email"] for o in orders_info if o.get("email")), ""),
         "line_url": line_url,
         "orders_info": orders_info,
+        "price_warnings": [o["price_warning"] for o in orders_info if o.get("price_warning")],
         "env_name": env_name, "session": session,
         "source_url": f"{base_url}/purchase?orderNo={first['order_no']}",
     }

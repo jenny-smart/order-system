@@ -119,6 +119,8 @@ def render(backend_email, backend_password, env):
             st.caption(f"訂單：{order_no_display}　💰 儲值金購買單　付款方式：{line_result.get('payway')}　區域：{line_result.get('region')}　金額：{amount_text}")
         else:
             st.caption(f"訂單：{order_no_display}{combined_note}　付款方式：{line_result.get('payway')}　區域：{line_result.get('region')}　金額：{line_result.get('service_amount') or '—'}　車馬費：{line_result.get('fare') or '0'}")
+        for warning in line_result.get("price_warnings") or []:
+            st.error(f"⚠️ {warning}")
         _calendar_badge(item.get("calendar_status") or CALENDAR_NOT_CHECKED)
         if item.get("vip_calendar"):
             st.caption("⭐ VIP")

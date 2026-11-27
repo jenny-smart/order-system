@@ -365,6 +365,10 @@ def build_source_writeback(source_groups, results, skipped):
             change = f"日期／時段異動：原 {before}；確認 {after}"
         else:
             change = "一致"
+        price_warnings = backend.get("price_warnings") or []
+        if price_warnings and not (result_item or {}).get("error"):
+            warning_text = "；".join(price_warnings)
+            change = warning_text if change == "一致" else f"{change}；{warning_text}"
         extras = [item for item in backend.get("extra_orders") or [] if item.get("order_no")]
         if extras and not (result_item or {}).get("error"):
             listed = "、".join(f"{item['order_no']} " + " ".join(_slot(item.get("service_date"), item.get("period_s"))) for item in extras)
