@@ -20,6 +20,7 @@ from function.ui_common import (
     person_hour_display, last_summary_card_html,
 )
 from shared.execution_log_service import log_execution
+from function import main_sub_order_ui as _msui
 
 import quick_order as qo
 from service_pricing import makeup_paid_tier, unit_price
@@ -560,6 +561,14 @@ def render_old_customer(backend_email, backend_password, env):
                             )
                 else:
                     st.caption("發票資訊：儲值金訂單不開立發票")
+                try:
+                    _old_tier = "vip" if float(qo.account_balance(member_payload)) > 0 else "regular"
+                except Exception:
+                    _old_tier = "regular"
+                _msui.render_person_hour_coupon(
+                    backend_email, backend_password, env, "old", "old_discount_code",
+                    default_region=q_region, default_tier=_old_tier, member_name=member.get("name") or "",
+                )
                 q_discount_code = st.text_input("優惠代碼（選填，有才填）", key="old_discount_code")
 
                 upcoming_orders = get_unserved_paid_orders(lookup["session"], lookup["phone"], member_payload, addr_options, today_value=date.today())
@@ -775,6 +784,12 @@ def render_old_customer(backend_email, backend_password, env):
             copy_button("複製 LINE 訊息", line_message, "copy-line-message")
         with col_memo:
             st.text_area("N-J Memo", NJ_MEMO, height=200, label_visibility="collapsed", key="nj_memo_order_result")
+        _msui.render_main_sub_section(
+            backend_email, backend_password, env, "old", main_order_no=order_result.get("order_no", ""),
+            main_date=order_result.get("date"), main_person=order_result.get("person") or 4,
+            main_hour=PERIOD_HOUR_MAP.get(str(order_result.get("period_s") or ""), 8),
+            main_period_s=str(order_result.get("period_s") or ""),
+        )
 
 
 
@@ -948,6 +963,7 @@ def render_new_customer(backend_email, backend_password, env):
         nc_notice = st.text_area("客服備註", height=80, key="nc_notice_d")
 
     nc_d_allow_auto_lemon = auto_lemon_checkbox("nc_d_allow_auto_lemon")
+    _msui.render_person_hour_coupon(backend_email, backend_password, env, "nc", "nc_discount_code_d")
     nc_discount_code = st.text_input("優惠代碼（選填，有才填；未填時使用貼上資料中的優惠代碼）", key="nc_discount_code_d")
 
     # 會員查詢後若表單已改動，不能再用舊的日期／時段快照送單。
@@ -1293,6 +1309,11 @@ def render_new_customer(backend_email, backend_password, env):
             with col_nc_memo:
                 st.text_area("N-J Memo", NJ_MEMO, height=200, label_visibility="collapsed", key="nj_memo_nc_result")
                 copy_button("複製 N-J Memo", NJ_MEMO, "copy-nj-memo-nc-result")
+        _msui.render_main_sub_section(
+            backend_email, backend_password, env, "nc", main_order_no=_r.get("order_no", ""),
+            main_date=_r.get("date_s"), main_person=_r.get("person") or 4, main_hour=_r.get("hour") or 8,
+            main_period_s=str(_r.get("period_s") or ""),
+        )
 
 
 def render_order_conversion(backend_email, backend_password, env):
