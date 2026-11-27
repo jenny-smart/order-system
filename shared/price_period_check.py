@@ -10,6 +10,9 @@
 - 有退款的訂單（待退狀態：已部分退款／待退款）以後台訂單編輯頁的「退款金額」扣除後再比對
   （例：9000 已部分退款 1800 → 7200）；已全額退款視為 0。
 - 有加收（加收狀態不是「無」）同理，讀「加收金額」加回後再比對。
+- 計價依據改成兩欄「服務日計價」「目前金額計價」，各為「客戶等級＋期間＋平假日」
+  （例：一般客非大掃除假日、一般客大掃除1平日）；期間顯示 非大掃除／大掃除1／大掃除2。
+- 只檢查服務類型「居家清潔」的訂單（水洗等其他服務不依人時計價）。
 - 結果改成分欄：異常類型／目前金額／應收金額／差額／客戶等級（推定）／目前金額是／服務日屬於／備註／處理。
 - 依「訂購日期」或「服務日期」逐日查後台訂單列表，付款狀態只查「已付款」「待付款」。
 - 每筆用（總金額－車馬費）對服務日期所屬期間（非大掃除／大掃除 PART1／PART2）、平假日的
@@ -36,6 +39,29 @@ DATE_FIELDS = {"訂購日期": ("date_s", "date_e"), "服務日期": ("clean_dat
 GUESS_PERSONS = range(1, 7)
 
 
+def order_created_at(item: dict):
+    """列表卡片「訂購資訊」的訂購時間（第一個 YYYY-MM-DD HH:MM:SS）；沒有回傳 None。"""
+    import re
+
+    m = re.search(r"(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}(?::\d{2})?)", str(item.get("row_text", "") or ""))
+    if not m:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            return datetime.strptime(f"{m.group(1)} {m.group(2)}", fmt)
+        except ValueError:
+            continue
+    return None
+
+
+CHECKED_SERVICE = "居家清潔"
+
+
+def is_home_cleaning(item: dict) -> bool:
+    """卡片上的服務類型是「居家清潔」才檢查（服務金額設定只適用居家清潔；水洗等另計）。"""
+    return any(line.strip() == CHECKED_SERVICE for line in str(item.get("row_text", "") or "").splitlines())
+
+
 def _card_persons(text: str) -> str:
     import re
 
@@ -48,6 +74,8 @@ def check_item(item: dict, config=None) -> dict | None:
     import service_pricing
 
     text = str(item.get("row_text", "") or "")
+    if not is_home_cleaning(item):  # 水洗等其他服務不是依人時計價，不檢查
+        return None
     service_date, hour = str(item.get("service_date") or ""), item.get("hour")
     amount = _net_amount(item)
     if not amount or amount <= 0 or not service_date or not hour:
@@ -71,16 +99,16 @@ def check_item(item: dict, config=None) -> dict | None:
     diff = detail["diff"]
     notes = ([f"已扣退款 {item['_refund']}"] if item.get("_refund") else []) + \
             ([f"已加加收 {item['_charge']}"] if item.get("_charge") else [])
+    tier = service_pricing.TIER_LABELS[detail["tier"]]
     return {
         "服務日期": detail["service_day"],
+        "服務日計價": f"{tier}{detail['service_period']}{detail['service_daytype']}",
         "人時": f"{person_note}{hour}小時",
         "異常類型": "平日／假日價格錯" if detail["kind"] == "day" else "期間價格錯（改期跨大掃除期間）",
         "目前金額": detail["amount"],
+        "目前金額計價": f"{tier}{detail['charged_period']}{detail['charged_daytype']}",
         "應收金額": detail["expected"],
         "差額": f"{'少收' if diff > 0 else '多收'} {abs(diff)}",
-        "客戶等級（推定）": service_pricing.TIER_LABELS[detail["tier"]],
-        "目前金額是": detail["charged_as"],
-        "服務日屬於": detail["service_as"],
         "備註": "；".join(notes),
         "處理": "重新成立訂單",
         "_person": known, "_hour": hour,
@@ -192,10 +220,12 @@ def group_check(item: dict, problem: dict, others: list[dict], config=None):
     return False, total
 
 
-def scan(session, start: date, end: date, date_field: str = "訂購日期", log=None, config=None, progress=None) -> dict:
+def scan(session, start: date, end: date, date_field: str = "訂購日期", log=None, config=None, progress=None,
+         created_window=None) -> dict:
     """回傳 {"rows": 有問題的訂單, "scanned": 檢查筆數}。
 
     progress(已完成天數, 總天數, 當天, 已檢查筆數, 異常筆數)：每查完一天呼叫一次（開始前先以 0 呼叫）。
+    created_window＝(起, 迄)（naive 台北時間）：只檢查訂購時間在 [起, 迄) 內的訂單（排程用）。
     """
     from memo_system import memo
     import service_pricing
@@ -224,6 +254,10 @@ def scan(session, start: date, end: date, date_field: str = "訂購日期", log=
             for item in _fetch_list(session, params):
                 if item["order_no"] in seen:
                     continue
+                if created_window:
+                    created = order_created_at(item)
+                    if created and not (created_window[0] <= created < created_window[1]):
+                        continue
                 seen.add(item["order_no"])
                 day_total += 1
                 problem = check_item(item, config)
@@ -251,6 +285,7 @@ def scan(session, start: date, end: date, date_field: str = "訂購日期", log=
                     "訂購人": customer_name(item.get("row_text", ""), item.get("name", "")) or item.get("name", ""),
                     "服務日期": problem.pop("服務日期"),
                     "服務時段": item.get("period", ""),
+                    "服務日計價": problem.pop("服務日計價"),
                     "付款狀態": status_name,
                     **problem,
                     "LINE連結": item.get("line_url", ""),

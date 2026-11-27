@@ -3749,7 +3749,9 @@ def build_combined_line_message_from_order_nos(env_name, backend_email, backend_
         orders_info.append({"order_no": ono, "service_date": service_date, "period_s": service_time, "actual_period": actual_time, "person": person_extracted, "address": address, "fare": fare, "payway": payway, "service_amount": service_amount, "region": region, "service_label": _extract_service_type_label(lines), "phone": _extract_phone_from_block_lines(lines), "email": email_match.group(0) if email_match else "", "line_url": block.get("line_url", "")})
         # 改期跨大掃除期間（或平日↔假日）時，金額常常忘了跟著改；在通知時提醒。
         try:
-            _warning = period_price_mismatch(service_date, person_extracted, hour_extracted, service_amount, period=actual_time or service_time)
+            # 服務金額設定只適用居家清潔；水洗等其他服務不檢查
+            _warning = (period_price_mismatch(service_date, person_extracted, hour_extracted, service_amount, period=actual_time or service_time)
+                        if _extract_service_type_label(lines) == "居家清潔" else None)
         except Exception:
             _warning = None
         orders_info[-1]["price_warning"] = f"{ono} {_warning}" if _warning else ""

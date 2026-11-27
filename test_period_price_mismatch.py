@@ -17,7 +17,7 @@ def _config():
 def test_moved_out_of_deep_clean_keeps_old_amount():
     # LC00221437：12/31 大掃除 6000（2人4小時）改到 12/4，金額沒改
     message = period_price_mismatch('2026-12-04', 2, 4, 6000, _config())
-    assert message and '大掃除 PART1' in message and '4800' in message and '重新成立訂單' in message
+    assert message and '大掃除1' in message and '4800' in message and '重新成立訂單' in message
 
 
 def test_correct_amount_has_no_warning():

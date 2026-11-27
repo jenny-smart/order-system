@@ -21,6 +21,7 @@ def render(backend_email, backend_password, env):
 
     step("1", "金額期間檢查：改期後金額未重算")
     info_panel("使用說明", [
+        "只查服務類型「居家清潔」的訂單（水洗等其他服務不依人時計價，不檢查）。",
         "查日期區間內「已付款」「待付款」的訂單，用（總金額－車馬費）比對服務日期所屬期間的價格。",
         "金額剛好是其他期間（非大掃除／大掃除 PART1／PART2）或另一種平假日的價格，就列出，需重新成立訂單。",
         "改期的訂單訂購日期不變，掃「訂購日期」可找出近期成立後被改期的訂單；也可改掃「服務日期」。",
@@ -65,7 +66,7 @@ def render(backend_email, backend_password, env):
                f"檢查 {result['scanned']} 筆｜金額異常 {len(result['rows'])} 筆")
     with st.expander("查詢 LOG"):
         st.text("\n".join(state["logs"]) or "（無）")
-    st.caption("應收金額：依目前金額推定的客戶等級（VIP／一般客）、服務日所屬期間與平假日計算；差額＝應收－目前。")
+    st.caption("計價欄＝客戶等級＋期間＋平假日（例：一般客非大掃除平日；等級依目前金額推定）。應收金額依「服務日計價」計算；差額＝應收－目前。")
     if not result["rows"]:
         st.success("沒有找到改期後金額未重算的訂單。")
         return

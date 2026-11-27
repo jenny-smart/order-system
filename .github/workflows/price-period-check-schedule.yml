@@ -1,0 +1,55 @@
+# 金額期間檢查：每日 17:00 檢查前一天 17:00～今天 17:00 成立的訂單，金額是否符合服務日期所屬期間，記入排程行事曆
+#
+# 由 tool-system 的 Cloud Schedule Router 依主控表「排程設定」（功能代號 price_period_check）
+# 派送過來（不用 GitHub cron）。也可以在這裡手動執行。
+# 規則見 shared/price_period_check_schedule.py。
+#
+# 需要的 Secrets：GOOGLE_SERVICE_ACCOUNT_JSON（執行 Log、服務金額設定）、GOOGLE_CALENDAR_REFRESH_TOKEN＋
+# GOOGLE_CALENDAR_CLIENT_ID／SECRET（或 GOOGLE_OAUTH_CLIENT_ID／SECRET）、SCHEDULE_NOTICE_CALENDAR_ID、
+# TAIPEI_EMAIL／PASSWORD、TAICHUNG_EMAIL／PASSWORD
+name: Price Period Check Schedule
+run-name: ${{ inputs.scheduled_slot && format('cloud-{0}', inputs.scheduled_slot) || format('Price Period Check {0}', inputs.date) }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      date: {description: "以這天當作執行日（YYYY-MM-DD，空白＝今天）", required: false, default: "", type: string}
+      regions: {description: "地區（逗號分隔，空白＝台北,台中）", required: false, default: "", type: string}
+      env: {description: prod / dev, required: false, default: "prod", type: string}
+      dry_run: {description: 只檢查不寫行事曆, required: false, default: false, type: boolean}
+      scheduled_slot: {description: 排程設定派送時段（手動執行請留空）, required: false, default: "", type: string}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: price-period-check-schedule
+  cancel-in-progress: false
+
+jobs:
+  price-period-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12", cache: pip}
+      - run: pip install -r requirements.txt
+      - name: Check order prices against service-date period
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_CALENDAR_REFRESH_TOKEN: ${{ secrets.GOOGLE_CALENDAR_REFRESH_TOKEN }}
+          GOOGLE_CALENDAR_CLIENT_ID: ${{ secrets.GOOGLE_CALENDAR_CLIENT_ID }}
+          GOOGLE_CALENDAR_CLIENT_SECRET: ${{ secrets.GOOGLE_CALENDAR_CLIENT_SECRET }}
+          GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
+          GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
+          SCHEDULE_NOTICE_CALENDAR_ID: ${{ secrets.SCHEDULE_NOTICE_CALENDAR_ID }}
+          TAIPEI_EMAIL: ${{ secrets.TAIPEI_EMAIL }}
+          TAIPEI_PASSWORD: ${{ secrets.TAIPEI_PASSWORD }}
+          TAICHUNG_EMAIL: ${{ secrets.TAICHUNG_EMAIL }}
+          TAICHUNG_PASSWORD: ${{ secrets.TAICHUNG_PASSWORD }}
+          RUN_DATE: ${{ inputs.date }}
+          RUN_ENV: ${{ inputs.env || 'prod' }}
+          REGIONS: ${{ inputs.regions }}
+          DRY_RUN: ${{ inputs.dry_run && '--dry-run' || '' }}
+        run: python -u -m shared.price_period_check_schedule --env "$RUN_ENV" --date "$RUN_DATE" ${REGIONS:+--regions "$REGIONS"} $DRY_RUN
