@@ -4431,6 +4431,54 @@ def parse_new_customer_text(text):
     return result
 
 
+def _is_valid_tax_id(tax_id):
+    """台灣統一編號檢查碼（含 2023 起的 5 的倍數新規則）。"""
+    tax_id = str(tax_id or "").strip()
+    if not (len(tax_id) == 8 and tax_id.isdigit()):
+        return False
+    weights = [1, 2, 1, 2, 1, 2, 4, 1]
+    products = [int(d) * w for d, w in zip(tax_id, weights)]
+    total = sum(p // 10 + p % 10 for p in products)
+    if total % 5 == 0:
+        return True
+    # 第 7 碼為 7 時，該位乘積兩位數相加後可取 0 或 1
+    return tax_id[6] == "7" and (total + 1) % 5 == 0
+
+
+def _lookup_registered_company_title(tax_id):
+    """
+    查經濟部公司登記、商業登記。回傳 (抬頭, 錯誤訊息)。
+    查無時 API 回 HTTP 200 + 空白內容，視為查無而非錯誤。
+    """
+    endpoints = [
+        ("公司登記", "5F64D864-61CB-4D0D-8AD9-492047CC1EA6", "Company_Name"),
+        ("商業登記", "236EE382-4942-41A9-BD03-CA0709025E7C", "Business_Name"),
+    ]
+    errors = []
+    for label, api_id, name_key in endpoints:
+        try:
+            resp = requests.get(
+                f"https://data.gcis.nat.gov.tw/od/data/api/{api_id}",
+                params={"$format": "json", "$filter": f"Business_Accounting_NO eq {tax_id}", "$top": 1},
+                timeout=8,
+                verify=False,
+            )
+            body = (resp.text or "").strip()
+            if resp.status_code != 200:
+                errors.append(f"{label} HTTP {resp.status_code}")
+                continue
+            if not body:
+                continue  # 查無
+            data = resp.json()
+            if isinstance(data, list) and data:
+                title = str(data[0].get(name_key) or data[0].get("Company_Name") or "").strip()
+                if title:
+                    return title, ""
+        except Exception as e:
+            errors.append(f"{label} {e}")
+    return "", "；".join(errors)
+
+
 def quick_create_new_customer_order(env_name, backend_email, backend_password, customer, allow_auto_lemon_shift=False):
     """
     新客建單：完整模擬後台 /booking/single 表單送出流程。
@@ -4472,25 +4520,22 @@ def quick_create_new_customer_order(env_name, backend_email, backend_password, c
     company_no = str(customer.get("company_no", "")).strip()
     company_title = str(customer.get("company_title", "")).strip()
 
-    # 有統編 → 一律查詢公司抬頭（確保正確），查不到就擋住建單
+    # 有統編 → 先驗檢查碼，再查經濟部公司／商業登記取正式抬頭。
+    # 學校、機關、協會、基金會等不在經濟部登記（API 回空白，不是錯誤），
+    # 這時改用貼上資料中的抬頭；兩者都沒有才擋住建單。
     if company_no:
-        try:
-            import requests as _req2
-            _r2 = _req2.get(
-                "https://data.gcis.nat.gov.tw/od/data/api/5F64D864-61CB-4D0D-8AD9-492047CC1EA6",
-                params={"$format": "json", "$filter": f"Business_Accounting_NO eq {company_no}"},
-                timeout=5,
-                verify=False,
+        if not _is_valid_tax_id(company_no):
+            raise Exception(f"統編 {company_no} 檢查碼不正確，請確認統編，建單已停止")
+        _registry_title, _lookup_error = _lookup_registered_company_title(company_no)
+        if _registry_title:
+            company_title = _registry_title
+        elif not company_title:
+            if _lookup_error:
+                raise Exception(f"統編 {company_no} 查詢經濟部登記失敗（{_lookup_error}），且未填發票抬頭，建單已停止")
+            raise Exception(
+                f"統編 {company_no} 不在經濟部公司／商業登記（學校、機關、協會等屬此類），"
+                "請在貼上資料中填入發票抬頭，建單已停止"
             )
-            _d2 = _r2.json()
-            if _d2 and isinstance(_d2, list) and _d2[0].get("Company_Name"):
-                company_title = _d2[0]["Company_Name"]
-            else:
-                raise Exception(f"統編 {company_no} 查無公司抬頭，請確認統編是否正確，建單已停止")
-        except Exception as _e2:
-            if "查無公司抬頭" in str(_e2):
-                raise
-            raise Exception(f"統編查詢失敗（{_e2}），請確認網路或統編是否正確，建單已停止")
 
     # 其他選填欄位
     memo = str(customer.get("memo", "")).strip()        # 客人備註
