@@ -20,6 +20,8 @@ from function.ui_common import (
     person_hour_display, last_summary_card_html,
 )
 from shared.execution_log_service import log_execution
+from function import cleaning_pattern_ui as _cpui
+from shared import cleaning_pattern as _cp
 
 import quick_order as qo
 from service_pricing import makeup_paid_tier, unit_price
@@ -560,6 +562,12 @@ def render_old_customer(backend_email, backend_password, env):
                             )
                 else:
                     st.caption("發票資訊：儲值金訂單不開立發票")
+                _old_pat = _cpui.render_pattern_inputs(
+                    "old", CLEAN_TYPE_ID_MAP[q_clean_type_confirm],
+                    title="🏠 本次清潔細項（選填；沒填就沿用上一筆同地址訂單）", ping_keep_label="沿用上一筆",
+                )
+                if _old_pat["used"]:
+                    st.caption("本次會用上方細項送出（未填的欄位視為 0），不沿用上一筆的細項。")
                 q_discount_code = st.text_input("優惠代碼（選填，有才填）", key="old_discount_code")
 
                 upcoming_orders = get_unserved_paid_orders(lookup["session"], lookup["phone"], member_payload, addr_options, today_value=date.today())
@@ -642,7 +650,7 @@ def render_old_customer(backend_email, backend_password, env):
                         for _i, entry in enumerate(old_entries, start=1):
                             try:
                                 with st.spinner(f"建單中（第 {_i}/{len(old_entries)} 筆），請稍候…"):
-                                    result = quick_create_order(env_name=env, payway=q_payway, region=q_region, lookup_result=lookup, address=q_address, clean_type_id=CLEAN_TYPE_ID_MAP[q_clean_type_confirm], date_s=entry["date"].strftime("%Y-%m-%d"), period_s=entry["period"], hour=entry["hour"], person=entry["person"], discount_code=q_discount_code.strip(), allow_auto_lemon_shift=old_allow_auto_lemon, **_old_invoice_kwargs)
+                                    result = quick_create_order(env_name=env, payway=q_payway, region=q_region, lookup_result=lookup, address=q_address, clean_type_id=CLEAN_TYPE_ID_MAP[q_clean_type_confirm], date_s=entry["date"].strftime("%Y-%m-%d"), period_s=entry["period"], hour=entry["hour"], person=entry["person"], discount_code=q_discount_code.strip(), allow_auto_lemon_shift=old_allow_auto_lemon, extra_fields=(_old_pat["fields"] if _old_pat["used"] else None), **_old_invoice_kwargs)
                                     # 不立即發確認信，等 user 確認後再發
                                     result["mail_sent"] = False
                                     result["mail_msg"] = "尚未發送"
@@ -873,44 +881,18 @@ def render_new_customer(backend_email, backend_password, env):
     with sc3:
         pass
 
-    # 清潔項目細節
-    with st.expander("🏠 清潔項目細節（選填，用於計算時數）", expanded=False):
-        _ci1, _ci2, _ci3, _ci4, _ci5, _ci6 = st.columns(6)
-        with _ci1:
-            nc_room = st.number_input("房間", min_value=0, value=0, key="nc_room_d")
-        with _ci2:
-            nc_bathroom = st.number_input("衛浴", min_value=0, value=0, key="nc_bathroom_d")
-        with _ci3:
-            nc_balcony = st.number_input("陽台", min_value=0, value=0, key="nc_balcony_d")
-        with _ci4:
-            nc_livingroom = st.number_input("客廳", min_value=0, value=0, key="nc_livingroom_d")
-        with _ci5:
-            nc_kitchen = st.number_input("廚房", min_value=0, value=0, key="nc_kitchen_d")
-        with _ci6:
-            nc_window = st.text_input("窗戶", value="", placeholder="數量", key="nc_window_d")
-        _ci7, _ci8 = st.columns([1, 5])
-        with _ci7:
-            nc_shutter = st.text_input("百葉窗", value="", placeholder="數量", key="nc_shutter_d")
-        st.markdown("**加購項目**")
-        _bv1, _bv2, _bv3, _bv4, _bv5, _bv6, _bv7, _bv8, _bv9 = st.columns(9)
-        with _bv1:
-            nc_clothes = "1" if st.checkbox("衣物洗晾", key="nc_clothes_d") else "0"
-        with _bv2:
-            nc_dyson = "1" if st.checkbox("DYSON除蟎", key="nc_dyson_d") else "0"
-        with _bv3:
-            nc_refrigerator = "1" if st.checkbox("冰箱清理", key="nc_fridge_d") else "0"
-        with _bv4:
-            nc_disinfection = "1" if st.checkbox("簡易消毒", key="nc_disinfect_d") else "0"
-        with _bv5:
-            nc_go_abroad = "1" if st.checkbox("30日內出國", key="nc_abroad_d") else "0"
-        with _bv6:
-            nc_home_move = "1" if st.checkbox("搬家打包", key="nc_move_d") else "0"
-        with _bv7:
-            nc_storage = "1" if st.checkbox("收納整理", key="nc_storage_d") else "0"
-        with _bv8:
-            nc_cabinet = "1" if st.checkbox("櫥櫃清潔", key="nc_cabinet_d") else "0"
-        with _bv9:
-            nc_quintuple = "1" if st.checkbox("五倍券", key="nc_quintuple_d") else "0"
+    # 清潔項目細節：依服務類別顯示居家／辦公室欄位，可貼評估備註自動補填。
+    _nc_ctid = CLEAN_TYPE_ID_MAP[nc_clean_type]
+    _nc_pat = _cpui.render_pattern_inputs("nc", _nc_ctid)
+    _nc_pf = _nc_pat["fields"]
+    nc_room, nc_bathroom, nc_balcony, nc_livingroom, nc_kitchen = (
+        _nc_pf[x] for x in ("room", "bathroom", "balcony", "livingroom", "kitchen"))
+    nc_window, nc_shutter = _nc_pf["window"], _nc_pf["shutter"]
+    (nc_clothes, nc_dyson, nc_refrigerator, nc_disinfection, nc_go_abroad,
+     nc_home_move, nc_storage, nc_cabinet, nc_quintuple) = (
+        _nc_pf[x] for x in ("clothes", "dyson", "refrigerator", "disinfection", "go_abord",
+                            "home_move", "storage", "cabinet", "quintuple"))
+    _nc_extra_pattern = {x: _nc_pf[x] for x in ("office", "meetingroom", "toilet", "tearoom", "seat", "uncleaned", "pet") if x in _nc_pf}
 
     step("3", "日期與人時")
     nc_n_orders = st.number_input("建立筆數", min_value=1, max_value=10, value=1, key="nc_n_orders_d")
@@ -957,8 +939,7 @@ def render_new_customer(backend_email, backend_password, env):
         "manual_payway": st.session_state.get("nc_payway_manual_select", ""),
         "allow_lemon": nc_d_allow_auto_lemon, "discount_code": nc_discount_code,
         "actual_time": nc_actual_time, "memo": nc_memo, "notice": nc_notice,
-        "details": [nc_service_type, nc_room, nc_bathroom, nc_balcony,
-                    nc_livingroom, nc_kitchen, nc_window, nc_shutter, nc_clothes],
+        "details": [nc_service_type, dict(_nc_pf)],
     }
     _pending_before_submit = st.session_state.get("nc_pending_old")
     if _pending_before_submit and _pending_before_submit.get("form_snapshot") != _nc_form_snapshot:
@@ -987,7 +968,13 @@ def render_new_customer(backend_email, backend_password, env):
             _nc_phone = _parsed.get("phone", "")
             _nc_email = _parsed.get("email", "")
             _nc_address = _parsed.get("address", "")
-            _nc_ping = _parsed.get("ping", "4")
+            # 坪數：細項有選就用；否則用客人資料的坪數依服務類別（辦公室代號不同）重算。
+            if _nc_pat["ping"]:
+                _nc_ping = _nc_pat["ping"]
+            elif _parsed.get("ping_number"):
+                _nc_ping = _cp.ping_code(_parsed["ping_number"], _nc_ctid)
+            else:
+                _nc_ping = _parsed.get("ping", "4")
             # v8.12：付款方式偵測不到時，改用上方手動選擇的值；兩者皆無則擋下建單，
             # 不可默默預設成信用卡。
             _nc_payway = _parsed.get("payway", "") or st.session_state.get("nc_payway_manual_select", "")
@@ -1078,6 +1065,7 @@ def render_new_customer(backend_email, backend_password, env):
                                             "disinfection": nc_disinfection, "go_abord": nc_go_abroad,
                                             "home_move": nc_home_move, "storage": nc_storage,
                                             "cabinet": nc_cabinet, "quintuple": nc_quintuple,
+                                            **_nc_extra_pattern,
                                             "date_s": _entry["date"].strftime("%Y-%m-%d"),
                                             "period_s": _entry["period"],
                                             "hour": str(_entry["hour"]),

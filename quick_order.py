@@ -493,6 +493,7 @@ from bs4 import BeautifulSoup
 
 import orders
 from shared import booking_flow
+from shared import cleaning_pattern
 from orders import (
     login, get_csrf_token, get_member, pick_best_address_info,
     geocode_address, check_contain, calculate_hour, extract_calc_fields,
@@ -1066,6 +1067,12 @@ def quick_check_available_slots(env_name, payway, lookup_result, address, clean_
         "disinfection": str(pick("disinfection", "0")), "go_abord": str(pick("go_abord", "0")),
         "home_move": str(pick("home_move", "0")), "storage": str(pick("storage", "0")),
         "cabinet": str(pick("cabinet", "0")), "quintuple": str(pick("quintuple", "0")),
+        # 辦公室清潔細項（辦公室／會議室／廁所／茶水間／座位），沿用上一筆同地址訂單。
+        "office": str(pick("office", "0")), "meetingroom": str(pick("meetingroom", "0")),
+        "toilet": str(pick("toilet", "0")), "tearoom": str(pick("tearoom", "0")),
+        "seat": str(pick("seat", "0")),
+        **({"uncleaned": "1"} if str(pick("uncleaned", "0")) == "1" else {}),
+        **({"pet": "1"} if str(pick("pet", "0")) == "1" else {}),
         "hour": str(int(float(hour))), "price": "", "price_vvip": "",
         "person": str(person), "date_s": date_s, "period_s": "", "period": "",
         "cycle": "1", "fare": "", "memo": "",
@@ -4331,17 +4338,16 @@ def parse_new_customer_text(text):
             if _ping_m:
                 _ping_raw = _ping_m.group(1)
                 break
+    # 後台代號：1=10以下 2=11~20 3=20以下(僅辦公室) 4=21~40 5=41~60 6=61~80 7=81以上。
+    # 這裡先依居家換算；建單時會再依服務類別（辦公室）用 ping_number 重算。
     ping = "4"
+    result["ping_number"] = None
     if _ping_raw:
         nums = _re.findall(r"\d+", _ping_raw)
         if nums:
-            n = int(nums[0])
-            if n <= 10: ping = "1"
-            elif n <= 20: ping = "2"
-            elif n <= 30: ping = "3"
-            elif n <= 40: ping = "4"
-            elif n <= 50: ping = "5"
-            else: ping = "6"
+            n = max(int(x) for x in nums[:2])  # 「31-40」取上限
+            result["ping_number"] = n
+            ping = cleaning_pattern.ping_code(n, "1")
     result["ping"] = ping
 
     # ---------- 付款方式 ----------
@@ -4681,6 +4687,13 @@ def quick_create_new_customer_order(env_name, backend_email, backend_password, c
             "storage": str(customer.get("storage", "0")),
             "cabinet": str(customer.get("cabinet", "0")),
             "quintuple": str(customer.get("quintuple", "0")),
+            "office": str(customer.get("office", "0")),
+            "meetingroom": str(customer.get("meetingroom", "0")),
+            "toilet": str(customer.get("toilet", "0")),
+            "tearoom": str(customer.get("tearoom", "0")),
+            "seat": str(customer.get("seat", "0")),
+            **({"uncleaned": "1"} if str(customer.get("uncleaned", "0")) == "1" else {}),
+            **({"pet": "1"} if str(customer.get("pet", "0")) == "1" else {}),
             "memo": memo,
             "notice": notice,
             "period": actual_time,
@@ -4926,6 +4939,12 @@ def _prepare_booking_data(
         "disinfection": str(pick("disinfection", "0")), "go_abord": str(pick("go_abord", "0")),
         "home_move": str(pick("home_move", "0")), "storage": str(pick("storage", "0")),
         "cabinet": str(pick("cabinet", "0")), "quintuple": str(pick("quintuple", "0")),
+        # 辦公室清潔細項（辦公室／會議室／廁所／茶水間／座位），沿用上一筆同地址訂單。
+        "office": str(pick("office", "0")), "meetingroom": str(pick("meetingroom", "0")),
+        "toilet": str(pick("toilet", "0")), "tearoom": str(pick("tearoom", "0")),
+        "seat": str(pick("seat", "0")),
+        **({"uncleaned": "1"} if str(pick("uncleaned", "0")) == "1" else {}),
+        **({"pet": "1"} if str(pick("pet", "0")) == "1" else {}),
         "hour": str(int(float(hour))), "price": "", "price_vvip": "",
         "person": str(person), "date_s": date_s, "period_s": period_s,
         "period": "", "cycle": "1", "fare": "", "memo": "",
