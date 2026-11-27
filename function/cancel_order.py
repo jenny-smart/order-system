@@ -404,11 +404,13 @@ def fetch_order_cancel_details(session, base_url: str, purchase_id: str) -> dict
     resp = session.get(edit_url, headers=orders.HEADERS, allow_redirects=True)
     if resp.status_code != 200:
         raise RuntimeError(f"無法開啟訂單修改頁：HTTP {resp.status_code}")
-    _, purchase = _edit_payload_from_page(resp.text)
+    payload, purchase = _edit_payload_from_page(resp.text)
     return {
         "memo": str(purchase.get("memo") or ""),
         "charge_note": str(purchase.get("chargeNote") or ""),
         "refund_note": str(purchase.get("refundNote") or ""),
+        # 2026-11-27：客服備註（未配班保留單判斷「檸檬人勿動」用）
+        "notice": str(purchase.get("notice") or payload.get("notice") or ""),
     }
 
 

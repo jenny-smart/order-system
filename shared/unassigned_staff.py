@@ -2,6 +2,12 @@
 """未配班檢查：讀 /schedule 灰底「未配班」名單，成立檸檬保留單／記錄只剩 1 人的時段。
 
 更新記錄：
+2026-11-27
+- 檸檬人保留單（Jenny）：在成立保留單的日期區間內，客服備註沒有「檸檬人勿動」時
+  - 專員只有檸檬人 → 取消訂單；
+  - 檸檬人＋非檸檬人 → 先取消訂單，再就非檸檬人建立保留單（取消後非檸檬人回到灰底未配班，
+    接著依未配班成立，同時段的未配班照樣合成一張）。
+  客服備註有「檸檬人勿動」的保留單一律不動。
 2026-11-22
 - 合併單人保留單（Jenny）：同一天同一時段（上午／下午／全天）有 2 張以上「1 人」的系統保留單，
   先全部取消（客人備註改「取消系統保留單」），再依未配班重新成立一張 N 人保留單（時數取最短）。
@@ -303,13 +309,32 @@ def _fetch_reserve_rows(env_name, backend_email, backend_password, date_start, d
     return [r for r in rows or [] if r.get("cancel_eligible")]
 
 
+LEMON_KEEP_NOTE = "檸檬人勿動"
+
+
+def _lemon_keep(row: Dict) -> bool:
+    """客服備註（或訂單任一文字欄位）有「檸檬人勿動」。"""
+    return any(LEMON_KEEP_NOTE in str(v) for v in row.values() if isinstance(v, str))
+
+
 def lemon_only_reserves(rows: List[Dict]) -> List[Dict]:
-    """專員全是檸檬人的保留單。"""
+    """專員只有檸檬人、且沒有「檸檬人勿動」的保留單 → 取消。"""
     out = []
     for row in rows:
         names = _staff_names(row.get("staff"))
-        if names and all(_is_lemon(n) for n in names):
+        if names and all(_is_lemon(n) for n in names) and not _lemon_keep(row):
             out.append(row)
+    return out
+
+
+def mixed_lemon_reserves(rows: List[Dict]) -> List[Dict]:
+    """檸檬人＋非檸檬人、且沒有「檸檬人勿動」的保留單 → 取消後就非檸檬人重建。"""
+    out = []
+    for row in rows:
+        names = _staff_names(row.get("staff"))
+        if (any(_is_lemon(n) for n in names) and any(not _is_lemon(n) for n in names)
+                and not _lemon_keep(row)):
+            out.append({**row, "rebuild_staff": "、".join(n for n in names if not _is_lemon(n))})
     return out
 
 
@@ -366,7 +391,8 @@ def merge_and_create(*, env_name: str, backend_email: str, backend_password: str
                      address: str, date_start: str, date_end: str, payway: str = "儲值金",
                      get_html: Optional[Callable[[str], str]] = None, finder=None, canceller=None, creator=None,
                      log: Callable[[str], None] = lambda _t: None) -> Dict[str, List[Dict]]:
-    """取消檸檬人保留單、合併單人保留單 → 依未配班成立保留單 → 再檢查一次，有取消就再成立。"""
+    """取消檸檬人保留單（只有檸檬人／檸檬人＋專員，有「檸檬人勿動」的不動）、合併單人保留單
+    → 依未配班成立保留單（被取消的專員回到未配班，一併重建）→ 再檢查一次，有取消就再成立。"""
     get_html = get_html or _schedule_getter(lookup_result)
     creator = creator or create_reserve_orders
     cancelled: List[Dict] = []
@@ -375,17 +401,23 @@ def merge_and_create(*, env_name: str, backend_email: str, backend_password: str
         rows = _fetch_reserve_rows(env_name, backend_email, backend_password, date_start, date_end, finder)
         lemons = lemon_only_reserves(rows)
         if lemons:
-            log(f"{len(lemons)} 張保留單專員全是檸檬人，取消：" + "、".join(
+            log(f"{len(lemons)} 張保留單專員只有檸檬人（沒有「檸檬人勿動」），取消：" + "、".join(
                 f"{r.get('service_date')} {r.get('order_no')}({r.get('staff')})" for r in lemons))
             cancelled += [{**r, "merge_group": "檸檬人"} for r in
                           _cancel_rows(env_name, backend_email, backend_password, lemons, canceller)]
+        mixed = mixed_lemon_reserves(rows)
+        if mixed:
+            log(f"{len(mixed)} 張保留單有檸檬人也有專員（沒有「檸檬人勿動」），先取消再就專員重建：" + "、".join(
+                f"{r.get('service_date')} {r.get('order_no')}({r.get('staff')})" for r in mixed))
+            cancelled += [{**r, "merge_group": "檸檬人＋專員"} for r in
+                          _cancel_rows(env_name, backend_email, backend_password, mixed, canceller)]
         groups = single_reserve_groups(rows)
         if groups:
             cancelled += cancel_single_reserve_groups(env_name, backend_email, backend_password, groups, canceller, log)
-        elif step == 1:
+        if step == 1 and not (groups or lemons or mixed):
             break
         plan = build_plan(scan_range(get_html, date_start, date_end))
-        if step == 0 and not groups and not lemons and not plan:
+        if step == 0 and not groups and not lemons and not mixed and not plan:
             break
         if plan:
             log(f"{len(plan)} 個日期時段有未配班，成立保留單")
