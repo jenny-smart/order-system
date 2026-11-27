@@ -19,7 +19,7 @@ def test_window_is_previous_day_17_to_today_17():
 def test_scan_filters_by_created_time(monkeypatch):
     from memo_system import memo
     def card(no, created):
-        return {'order_no': no, 'row_text': f'{created}\n2人4小時\n總金額：$6,000', 'service_date': '2026/12/04',
+        return {'order_no': no, 'row_text': f'{created}\n居家清潔\n2人4小時\n總金額：$6,000', 'service_date': '2026/12/04',
                 'hour': 4, 'period': '09:00-13:00', 'staff_count': 0, 'name': 'x', 'line_url': '', 'phone': ''}
     cards = [card('LC_OLD', '2026-11-27 16:59:00'), card('LC_IN', '2026-11-27 17:00:00'),
              card('LC_IN2', '2026-11-28 16:59:59'), card('LC_LATE', '2026-11-28 17:00:00')]

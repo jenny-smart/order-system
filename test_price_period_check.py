@@ -5,7 +5,7 @@ from test_period_price_mismatch import _config
 
 
 def _item(text, service_date='2026/12/04', hour=4, staff=0, no='LC00221437'):
-    return {'order_no': no, 'row_text': text, 'service_date': service_date, 'hour': hour,
+    return {'order_no': no, 'row_text': '居家清潔\n' + text, 'service_date': service_date, 'hour': hour,
             'period': '09:00-13:00', 'staff_count': staff, 'name': '李婉綾', 'line_url': ''}
 
 
@@ -131,4 +131,10 @@ def test_charge_is_added_and_weekday_weekend_type(monkeypatch):
     problem = ppc.check_item(it, _config())
     assert problem['異常類型'] == '平日／假日價格錯' and problem['應收金額'] == 5600
     it['_charge'] = 800
+    assert ppc.check_item(it, _config()) is None
+
+
+def test_non_home_cleaning_is_skipped():
+    it = _item('2人4小時\n總金額：$6,000')
+    it['row_text'] = it['row_text'].replace('居家清潔', '沙發水洗')
     assert ppc.check_item(it, _config()) is None

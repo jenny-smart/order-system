@@ -10,6 +10,7 @@
 - 有退款的訂單（待退狀態：已部分退款／待退款）以後台訂單編輯頁的「退款金額」扣除後再比對
   （例：9000 已部分退款 1800 → 7200）；已全額退款視為 0。
 - 有加收（加收狀態不是「無」）同理，讀「加收金額」加回後再比對。
+- 只檢查服務類型「居家清潔」的訂單（水洗等其他服務不依人時計價）。
 - 結果改成分欄：異常類型／目前金額／應收金額／差額／客戶等級（推定）／目前金額是／服務日屬於／備註／處理。
 - 依「訂購日期」或「服務日期」逐日查後台訂單列表，付款狀態只查「已付款」「待付款」。
 - 每筆用（總金額－車馬費）對服務日期所屬期間（非大掃除／大掃除 PART1／PART2）、平假日的
@@ -51,6 +52,14 @@ def order_created_at(item: dict):
     return None
 
 
+CHECKED_SERVICE = "居家清潔"
+
+
+def is_home_cleaning(item: dict) -> bool:
+    """卡片上的服務類型是「居家清潔」才檢查（服務金額設定只適用居家清潔；水洗等另計）。"""
+    return any(line.strip() == CHECKED_SERVICE for line in str(item.get("row_text", "") or "").splitlines())
+
+
 def _card_persons(text: str) -> str:
     import re
 
@@ -63,6 +72,8 @@ def check_item(item: dict, config=None) -> dict | None:
     import service_pricing
 
     text = str(item.get("row_text", "") or "")
+    if not is_home_cleaning(item):  # 水洗等其他服務不是依人時計價，不檢查
+        return None
     service_date, hour = str(item.get("service_date") or ""), item.get("hour")
     amount = _net_amount(item)
     if not amount or amount <= 0 or not service_date or not hour:
