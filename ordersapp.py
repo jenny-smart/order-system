@@ -1,8 +1,11 @@
 # ============================================================
 # 檔名：ordersapp.py
-# 版本：v8.94
+# 版本：v8.95
 # 模組：服務訂單系統主畫面／統一功能選單
 # 最後更新：2026-11-28
+#
+# v8.95
+# - 熱重載後 service_pricing 仍是舊版（缺 price_status）時，連同 orders／shared／function 一起清掉重新匯入。
 #
 # v8.94
 # - 新增獨立功能「金額期間檢查」（function/price_period_check_page.py），放在 D 類「代客預訂LINE比對」下方：
@@ -90,9 +93,15 @@ def _purge_stale_modules():
     import sys
 
     for _name in list(sys.modules):
-        if _name in ("orders", "quick_order", "shared", "function") or _name.startswith(("shared.", "function.")):
+        if _name in ("orders", "quick_order", "service_pricing", "shared", "function") or _name.startswith(("shared.", "function.")):
             sys.modules.pop(_name, None)
 
+
+# GitHub 更新後熱重載不一定會重新載入 service_pricing（曾出現
+# module 'service_pricing' has no attribute 'price_status'）；缺新函式就整批清掉重載。
+import service_pricing as _service_pricing
+if not all(hasattr(_service_pricing, _n) for _n in ("price_status", "period_price_mismatch")):
+    _purge_stale_modules()
 
 try:
     import orders as orders_core
