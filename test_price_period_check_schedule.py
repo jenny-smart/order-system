@@ -7,9 +7,9 @@ from test_period_price_mismatch import _config
 
 def _row(no='LC1'):
     return {'訂單編號': no, '訂購人': '王小明', '服務日期': '2026/12/04（五）', '服務時段': '09:00-13:00',
-            '人時': '2人4小時', '目前金額': 6000, '應收金額': 4800, '差額': '多收 1200', '客戶等級（推定）': '一般客',
-            '異常類型': '期間價格錯（改期跨大掃除期間）', '服務日期間': '非大掃除', '服務日平假日': '平日',
-            '目前金額期間': '大掃除1', '目前金額平假日': '平日', '備註': '', '訂單連結': 'https://x/purchase?orderNo=LC1'}
+            '人時': '2人4小時', '目前金額': 6000, '應收金額': 4800, '差額': '多收 1200',
+            '異常類型': '期間價格錯（改期跨大掃除期間）', '服務日計價': '非大掃除／平日／一般客',
+            '目前金額計價': '大掃除1／平日／一般客', '備註': '', '訂單連結': 'https://x/purchase?orderNo=LC1'}
 
 
 def test_window_is_previous_day_17_to_today_17():
@@ -35,9 +35,8 @@ def test_calendar_event_shows_results():
     event = sched.build_calendar_event({'台北': {'rows': [_row()], 'scanned': 30}, '台中': {'rows': [], 'scanned': 5}},
                                        window, datetime(2026, 11, 28, 17, 5))
     assert event['summary'] == '【金額期間檢查】台北 1 筆、台中 0 筆（11/28）'
-    assert '目前 6000 → 應收 4800（多收 1200，一般客）' in event['description']
     assert '區間：11/27 17:00 ～ 11/28 17:00' in event['description']
-    assert '服務日：非大掃除／平日｜目前金額：大掃除1／平日 價' in event['description']
+    assert '目前 6000（大掃除1／平日／一般客）→ 應收 4800（非大掃除／平日／一般客），多收 1200' in event['description']
 
 
 def test_run_writes_calendar(monkeypatch):

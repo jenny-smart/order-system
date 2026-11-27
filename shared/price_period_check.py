@@ -10,8 +10,8 @@
 - 有退款的訂單（待退狀態：已部分退款／待退款）以後台訂單編輯頁的「退款金額」扣除後再比對
   （例：9000 已部分退款 1800 → 7200）；已全額退款視為 0。
 - 有加收（加收狀態不是「無」）同理，讀「加收金額」加回後再比對。
-- 「目前金額是／服務日屬於」拆成 服務日期間／服務日平假日／目前金額期間／目前金額平假日 四欄；
-  期間顯示 非大掃除／大掃除1／大掃除2，平假日顯示 平日／假日。
+- 計價依據改成兩欄「服務日計價」「目前金額計價」，各為「期間／平假日／客戶等級」
+  （例：非大掃除／假日／一般客、大掃除1／平日／一般客）；期間顯示 非大掃除／大掃除1／大掃除2。
 - 只檢查服務類型「居家清潔」的訂單（水洗等其他服務不依人時計價）。
 - 結果改成分欄：異常類型／目前金額／應收金額／差額／客戶等級（推定）／目前金額是／服務日屬於／備註／處理。
 - 依「訂購日期」或「服務日期」逐日查後台訂單列表，付款狀態只查「已付款」「待付款」。
@@ -99,18 +99,16 @@ def check_item(item: dict, config=None) -> dict | None:
     diff = detail["diff"]
     notes = ([f"已扣退款 {item['_refund']}"] if item.get("_refund") else []) + \
             ([f"已加加收 {item['_charge']}"] if item.get("_charge") else [])
+    tier = service_pricing.TIER_LABELS[detail["tier"]]
     return {
         "服務日期": detail["service_day"],
+        "服務日計價": f"{detail['service_period']}／{detail['service_daytype']}／{tier}",
         "人時": f"{person_note}{hour}小時",
         "異常類型": "平日／假日價格錯" if detail["kind"] == "day" else "期間價格錯（改期跨大掃除期間）",
         "目前金額": detail["amount"],
+        "目前金額計價": f"{detail['charged_period']}／{detail['charged_daytype']}／{tier}",
         "應收金額": detail["expected"],
         "差額": f"{'少收' if diff > 0 else '多收'} {abs(diff)}",
-        "客戶等級（推定）": service_pricing.TIER_LABELS[detail["tier"]],
-        "服務日期間": detail["service_period"],
-        "服務日平假日": detail["service_daytype"],
-        "目前金額期間": detail["charged_period"],
-        "目前金額平假日": detail["charged_daytype"],
         "備註": "；".join(notes),
         "處理": "重新成立訂單",
         "_person": known, "_hour": hour,
@@ -287,8 +285,7 @@ def scan(session, start: date, end: date, date_field: str = "訂購日期", log=
                     "訂購人": customer_name(item.get("row_text", ""), item.get("name", "")) or item.get("name", ""),
                     "服務日期": problem.pop("服務日期"),
                     "服務時段": item.get("period", ""),
-                    "服務日期間": problem.pop("服務日期間"),
-                    "服務日平假日": problem.pop("服務日平假日"),
+                    "服務日計價": problem.pop("服務日計價"),
                     "付款狀態": status_name,
                     **problem,
                     "LINE連結": item.get("line_url", ""),
