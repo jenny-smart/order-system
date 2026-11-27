@@ -11,7 +11,8 @@ def _item(text, service_date='2026/12/04', hour=4, staff=0, no='LC00221437'):
 
 def test_card_person_hour_flags_old_deep_clean_amount():
     problem = ppc.check_item(_item('2人4小時\n總金額：$6,000'), _config())
-    assert problem and '4800' in problem['問題'] and problem['人時'] == '2人4小時'
+    assert problem and problem['應收金額'] == 4800 and problem['目前金額'] == 6000 and problem['差額'] == '多收 1200'
+    assert problem['人時'] == '2人4小時' and problem['異常類型'].startswith('期間價格錯')
 
 
 def test_staff_count_used_when_card_has_no_person():
@@ -89,7 +90,7 @@ def test_same_day_total_still_wrong_is_listed(monkeypatch):
     monkeypatch.setattr(ppc, '_fetch_list', fake_fetch)
     monkeypatch.setattr(memo, 'BASE_URL', 'https://x', raising=False)
     result = ppc.scan(None, date(2026, 11, 11), date(2026, 11, 11), config=_config())
-    assert len(result['rows']) == 1 and '同日另有 LC2，合計 6100 仍不符' in result['rows'][0]['問題']
+    assert len(result['rows']) == 1 and '同日另有 LC2，合計 6100 仍不符' in result['rows'][0]['備註']
     assert '_person' not in result['rows'][0]
 
 
@@ -106,7 +107,7 @@ def test_partial_refund_is_deducted(monkeypatch):
         return True
 
     monkeypatch.setattr(ppc, '_fetch_list', fake_fetch)
-    monkeypatch.setattr(ppc, 'load_refund', fake_refund)
+    monkeypatch.setattr(ppc, 'load_adjustments', fake_refund)
     monkeypatch.setattr(memo, 'BASE_URL', 'https://x', raising=False)
     config = _config()
     config['periods']['part1']['start'] = '2026-12-15'
@@ -121,3 +122,13 @@ def test_refund_state_and_full_refund():
     it = _item('總金額：$9,000\n車馬費：$200')
     it['_refund'] = 1800
     assert ppc._net_amount(it) == 7000
+
+
+def test_charge_is_added_and_weekday_weekend_type(monkeypatch):
+    it = _item('2人4小時\n總金額：$4,800\n加收狀態：已加收', service_date='2026/12/05')  # 週六
+    assert ppc.charge_state(it) == '已加收'
+    assert ppc.charge_state(_item('加收狀態：無')) == ''
+    problem = ppc.check_item(it, _config())
+    assert problem['異常類型'] == '平日／假日價格錯' and problem['應收金額'] == 5600
+    it['_charge'] = 800
+    assert ppc.check_item(it, _config()) is None

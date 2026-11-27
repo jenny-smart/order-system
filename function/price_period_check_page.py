@@ -25,7 +25,7 @@ def render(backend_email, backend_password, env):
         "金額剛好是其他期間（非大掃除／大掃除 PART1／PART2）或另一種平假日的價格，就列出，需重新成立訂單。",
         "改期的訂單訂購日期不變，掃「訂購日期」可找出近期成立後被改期的訂單；也可改掃「服務日期」。",
         "單筆對不上時會用電話查同一服務日期的其他訂單，合計（例：原單＋補差價單）正確就不列出。",
-        "有部分退款／待退款的訂單，會讀後台的退款金額扣除後再比對（例：9000 退 1800 → 7200）。",
+        "有部分退款／待退款或加收的訂單，會讀後台的退款、加收金額調整後再比對（例：9000 退 1800 → 7200）。",
         "用了優惠券、折抵、合併或補單等對不上任何價格的訂單不列出。後台帳密決定查哪一區。只查詢，不修改後台。",
     ])
     today = datetime.now(ppc.TZ).date()
@@ -65,6 +65,7 @@ def render(backend_email, backend_password, env):
                f"檢查 {result['scanned']} 筆｜金額異常 {len(result['rows'])} 筆")
     with st.expander("查詢 LOG"):
         st.text("\n".join(state["logs"]) or "（無）")
+    st.caption("應收金額：依目前金額推定的客戶等級（VIP／一般客）、服務日所屬期間與平假日計算；差額＝應收－目前。")
     if not result["rows"]:
         st.success("沒有找到改期後金額未重算的訂單。")
         return

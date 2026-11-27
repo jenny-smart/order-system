@@ -27,7 +27,7 @@ def test_correct_amount_has_no_warning():
 
 
 def test_part1_to_part2_and_weekday_weekend():
-    assert '6400' in period_price_mismatch('2027-01-20', 2, 4, 5600, _config())
+    assert '應收 6000' in period_price_mismatch('2027-01-20', 2, 4, 5600, _config())
     assert '假日' in period_price_mismatch('2026-12-01', 2, 4, 5600, _config())  # 12/1 週二，5600 是非大掃除假日價
 
 

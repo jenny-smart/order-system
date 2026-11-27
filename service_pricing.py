@@ -233,25 +233,34 @@ def _hours_from_period(period):
     return Decimal(minutes) / 60 if minutes > 0 else None
 
 
-def price_status(service_date, person, hour, amount, config=None, period=None, tolerance=2):
-    """回傳 (狀態, 提醒文字)。
+WEEKDAY_NAMES = '一二三四五六日'
+DAY_LABELS = {'weekday': '平日', 'weekend': '假日'}
 
-    'ok'：金額符合服務日期所屬期間、平假日任一等級（VIP／一般客）的價格。
-    'other'：不符，但剛好等於其他期間或另一種平假日的價格（改期沒重算）→ 附提醒文字。
-    'skip'：不符也對不上任何價格（優惠、折抵、合併、補單），或資料不足、設定未啟用。
+
+def price_detail(service_date, person, hour, amount, config=None, period=None, tolerance=2):
+    """結構化結果。
+
+    status：'ok'（符合本期間價格）／'other'（剛好是其他期間或平假日的價格＝改期沒重算）／'skip'（無法判斷）。
+    status＝'other' 時另有：
+      amount 目前金額、tier 依目前金額推定的客戶等級（vip／regular）、
+      charged_as 目前金額對應的價格（例「非大掃除平日 VIP 價」）、
+      service_as 服務日所屬（例「非大掃除假日」）、
+      expected 應收金額（同等級）、expected_all {vip, regular}、diff 應收－目前、
+      kind 'period'（期間價格錯，改期跨大掃除期間）／'day'（同期間但平日、假日價格弄反）。
     """
+    result = {'status': 'skip'}
     config = config if config is not None else load_config()
     if not config.get('enabled'):
-        return 'skip', None
+        return result
     try:
         day = as_date(service_date)
         amount = Decimal(str(amount).replace(',', ''))
         person = Decimal(str(person))
         hour = Decimal(str(hour)) if str(hour or '').strip() else _hours_from_period(period)
     except Exception:
-        return 'skip', None
+        return result
     if not hour or person <= 0 or hour <= 0 or amount <= 0:
-        return 'skip', None
+        return result
 
     def total(rate):
         return (Decimal(str(rate)) * person * hour).quantize(Decimal('1'), rounding=ROUND_HALF_UP)
@@ -260,23 +269,41 @@ def price_status(service_date, person, hour, amount, config=None, period=None, t
     day_key = 'weekend' if day.weekday() >= 5 else 'weekday'
     expected = {tier: total(config['periods'][current]['rates'][tier][day_key]) for tier in TIER_LABELS}
     if any(abs(amount - value) <= tolerance for value in expected.values()):
-        return 'ok', None
+        return {'status': 'ok'}
     for key, label in PERIODS.items():
         if key != 'normal' and not config['periods'][key]['start']:
             continue
-        for other_day, day_label in (('weekday', '平日'), ('weekend', '假日')):
+        for other_day in ('weekday', 'weekend'):
             if key == current and other_day == day_key:
                 continue
             for tier, tier_label in TIER_LABELS.items():
                 if abs(amount - total(config['periods'][key]['rates'][tier][other_day])) <= tolerance:
-                    if expected['vip'] == expected['regular']:
-                        should = f"{expected['regular']}"
-                    else:
-                        should = f"{expected['regular']}（一般客）／{expected['vip']}（VIP）"
-                    return 'other', (f"金額異常：{amount} 是{label}{day_label}{tier_label}價；"
-                                     f"服務日 {day.strftime('%Y/%m/%d')} 屬{PERIODS[current]}{'假日' if day_key == 'weekend' else '平日'}，"
-                                     f"應為 {should}，請重新成立訂單")
-    return 'skip', None
+                    return {
+                        'status': 'other', 'amount': int(amount), 'tier': tier,
+                        'kind': 'day' if key == current else 'period',
+                        'charged_as': f"{label}{DAY_LABELS[other_day]} {tier_label} 價",
+                        'service_as': f"{PERIODS[current]}{DAY_LABELS[day_key]}",
+                        'service_day': f"{day.strftime('%Y/%m/%d')}（{WEEKDAY_NAMES[day.weekday()]}）",
+                        'expected': int(expected[tier]),
+                        'expected_all': {t: int(v) for t, v in expected.items()},
+                        'diff': int(expected[tier] - amount),
+                    }
+    return result
+
+
+def describe_detail(detail):
+    """一句話提醒（LINE 通知等只能顯示文字的地方用）。"""
+    diff = detail['diff']
+    return (f"金額異常：目前 {detail['amount']} 元是「{detail['charged_as']}」，"
+            f"服務日 {detail['service_day']} 屬「{detail['service_as']}」，"
+            f"應收 {detail['expected']} 元（{TIER_LABELS[detail['tier']]}），"
+            f"{'少收' if diff > 0 else '多收'} {abs(diff)} 元，請重新成立訂單")
+
+
+def price_status(service_date, person, hour, amount, config=None, period=None, tolerance=2):
+    """回傳 (狀態, 提醒文字)；狀態同 price_detail。"""
+    detail = price_detail(service_date, person, hour, amount, config, period, tolerance)
+    return detail['status'], (describe_detail(detail) if detail['status'] == 'other' else None)
 
 
 def period_price_mismatch(service_date, person, hour, amount, config=None, period=None, tolerance=2):

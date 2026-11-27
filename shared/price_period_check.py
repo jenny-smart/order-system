@@ -9,6 +9,8 @@
   合計仍不符才列出，並註明同日其他訂單與合計金額。
 - 有退款的訂單（待退狀態：已部分退款／待退款）以後台訂單編輯頁的「退款金額」扣除後再比對
   （例：9000 已部分退款 1800 → 7200）；已全額退款視為 0。
+- 有加收（加收狀態不是「無」）同理，讀「加收金額」加回後再比對。
+- 結果改成分欄：異常類型／目前金額／應收金額／差額／客戶等級（推定）／目前金額是／服務日屬於／備註／處理。
 - 依「訂購日期」或「服務日期」逐日查後台訂單列表，付款狀態只查「已付款」「待付款」。
 - 每筆用（總金額－車馬費）對服務日期所屬期間（非大掃除／大掃除 PART1／PART2）、平假日的
   VIP／一般客價格；金額剛好是其他期間或另一種平假日的價格 → 列為「應重新成立訂單」。
@@ -52,27 +54,41 @@ def check_item(item: dict, config=None) -> dict | None:
         return None
     known = _card_persons(text) or (str(item["staff_count"]) if item.get("staff_count") else "")
     if known:
-        status, message = service_pricing.price_status(service_date, known, hour, amount, config, item.get("period"))
+        detail = service_pricing.price_detail(service_date, known, hour, amount, config, item.get("period"))
         person_note = f"{known}人"
     else:
-        results = [(p, *service_pricing.price_status(service_date, p, hour, amount, config, item.get("period")))
+        results = [(p, service_pricing.price_detail(service_date, p, hour, amount, config, item.get("period")))
                    for p in GUESS_PERSONS]
-        if any(s == "ok" for _, s, _ in results):
+        if any(d["status"] == "ok" for _, d in results):
             return None
-        hit = next(((p, s, m) for p, s, m in results if s == "other"), None)
+        hit = next(((p, d) for p, d in results if d["status"] == "other"), None)
         if not hit:
             return None
-        known, status, message = hit
+        known, detail = hit
         person_note = f"{known}人（人數推算）"
-    if status != "other":
+    if detail["status"] != "other":
         return None
-    if item.get("_refund"):
-        message += f"（已扣退款 {item['_refund']}）"
-    return {"人時": f"{person_note}{hour}小時", "服務金額": amount, "問題": message,
-            "_person": known, "_hour": hour}
+    diff = detail["diff"]
+    notes = ([f"已扣退款 {item['_refund']}"] if item.get("_refund") else []) + \
+            ([f"已加加收 {item['_charge']}"] if item.get("_charge") else [])
+    return {
+        "服務日期": detail["service_day"],
+        "人時": f"{person_note}{hour}小時",
+        "異常類型": "平日／假日價格錯" if detail["kind"] == "day" else "期間價格錯（改期跨大掃除期間）",
+        "目前金額": detail["amount"],
+        "應收金額": detail["expected"],
+        "差額": f"{'少收' if diff > 0 else '多收'} {abs(diff)}",
+        "客戶等級（推定）": service_pricing.TIER_LABELS[detail["tier"]],
+        "目前金額是": detail["charged_as"],
+        "服務日屬於": detail["service_as"],
+        "備註": "；".join(notes),
+        "處理": "重新成立訂單",
+        "_person": known, "_hour": hour,
+    }
 
 
 _REFUND_RE = __import__("re").compile(r"待退狀態\s*[：:]\s*(已部[分份]退款|待退款|已全額退款)")
+_CHARGE_RE = __import__("re").compile(r"加收狀態\s*[：:]\s*([^\s\n]+)")
 
 
 def refund_state(item: dict) -> str:
@@ -80,31 +96,55 @@ def refund_state(item: dict) -> str:
     return m.group(1) if m else ""
 
 
+def charge_state(item: dict) -> str:
+    """卡片「加收狀態」（已加收、待收款…）；「無」或沒有回傳空字串。"""
+    m = _CHARGE_RE.search(str(item.get("row_text", "") or ""))
+    return "" if not m or m.group(1) == "無" else m.group(1)
+
+
 def _net_amount(item: dict):
-    """總金額－車馬費－退款金額（退款金額由 load_refund 讀後台補上）。"""
+    """總金額－車馬費－退款金額＋加收金額（退款、加收金額由 load_adjustments 讀後台補上）。"""
     text = str(item.get("row_text", "") or "")
     total = _money(text, "總金額")
     if total is None:
         return None
     if refund_state(item) == "已全額退款":
         return 0
-    return total - (_money(text, "車馬費") or 0) - int(item.get("_refund") or 0)
+    return (total - (_money(text, "車馬費") or 0)
+            - int(item.get("_refund") or 0) + int(item.get("_charge") or 0))
 
 
-def load_refund(session, item: dict) -> bool:
-    """有部分退款／待退款時，到後台訂單編輯頁讀「退款金額」存到 item["_refund"]；有讀到回傳 True。"""
-    if "_refund" in item or refund_state(item) not in ("已部分退款", "已部份退款", "待退款"):
+def _int_amount(value) -> int:
+    raw = str(value or "").replace(",", "").strip()
+    try:
+        return int(float(raw)) if raw else 0
+    except ValueError:
+        return 0
+
+
+def load_adjustments(session, item: dict) -> bool:
+    """有部分退款／待退款或加收時，到後台訂單編輯頁讀「退款金額」「加收金額」，
+    存到 item["_refund"]、item["_charge"]；有讀到任一金額回傳 True。每筆只讀一次。"""
+    if "_adjusted" in item:
+        return False
+    item["_adjusted"] = True
+    need_refund = refund_state(item) in ("已部分退款", "已部份退款", "待退款")
+    need_charge = bool(charge_state(item))
+    if not need_refund and not need_charge:
         return False
     from memo_system import change_order
     from memo_system.change_order_fill import _purchase_state
 
     try:
         order = change_order.fetch_order_basic(item["order_no"], session=session, by="orderNo") or {}
-        raw = str(_purchase_state(session, order).get("refundAmount") or "").replace(",", "").strip()
-        item["_refund"] = int(float(raw)) if raw else 0
+        state = _purchase_state(session, order)
     except Exception:
-        item["_refund"] = 0
-    return bool(item["_refund"])
+        return False
+    if need_refund:
+        item["_refund"] = _int_amount(state.get("refundAmount"))
+    if need_charge:
+        item["_charge"] = _int_amount(state.get("chargeAmount"))
+    return bool(item.get("_refund") or item.get("_charge"))
 
 
 def _same_day_orders(session, item: dict) -> list[dict]:
@@ -134,7 +174,7 @@ def group_check(item: dict, problem: dict, others: list[dict], config=None):
     """
     import service_pricing
 
-    amounts = [problem["服務金額"]] + [a for a in (_net_amount(o) for o in others) if a is not None]
+    amounts = [problem["目前金額"]] + [a for a in (_net_amount(o) for o in others) if a is not None]
     total = sum(amounts)
     p0 = problem["_person"]
     phs = [float(p0) * float(problem["_hour"])]
@@ -187,21 +227,21 @@ def scan(session, start: date, end: date, date_field: str = "訂購日期", log=
                 seen.add(item["order_no"])
                 day_total += 1
                 problem = check_item(item, config)
-                if problem and load_refund(session, item):
-                    log(f"{item['order_no']} {refund_state(item)} {item['_refund']}，扣除後重新比對")
+                if problem and load_adjustments(session, item):
+                    log(f"{item['order_no']} 退款 {item.get('_refund', 0)}／加收 {item.get('_charge', 0)}，調整後重新比對")
                     problem = check_item(item, config)
                 if not problem:
                     continue
                 others = _same_day_orders(session, item)
                 for other in others:
-                    load_refund(session, other)
+                    load_adjustments(session, other)
                 if others:
                     ok, total = group_check(item, problem, others, config)
                     listed = "、".join(o["order_no"] for o in others)
                     if ok:
                         log(f"{item['order_no']} 同日另有 {listed}，合計 {total} 正確，不列出")
                         continue
-                    problem["問題"] += f"；同日另有 {listed}，合計 {total} 仍不符"
+                    problem["備註"] = "；".join(x for x in (problem["備註"], f"同日另有 {listed}，合計 {total} 仍不符") if x)
                 problem.pop("_person", None)
                 problem.pop("_hour", None)
                 day_bad += 1
@@ -209,7 +249,7 @@ def scan(session, start: date, end: date, date_field: str = "訂購日期", log=
                     date_field: day.strftime("%Y/%m/%d"),
                     "訂單編號": item["order_no"],
                     "訂購人": customer_name(item.get("row_text", ""), item.get("name", "")) or item.get("name", ""),
-                    "服務日期": item.get("service_date", ""),
+                    "服務日期": problem.pop("服務日期"),
                     "服務時段": item.get("period", ""),
                     "付款狀態": status_name,
                     **problem,
@@ -245,7 +285,7 @@ def main():
     result = scan(session, start, end, args.by, log=print)
     print(f"共檢查 {result['scanned']} 筆，金額異常 {len(result['rows'])} 筆")
     for row in result["rows"]:
-        print(row["訂單編號"], row["服務日期"], row["人時"], row["服務金額"], row["問題"])
+        print(row["訂單編號"], row["服務日期"], row["人時"], f"目前 {row['目前金額']}", f"應收 {row['應收金額']}", row["差額"], row["異常類型"], row["備註"])
 
 
 if __name__ == "__main__":
