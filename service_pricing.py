@@ -282,8 +282,8 @@ def price_detail(service_date, person, hour, amount, config=None, period=None, t
                     return {
                         'status': 'other', 'amount': int(amount), 'tier': tier,
                         'kind': 'day' if key == current else 'period',
-                        'charged_as': f"{PERIOD_SHORT[key]}{DAY_LABELS[other_day]} {tier_label} 價",
-                        'service_as': f"{PERIOD_SHORT[current]}{DAY_LABELS[day_key]}",
+                        'charged_as': f"{tier_label}{PERIOD_SHORT[key]}{DAY_LABELS[other_day]}價",
+                        'service_as': f"{tier_label}{PERIOD_SHORT[current]}{DAY_LABELS[day_key]}",
                         'charged_period': PERIOD_SHORT[key], 'charged_daytype': DAY_LABELS[other_day],
                         'service_period': PERIOD_SHORT[current], 'service_daytype': DAY_LABELS[day_key],
                         'service_day': f"{day.strftime('%Y/%m/%d')}（{WEEKDAY_NAMES[day.weekday()]}）",
@@ -299,7 +299,7 @@ def describe_detail(detail):
     diff = detail['diff']
     return (f"金額異常：目前 {detail['amount']} 元是「{detail['charged_as']}」，"
             f"服務日 {detail['service_day']} 屬「{detail['service_as']}」，"
-            f"應收 {detail['expected']} 元（{TIER_LABELS[detail['tier']]}），"
+            f"應收 {detail['expected']} 元，"
             f"{'少收' if diff > 0 else '多收'} {abs(diff)} 元，請重新成立訂單")
 
 

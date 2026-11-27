@@ -66,7 +66,7 @@ def render(backend_email, backend_password, env):
                f"檢查 {result['scanned']} 筆｜金額異常 {len(result['rows'])} 筆")
     with st.expander("查詢 LOG"):
         st.text("\n".join(state["logs"]) or "（無）")
-    st.caption("計價欄＝期間／平假日／客戶等級（等級依目前金額推定）。應收金額依「服務日計價」計算；差額＝應收－目前。")
+    st.caption("計價欄＝客戶等級＋期間＋平假日（例：一般客非大掃除平日；等級依目前金額推定）。應收金額依「服務日計價」計算；差額＝應收－目前。")
     if not result["rows"]:
         st.success("沒有找到改期後金額未重算的訂單。")
         return

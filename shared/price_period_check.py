@@ -10,8 +10,8 @@
 - 有退款的訂單（待退狀態：已部分退款／待退款）以後台訂單編輯頁的「退款金額」扣除後再比對
   （例：9000 已部分退款 1800 → 7200）；已全額退款視為 0。
 - 有加收（加收狀態不是「無」）同理，讀「加收金額」加回後再比對。
-- 計價依據改成兩欄「服務日計價」「目前金額計價」，各為「期間／平假日／客戶等級」
-  （例：非大掃除／假日／一般客、大掃除1／平日／一般客）；期間顯示 非大掃除／大掃除1／大掃除2。
+- 計價依據改成兩欄「服務日計價」「目前金額計價」，各為「客戶等級＋期間＋平假日」
+  （例：一般客非大掃除假日、一般客大掃除1平日）；期間顯示 非大掃除／大掃除1／大掃除2。
 - 只檢查服務類型「居家清潔」的訂單（水洗等其他服務不依人時計價）。
 - 結果改成分欄：異常類型／目前金額／應收金額／差額／客戶等級（推定）／目前金額是／服務日屬於／備註／處理。
 - 依「訂購日期」或「服務日期」逐日查後台訂單列表，付款狀態只查「已付款」「待付款」。
@@ -102,11 +102,11 @@ def check_item(item: dict, config=None) -> dict | None:
     tier = service_pricing.TIER_LABELS[detail["tier"]]
     return {
         "服務日期": detail["service_day"],
-        "服務日計價": f"{detail['service_period']}／{detail['service_daytype']}／{tier}",
+        "服務日計價": f"{tier}{detail['service_period']}{detail['service_daytype']}",
         "人時": f"{person_note}{hour}小時",
         "異常類型": "平日／假日價格錯" if detail["kind"] == "day" else "期間價格錯（改期跨大掃除期間）",
         "目前金額": detail["amount"],
-        "目前金額計價": f"{detail['charged_period']}／{detail['charged_daytype']}／{tier}",
+        "目前金額計價": f"{tier}{detail['charged_period']}{detail['charged_daytype']}",
         "應收金額": detail["expected"],
         "差額": f"{'少收' if diff > 0 else '多收'} {abs(diff)}",
         "備註": "；".join(notes),
