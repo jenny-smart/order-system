@@ -22,6 +22,7 @@ from function.ui_common import (
 from shared.execution_log_service import log_execution
 from function import cleaning_pattern_ui as _cpui
 from shared import cleaning_pattern as _cp
+from function import main_sub_order_ui as _msui
 
 import quick_order as qo
 from service_pricing import makeup_paid_tier, unit_price
@@ -568,6 +569,14 @@ def render_old_customer(backend_email, backend_password, env):
                 )
                 if _old_pat["used"]:
                     st.caption("本次會用上方細項送出（未填的欄位視為 0），不沿用上一筆的細項。")
+                try:
+                    _old_tier = "vip" if float(qo.account_balance(member_payload)) > 0 else "regular"
+                except Exception:
+                    _old_tier = "regular"
+                _msui.render_person_hour_coupon(
+                    backend_email, backend_password, env, "old", "old_discount_code",
+                    default_region=q_region, default_tier=_old_tier, member_name=member.get("name") or "",
+                )
                 q_discount_code = st.text_input("優惠代碼（選填，有才填）", key="old_discount_code")
 
                 upcoming_orders = get_unserved_paid_orders(lookup["session"], lookup["phone"], member_payload, addr_options, today_value=date.today())
@@ -783,6 +792,12 @@ def render_old_customer(backend_email, backend_password, env):
             copy_button("複製 LINE 訊息", line_message, "copy-line-message")
         with col_memo:
             st.text_area("N-J Memo", NJ_MEMO, height=200, label_visibility="collapsed", key="nj_memo_order_result")
+        _msui.render_main_sub_section(
+            backend_email, backend_password, env, "old", main_order_no=order_result.get("order_no", ""),
+            main_date=order_result.get("date"), main_person=order_result.get("person") or 4,
+            main_hour=PERIOD_HOUR_MAP.get(str(order_result.get("period_s") or ""), 8),
+            main_period_s=str(order_result.get("period_s") or ""),
+        )
 
 
 
@@ -930,6 +945,7 @@ def render_new_customer(backend_email, backend_password, env):
         nc_notice = st.text_area("客服備註", height=80, key="nc_notice_d")
 
     nc_d_allow_auto_lemon = auto_lemon_checkbox("nc_d_allow_auto_lemon")
+    _msui.render_person_hour_coupon(backend_email, backend_password, env, "nc", "nc_discount_code_d")
     nc_discount_code = st.text_input("優惠代碼（選填，有才填；未填時使用貼上資料中的優惠代碼）", key="nc_discount_code_d")
 
     # 會員查詢後若表單已改動，不能再用舊的日期／時段快照送單。
@@ -975,6 +991,7 @@ def render_new_customer(backend_email, backend_password, env):
                 _nc_ping = _cp.ping_code(_parsed["ping_number"], _nc_ctid)
             else:
                 _nc_ping = _parsed.get("ping", "4")
+            _nc_ping_value = _parsed.get("ping_number")
             # v8.12：付款方式偵測不到時，改用上方手動選擇的值；兩者皆無則擋下建單，
             # 不可默默預設成信用卡。
             _nc_payway = _parsed.get("payway", "") or st.session_state.get("nc_payway_manual_select", "")
@@ -1036,6 +1053,15 @@ def render_new_customer(backend_email, backend_password, env):
                         "company_no": _nc_company_no,
                         "member_email": _m_existing.get("email", ""),
                         "allow_auto_lemon_shift": nc_d_allow_auto_lemon,
+                        # 貼上資料有坪數時，舊客路徑也要用這次的坪數，不可沿用上一張訂單的坪數。
+                        "extra_fields": {
+                            # 細項有填就整組帶入（同舊客成單規則），否則只帶坪數與服務項目。
+                            **(dict(_nc_pf) if _nc_pat.get("used") else {}),
+                            **{k: v for k, v in (
+                                ("ping", _nc_ping if (_nc_ping_value or _nc_pat["ping"]) else ""),
+                                ("serviceType", nc_service_type),
+                            ) if v},
+                        },
                     }
                     st.rerun()
                 elif _nc_lookup is not None:
@@ -1168,6 +1194,7 @@ def render_new_customer(backend_email, backend_password, env):
                             hour=_pe["hour"], person=_pe["person"],
                             discount_code=_nc_pending.get("discount_code", ""),
                             allow_auto_lemon_shift=_nc_pending["allow_auto_lemon_shift"],
+                            extra_fields=_nc_pending.get("extra_fields") or None,
                             **_invoice,
                         )
                         old_result["mail_sent"] = False
@@ -1281,6 +1308,11 @@ def render_new_customer(backend_email, backend_password, env):
             with col_nc_memo:
                 st.text_area("N-J Memo", NJ_MEMO, height=200, label_visibility="collapsed", key="nj_memo_nc_result")
                 copy_button("複製 N-J Memo", NJ_MEMO, "copy-nj-memo-nc-result")
+        _msui.render_main_sub_section(
+            backend_email, backend_password, env, "nc", main_order_no=_r.get("order_no", ""),
+            main_date=_r.get("date_s"), main_person=_r.get("person") or 4, main_hour=_r.get("hour") or 8,
+            main_period_s=str(_r.get("period_s") or ""),
+        )
 
 
 def render_order_conversion(backend_email, backend_password, env):

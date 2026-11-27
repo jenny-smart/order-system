@@ -4244,6 +4244,16 @@ def parse_new_customer_order_text(raw_text):
     return result
 
 
+def ping_code_from_value(ping_value, clean_type_id="1", default="4"):
+    """坪數（數字）→ 後台 ping 代號；換算規則統一在 shared.cleaning_pattern.ping_code。"""
+    try:
+        if ping_value is None or float(ping_value) <= 0:
+            return default
+    except (TypeError, ValueError):
+        return default
+    return cleaning_pattern.ping_code(ping_value, clean_type_id)
+
+
 def parse_new_customer_text(text):
     """
     v8.12：從客人提供的文字拆解出建單所需欄位，支援兩種格式：
@@ -4349,6 +4359,7 @@ def parse_new_customer_text(text):
             result["ping_number"] = n
             ping = cleaning_pattern.ping_code(n, "1")
     result["ping"] = ping
+    result["ping_value"] = result["ping_number"]  # 舊名稱相容
 
     # ---------- 付款方式 ----------
     _payway_raw = _find([r"付款方式\s*[：:]\s*(.+)"], raw_text) or ""
