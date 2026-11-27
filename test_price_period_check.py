@@ -13,6 +13,7 @@ def test_card_person_hour_flags_old_deep_clean_amount():
     problem = ppc.check_item(_item('2人4小時\n總金額：$6,000'), _config())
     assert problem and problem['應收金額'] == 4800 and problem['目前金額'] == 6000 and problem['差額'] == '多收 1200'
     assert problem['人時'] == '2人4小時' and problem['異常類型'].startswith('期間價格錯')
+    assert (problem['服務日期間'], problem['服務日平假日'], problem['目前金額期間'], problem['目前金額平假日']) == ('非大掃除', '平日', '大掃除1', '平日')
 
 
 def test_staff_count_used_when_card_has_no_person():

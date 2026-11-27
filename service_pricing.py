@@ -234,6 +234,7 @@ def _hours_from_period(period):
 
 
 WEEKDAY_NAMES = '一二三四五六日'
+PERIOD_SHORT = {'normal': '非大掃除', 'part1': '大掃除1', 'part2': '大掃除2'}
 DAY_LABELS = {'weekday': '平日', 'weekend': '假日'}
 
 
@@ -281,8 +282,10 @@ def price_detail(service_date, person, hour, amount, config=None, period=None, t
                     return {
                         'status': 'other', 'amount': int(amount), 'tier': tier,
                         'kind': 'day' if key == current else 'period',
-                        'charged_as': f"{label}{DAY_LABELS[other_day]} {tier_label} 價",
-                        'service_as': f"{PERIODS[current]}{DAY_LABELS[day_key]}",
+                        'charged_as': f"{PERIOD_SHORT[key]}{DAY_LABELS[other_day]} {tier_label} 價",
+                        'service_as': f"{PERIOD_SHORT[current]}{DAY_LABELS[day_key]}",
+                        'charged_period': PERIOD_SHORT[key], 'charged_daytype': DAY_LABELS[other_day],
+                        'service_period': PERIOD_SHORT[current], 'service_daytype': DAY_LABELS[day_key],
                         'service_day': f"{day.strftime('%Y/%m/%d')}（{WEEKDAY_NAMES[day.weekday()]}）",
                         'expected': int(expected[tier]),
                         'expected_all': {t: int(v) for t, v in expected.items()},

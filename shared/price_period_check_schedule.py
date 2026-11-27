@@ -76,7 +76,8 @@ def build_calendar_event(result: dict, window: tuple[datetime, datetime], now: d
         for r in rows:
             lines.append(f"{r['訂單編號']} {r['訂購人']}｜服務 {r['服務日期']} {r['服務時段']}｜{r['人時']}")
             lines.append(f"　目前 {r['目前金額']} → 應收 {r['應收金額']}（{r['差額']}，{r['客戶等級（推定）']}）｜{r['異常類型']}")
-            lines.append(f"　目前金額是「{r['目前金額是']}」，服務日屬「{r['服務日屬於']}」" + (f"｜{r['備註']}" if r.get("備註") else ""))
+            lines.append(f"　服務日：{r['服務日期間']}／{r['服務日平假日']}｜目前金額：{r['目前金額期間']}／{r['目前金額平假日']} 價"
+                         + (f"｜{r['備註']}" if r.get("備註") else ""))
             lines.append(f"　{r['訂單連結']}")
         lines.append("")
     return dict(
