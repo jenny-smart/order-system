@@ -987,7 +987,9 @@ def render_new_customer(backend_email, backend_password, env):
             _nc_phone = _parsed.get("phone", "")
             _nc_email = _parsed.get("email", "")
             _nc_address = _parsed.get("address", "")
-            _nc_ping = _parsed.get("ping", "4")
+            # 坪數代號依服務類別換算（辦公室清潔 20 坪以下是 "3"）。
+            _nc_ping_value = _parsed.get("ping_value")
+            _nc_ping = qo.ping_code_from_value(_nc_ping_value, CLEAN_TYPE_ID_MAP[nc_clean_type])
             # v8.12：付款方式偵測不到時，改用上方手動選擇的值；兩者皆無則擋下建單，
             # 不可默默預設成信用卡。
             _nc_payway = _parsed.get("payway", "") or st.session_state.get("nc_payway_manual_select", "")
@@ -1049,6 +1051,13 @@ def render_new_customer(backend_email, backend_password, env):
                         "company_no": _nc_company_no,
                         "member_email": _m_existing.get("email", ""),
                         "allow_auto_lemon_shift": nc_d_allow_auto_lemon,
+                        # 貼上資料有坪數時，舊客路徑也要用這次的坪數，不可沿用上一張訂單的坪數。
+                        "extra_fields": {
+                            k: v for k, v in (
+                                ("ping", _nc_ping if _nc_ping_value else ""),
+                                ("serviceType", nc_service_type),
+                            ) if v
+                        },
                     }
                     st.rerun()
                 elif _nc_lookup is not None:
@@ -1180,6 +1189,7 @@ def render_new_customer(backend_email, backend_password, env):
                             hour=_pe["hour"], person=_pe["person"],
                             discount_code=_nc_pending.get("discount_code", ""),
                             allow_auto_lemon_shift=_nc_pending["allow_auto_lemon_shift"],
+                            extra_fields=_nc_pending.get("extra_fields") or None,
                             **_invoice,
                         )
                         old_result["mail_sent"] = False

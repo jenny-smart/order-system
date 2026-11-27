@@ -4237,6 +4237,35 @@ def parse_new_customer_order_text(raw_text):
     return result
 
 
+def ping_code_from_value(ping_value, clean_type_id="1", default="4"):
+    """坪數（數字）→ 後台 ping 代號。
+
+    後台選項：1=10以下、2=11~20、3=20以下（辦公室清潔 clean_type_id=2 專用）、
+    4=21~40、5=41~60、6=61~80、7=81以上。無坪數時回傳 default。
+    """
+    try:
+        n = float(ping_value)
+    except (TypeError, ValueError):
+        return default
+    if n <= 0:
+        return default
+    if str(clean_type_id) == "2":
+        if n <= 20:
+            return "3"
+    else:
+        if n <= 10:
+            return "1"
+        if n <= 20:
+            return "2"
+    if n <= 40:
+        return "4"
+    if n <= 60:
+        return "5"
+    if n <= 80:
+        return "6"
+    return "7"
+
+
 def parse_new_customer_text(text):
     """
     v8.12：從客人提供的文字拆解出建單所需欄位，支援兩種格式：
@@ -4331,18 +4360,15 @@ def parse_new_customer_text(text):
             if _ping_m:
                 _ping_raw = _ping_m.group(1)
                 break
-    ping = "4"
+    # 後台坪數代號（代客預訂頁下拉選單）：1=10以下、2=11~20、3=20以下（僅辦公室）、
+    # 4=21~40、5=41~60、6=61~80、7=81以上。原本每 10 坪一級，54 坪會送出 "6"（61~80）。
+    ping_value = None
     if _ping_raw:
         nums = _re.findall(r"\d+", _ping_raw)
         if nums:
-            n = int(nums[0])
-            if n <= 10: ping = "1"
-            elif n <= 20: ping = "2"
-            elif n <= 30: ping = "3"
-            elif n <= 40: ping = "4"
-            elif n <= 50: ping = "5"
-            else: ping = "6"
-    result["ping"] = ping
+            ping_value = int(nums[0])
+    result["ping_value"] = ping_value
+    result["ping"] = ping_code_from_value(ping_value)
 
     # ---------- 付款方式 ----------
     _payway_raw = _find([r"付款方式\s*[：:]\s*(.+)"], raw_text) or ""
