@@ -2,6 +2,7 @@
 """未配班檢查頁：① 成立保留單 ② 記錄未配班人員（只剩 1 人的時段）。
 
 變更紀錄
+- 2026-11-27：① 保留單沒有「檸檬人勿動」時：只有檸檬人 → 取消；檸檬人＋專員 → 取消後就專員重建。
 - 2026-11-27：② 可改範圍天數（主控表參數設定）；①② 可改排程時間（主控表排程設定 D 欄）。
 - 2026-11-26：① 新增「自動排程設定」：保留單開始日／結束日／停止日改在頁面設定（存主控表「參數設定」）。
 - 2026-11-22：① 專員全是檸檬人的保留單一併取消。
@@ -137,7 +138,7 @@ def _render_reserve(env, lookup, get_region_by_address, backend_email: str = "",
     st.caption("日期區間內只要有未配班就成立保留單：同一天同一時段（上午／下午／全天）合成一張，"
                "人數＝人數、時數取最短（1人2小時＋1人3小時 → 2人2小時；1 人也成立 1人單）。"
                "後台查不到這麼多人時（例如有人不服務保留地址），人數減 1 再試。"
-               "同一天同一時段已有 2 張以上 1 人保留單時，會先取消再合併成一張 N 人保留單；專員全是檸檬人的保留單會取消。")
+               "同一天同一時段已有 2 張以上 1 人保留單時，會先取消再合併成一張 N 人保留單；客服備註沒有「檸檬人勿動」的保留單：只有檸檬人會取消；檸檬人＋專員會先取消，再就專員重建保留單。")
     addresses = member_addresses(lookup)
     if not addresses:
         st.error("保留會員沒有可用地址。")
@@ -208,7 +209,7 @@ def _render_reserve(env, lookup, get_region_by_address, backend_email: str = "",
             results = out["created"] + [
                 {"success": False, "service_date": c.get("service_date", ""), "group": c.get("merge_group", ""),
                  "period": c.get("period", ""), "order_no": c.get("order_no", ""),
-                 "message": (("已取消（檸檬人）" if c.get("merge_group") == "檸檬人" else "已取消（合併）") if c.get("ok")
+                 "message": ((f"已取消（{c['merge_group']}）" if c.get("merge_group") in ("檸檬人", "檸檬人＋專員") else "已取消（合併）") if c.get("ok")
                              else f"取消失敗：{c.get('message', '')}")}
                 for c in out["cancelled"]
             ]
@@ -216,7 +217,7 @@ def _render_reserve(env, lookup, get_region_by_address, backend_email: str = "",
 
             ok = sum(1 for r in out["created"] if r.get("success"))
             merged = sum(1 for c in out["cancelled"] if c.get("ok"))
-            status.update(label=f"完成：成立 {ok} 張" + (f"、取消 {merged} 張（合併 1 人單／檸檬人單）" if merged else ""), state="complete", expanded=False)
+            status.update(label=f"完成：成立 {ok} 張" + (f"、取消 {merged} 張（合併 1 人單／檸檬人單／檸檬人＋專員）" if merged else ""), state="complete", expanded=False)
             log_execution(function_name="未配班成立保留單", status="成功" if all(r.get("success") or str(r.get("message", "")).startswith("已取消（") for r in results) else "失敗",
                           area=region, target=address, message=f"{start}～{end}：成立 {ok} 張、取消 {merged} 張（合併／檸檬人）")
         except Exception as exc:

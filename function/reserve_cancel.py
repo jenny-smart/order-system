@@ -244,6 +244,7 @@ def find_reserve_orders(
         for key in (
             "amount", "total_amount", "order_amount", "price", "fare", "car_fare",
             "traffic_fee", "trafficFee", "staff", "staff_names", "service_staff",
+            "notice",  # 2026-11-27：客服備註（判斷「檸檬人勿動」）
         ):
             if item.get(key) in (None, "") and detail.get(key) not in (None, ""):
                 item[key] = detail.get(key)
