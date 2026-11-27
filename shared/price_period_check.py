@@ -36,6 +36,21 @@ DATE_FIELDS = {"訂購日期": ("date_s", "date_e"), "服務日期": ("clean_dat
 GUESS_PERSONS = range(1, 7)
 
 
+def order_created_at(item: dict):
+    """列表卡片「訂購資訊」的訂購時間（第一個 YYYY-MM-DD HH:MM:SS）；沒有回傳 None。"""
+    import re
+
+    m = re.search(r"(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}(?::\d{2})?)", str(item.get("row_text", "") or ""))
+    if not m:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            return datetime.strptime(f"{m.group(1)} {m.group(2)}", fmt)
+        except ValueError:
+            continue
+    return None
+
+
 def _card_persons(text: str) -> str:
     import re
 
@@ -192,10 +207,12 @@ def group_check(item: dict, problem: dict, others: list[dict], config=None):
     return False, total
 
 
-def scan(session, start: date, end: date, date_field: str = "訂購日期", log=None, config=None, progress=None) -> dict:
+def scan(session, start: date, end: date, date_field: str = "訂購日期", log=None, config=None, progress=None,
+         created_window=None) -> dict:
     """回傳 {"rows": 有問題的訂單, "scanned": 檢查筆數}。
 
     progress(已完成天數, 總天數, 當天, 已檢查筆數, 異常筆數)：每查完一天呼叫一次（開始前先以 0 呼叫）。
+    created_window＝(起, 迄)（naive 台北時間）：只檢查訂購時間在 [起, 迄) 內的訂單（排程用）。
     """
     from memo_system import memo
     import service_pricing
@@ -224,6 +241,10 @@ def scan(session, start: date, end: date, date_field: str = "訂購日期", log=
             for item in _fetch_list(session, params):
                 if item["order_no"] in seen:
                     continue
+                if created_window:
+                    created = order_created_at(item)
+                    if created and not (created_window[0] <= created < created_window[1]):
+                        continue
                 seen.add(item["order_no"])
                 day_total += 1
                 problem = check_item(item, config)
