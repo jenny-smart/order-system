@@ -4,6 +4,9 @@
 更新記錄：
 2026-11-28（新增）
 - scan 加 progress 回呼，頁面顯示逐日進度。
+- 單筆金額對不上時，用電話查同一服務日期的其他已付款／待付款訂單（不限掃描區間），
+  合計（總金額－車馬費）符合本期間價格就不列出（例：主單 9300＋補差價單 300＝9600）；
+  合計仍不符才列出，並註明同日其他訂單與合計金額。
 - 依「訂購日期」或「服務日期」逐日查後台訂單列表，付款狀態只查「已付款」「待付款」。
 - 每筆用（總金額－車馬費）對服務日期所屬期間（非大掃除／大掃除 PART1／PART2）、平假日的
   VIP／一般客價格；金額剛好是其他期間或另一種平假日的價格 → 列為「應重新成立訂單」。
@@ -62,7 +65,61 @@ def check_item(item: dict, config=None) -> dict | None:
         person_note = f"{known}人（人數推算）"
     if status != "other":
         return None
-    return {"人時": f"{person_note}{hour}小時", "服務金額": amount, "問題": message}
+    return {"人時": f"{person_note}{hour}小時", "服務金額": amount, "問題": message,
+            "_person": known, "_hour": hour}
+
+
+def _net_amount(item: dict):
+    text = str(item.get("row_text", "") or "")
+    total = _money(text, "總金額")
+    if total is None:
+        return None
+    return total - (_money(text, "車馬費") or 0)
+
+
+def _same_day_orders(session, item: dict) -> list[dict]:
+    """同電話、同服務日期的其他已付款／待付款訂單（不限訂購日期）。"""
+    from memo_system import memo
+
+    phone, service_date = str(item.get("phone") or "").strip(), str(item.get("service_date") or "")
+    if not phone or not service_date:
+        return []
+    day = service_date.replace("/", "-")
+    found = {}
+    for status_code, _ in STATUSES:
+        params = memo.blank_list_params()
+        params["phone"] = phone
+        params["clean_date_s"] = params["clean_date_e"] = day
+        params["purchase_status"] = status_code
+        for other in _fetch_list(session, params):
+            if other["order_no"] != item["order_no"] and str(other.get("service_date") or "") == service_date:
+                found[other["order_no"]] = other
+    return sorted(found.values(), key=lambda x: x["order_no"])
+
+
+def group_check(item: dict, problem: dict, others: list[dict], config=None):
+    """同日多筆合計檢查。回傳 (合計是否正確, 合計金額)。
+
+    人時可能是重疊（訂單轉換、補差價單：同一批人時拆兩張單）或相加（主單＋補單），兩種都試。
+    """
+    import service_pricing
+
+    amounts = [problem["服務金額"]] + [a for a in (_net_amount(o) for o in others) if a is not None]
+    total = sum(amounts)
+    p0 = problem["_person"]
+    phs = [float(p0) * float(problem["_hour"])]
+    for other in others:
+        p = _card_persons(other.get("row_text", "")) or (str(other["staff_count"]) if other.get("staff_count") else p0)
+        try:
+            phs.append(float(p) * float(other.get("hour") or 0))
+        except (TypeError, ValueError):
+            pass
+    candidates = {ph for ph in phs if ph > 0} | {sum(ph for ph in phs if ph > 0)}
+    for ph in candidates:
+        status, _ = service_pricing.price_status(item.get("service_date"), 1, ph, total, config)
+        if status == "ok":
+            return True, total
+    return False, total
 
 
 def scan(session, start: date, end: date, date_field: str = "訂購日期", log=None, config=None, progress=None) -> dict:
@@ -102,6 +159,16 @@ def scan(session, start: date, end: date, date_field: str = "訂購日期", log=
                 problem = check_item(item, config)
                 if not problem:
                     continue
+                others = _same_day_orders(session, item)
+                if others:
+                    ok, total = group_check(item, problem, others, config)
+                    listed = "、".join(o["order_no"] for o in others)
+                    if ok:
+                        log(f"{item['order_no']} 同日另有 {listed}，合計 {total} 正確，不列出")
+                        continue
+                    problem["問題"] += f"；同日另有 {listed}，合計 {total} 仍不符"
+                problem.pop("_person", None)
+                problem.pop("_hour", None)
                 day_bad += 1
                 rows.append({
                     date_field: day.strftime("%Y/%m/%d"),

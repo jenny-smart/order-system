@@ -52,3 +52,42 @@ def test_scan_reports_progress(monkeypatch):
     calls = []
     ppc.scan(None, date(2026, 11, 11), date(2026, 11, 13), config=_config(), progress=lambda *a: calls.append(a[:2]))
     assert calls == [(0, 3), (1, 3), (2, 3), (3, 3)]
+
+
+def test_same_day_makeup_order_makes_total_correct(monkeypatch):
+    # LC00220372 9500－200＝9300（PART1 價）＋ LC00220548 500－200＝300 → 9600＝PART2 假日一般客 2人6小時
+    from memo_system import memo
+    main = _item('總金額：$9,500\n車馬費：$200', service_date='2027/01/23', hour=6, staff=2, no='LC00220372')
+    main['phone'] = '0922561066'
+    makeup = _item('總金額：$500\n車馬費：$200', service_date='2027/01/23', hour=6, staff=2, no='LC00220548')
+
+    def fake_fetch(session, params):
+        if params.get('phone'):
+            return [main, makeup] if params['purchase_status'] == '1' else []
+        return [main] if params['purchase_status'] == '1' else []
+
+    monkeypatch.setattr(ppc, '_fetch_list', fake_fetch)
+    monkeypatch.setattr(memo, 'BASE_URL', 'https://x', raising=False)
+    config = _config()
+    config['periods']['part2']['rates']['regular']['weekend'] = 800
+    config['periods']['part1']['rates']['regular']['weekend'] = 775
+    result = ppc.scan(None, date(2026, 11, 11), date(2026, 11, 11), config=config)
+    assert result['rows'] == []
+
+
+def test_same_day_total_still_wrong_is_listed(monkeypatch):
+    from memo_system import memo
+    main = _item('2人4小時\n總金額：$6,000', no='LC1')
+    main['phone'] = '0911'
+    other = _item('總金額：$100', no='LC2')
+
+    def fake_fetch(session, params):
+        if params.get('phone'):
+            return [main, other] if params['purchase_status'] == '1' else []
+        return [main] if params['purchase_status'] == '1' else []
+
+    monkeypatch.setattr(ppc, '_fetch_list', fake_fetch)
+    monkeypatch.setattr(memo, 'BASE_URL', 'https://x', raising=False)
+    result = ppc.scan(None, date(2026, 11, 11), date(2026, 11, 11), config=_config())
+    assert len(result['rows']) == 1 and '同日另有 LC2，合計 6100 仍不符' in result['rows'][0]['問題']
+    assert '_person' not in result['rows'][0]
