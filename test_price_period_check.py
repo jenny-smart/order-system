@@ -91,3 +91,33 @@ def test_same_day_total_still_wrong_is_listed(monkeypatch):
     result = ppc.scan(None, date(2026, 11, 11), date(2026, 11, 11), config=_config())
     assert len(result['rows']) == 1 and '同日另有 LC2，合計 6100 仍不符' in result['rows'][0]['問題']
     assert '_person' not in result['rows'][0]
+
+
+def test_partial_refund_is_deducted(monkeypatch):
+    # LC00220455：12/10 非大掃除，總金額 9000（PART1 價），已部分退款 1800 → 7200 正確
+    from memo_system import memo
+    item = _item('總金額：$9,000\n待退狀態：已部分退款', service_date='2026/12/10', hour=6, staff=2, no='LC00220455')
+
+    def fake_fetch(session, params):
+        return [dict(item)] if params['purchase_status'] == '1' and not params.get('phone') else []
+
+    def fake_refund(session, it):
+        it['_refund'] = 1800
+        return True
+
+    monkeypatch.setattr(ppc, '_fetch_list', fake_fetch)
+    monkeypatch.setattr(ppc, 'load_refund', fake_refund)
+    monkeypatch.setattr(memo, 'BASE_URL', 'https://x', raising=False)
+    config = _config()
+    config['periods']['part1']['start'] = '2026-12-15'
+    result = ppc.scan(None, date(2026, 11, 12), date(2026, 11, 12), config=config)
+    assert result['rows'] == []
+
+
+def test_refund_state_and_full_refund():
+    assert ppc.refund_state(_item('待退狀態：已部分退款')) == '已部分退款'
+    assert ppc.refund_state(_item('待退狀態：無')) == ''
+    assert ppc._net_amount(_item('總金額：$9,000\n待退狀態：已全額退款')) == 0
+    it = _item('總金額：$9,000\n車馬費：$200')
+    it['_refund'] = 1800
+    assert ppc._net_amount(it) == 7000

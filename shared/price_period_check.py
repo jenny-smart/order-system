@@ -7,6 +7,8 @@
 - 單筆金額對不上時，用電話查同一服務日期的其他已付款／待付款訂單（不限掃描區間），
   合計（總金額－車馬費）符合本期間價格就不列出（例：主單 9300＋補差價單 300＝9600）；
   合計仍不符才列出，並註明同日其他訂單與合計金額。
+- 有退款的訂單（待退狀態：已部分退款／待退款）以後台訂單編輯頁的「退款金額」扣除後再比對
+  （例：9000 已部分退款 1800 → 7200）；已全額退款視為 0。
 - 依「訂購日期」或「服務日期」逐日查後台訂單列表，付款狀態只查「已付款」「待付款」。
 - 每筆用（總金額－車馬費）對服務日期所屬期間（非大掃除／大掃除 PART1／PART2）、平假日的
   VIP／一般客價格；金額剛好是其他期間或另一種平假日的價格 → 列為「應重新成立訂單」。
@@ -44,11 +46,10 @@ def check_item(item: dict, config=None) -> dict | None:
     import service_pricing
 
     text = str(item.get("row_text", "") or "")
-    total, fare = _money(text, "總金額"), _money(text, "車馬費") or 0
     service_date, hour = str(item.get("service_date") or ""), item.get("hour")
-    if not total or not service_date or not hour:
+    amount = _net_amount(item)
+    if not amount or amount <= 0 or not service_date or not hour:
         return None
-    amount = total - fare
     known = _card_persons(text) or (str(item["staff_count"]) if item.get("staff_count") else "")
     if known:
         status, message = service_pricing.price_status(service_date, known, hour, amount, config, item.get("period"))
@@ -65,16 +66,45 @@ def check_item(item: dict, config=None) -> dict | None:
         person_note = f"{known}人（人數推算）"
     if status != "other":
         return None
+    if item.get("_refund"):
+        message += f"（已扣退款 {item['_refund']}）"
     return {"人時": f"{person_note}{hour}小時", "服務金額": amount, "問題": message,
             "_person": known, "_hour": hour}
 
 
+_REFUND_RE = __import__("re").compile(r"待退狀態\s*[：:]\s*(已部[分份]退款|待退款|已全額退款)")
+
+
+def refund_state(item: dict) -> str:
+    m = _REFUND_RE.search(str(item.get("row_text", "") or ""))
+    return m.group(1) if m else ""
+
+
 def _net_amount(item: dict):
+    """總金額－車馬費－退款金額（退款金額由 load_refund 讀後台補上）。"""
     text = str(item.get("row_text", "") or "")
     total = _money(text, "總金額")
     if total is None:
         return None
-    return total - (_money(text, "車馬費") or 0)
+    if refund_state(item) == "已全額退款":
+        return 0
+    return total - (_money(text, "車馬費") or 0) - int(item.get("_refund") or 0)
+
+
+def load_refund(session, item: dict) -> bool:
+    """有部分退款／待退款時，到後台訂單編輯頁讀「退款金額」存到 item["_refund"]；有讀到回傳 True。"""
+    if "_refund" in item or refund_state(item) not in ("已部分退款", "已部份退款", "待退款"):
+        return False
+    from memo_system import change_order
+    from memo_system.change_order_fill import _purchase_state
+
+    try:
+        order = change_order.fetch_order_basic(item["order_no"], session=session, by="orderNo") or {}
+        raw = str(_purchase_state(session, order).get("refundAmount") or "").replace(",", "").strip()
+        item["_refund"] = int(float(raw)) if raw else 0
+    except Exception:
+        item["_refund"] = 0
+    return bool(item["_refund"])
 
 
 def _same_day_orders(session, item: dict) -> list[dict]:
@@ -157,9 +187,14 @@ def scan(session, start: date, end: date, date_field: str = "訂購日期", log=
                 seen.add(item["order_no"])
                 day_total += 1
                 problem = check_item(item, config)
+                if problem and load_refund(session, item):
+                    log(f"{item['order_no']} {refund_state(item)} {item['_refund']}，扣除後重新比對")
+                    problem = check_item(item, config)
                 if not problem:
                     continue
                 others = _same_day_orders(session, item)
+                for other in others:
+                    load_refund(session, other)
                 if others:
                     ok, total = group_check(item, problem, others, config)
                     listed = "、".join(o["order_no"] for o in others)
