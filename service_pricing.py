@@ -2,6 +2,7 @@
 import copy
 import json
 import os
+import re
 import tempfile
 from datetime import date, datetime
 from decimal import Decimal, ROUND_HALF_UP
@@ -218,6 +219,64 @@ def unit_price(service_date, tier='regular', config=None, weekend=None):
         return 700 if weekend else 600
     period = period_for(day, config)
     return config['periods'][period]['rates'][tier]['weekend' if weekend else 'weekday']
+
+
+TIER_LABELS = {'vip': 'VIP', 'regular': '一般客'}
+
+
+def _hours_from_period(period):
+    match = re.search(r'(\d{1,2}):(\d{2})\s*[-~～]\s*(\d{1,2}):(\d{2})', str(period or ''))
+    if not match:
+        return None
+    h1, m1, h2, m2 = (int(x) for x in match.groups())
+    minutes = (h2 * 60 + m2) - (h1 * 60 + m1)
+    return Decimal(minutes) / 60 if minutes > 0 else None
+
+
+def period_price_mismatch(service_date, person, hour, amount, config=None, period=None, tolerance=2):
+    """改期跨期間後金額沒重算的檢查（例：12/31 大掃除 6000 改到 12/4 非大掃除，應為 4800）。
+
+    金額符合服務日期所屬期間、平假日任一等級（VIP／一般客）的價格 → None。
+    金額不符、但剛好等於其他期間或另一種平假日的價格 → 回傳提醒文字。
+    其他不符（優惠、折抵、合併、補單）不判斷，避免誤報。
+    """
+    config = config if config is not None else load_config()
+    if not config.get('enabled'):
+        return None
+    try:
+        day = as_date(service_date)
+        amount = Decimal(str(amount).replace(',', ''))
+        person = Decimal(str(person))
+        hour = Decimal(str(hour)) if str(hour or '').strip() else _hours_from_period(period)
+    except Exception:
+        return None
+    if not hour or person <= 0 or hour <= 0 or amount <= 0:
+        return None
+
+    def total(rate):
+        return (Decimal(str(rate)) * person * hour).quantize(Decimal('1'), rounding=ROUND_HALF_UP)
+
+    current = period_for(day, config)
+    day_key = 'weekend' if day.weekday() >= 5 else 'weekday'
+    expected = {tier: total(config['periods'][current]['rates'][tier][day_key]) for tier in TIER_LABELS}
+    if any(abs(amount - value) <= tolerance for value in expected.values()):
+        return None
+    for key, label in PERIODS.items():
+        if key != 'normal' and not config['periods'][key]['start']:
+            continue
+        for other_day, day_label in (('weekday', '平日'), ('weekend', '假日')):
+            if key == current and other_day == day_key:
+                continue
+            for tier, tier_label in TIER_LABELS.items():
+                if abs(amount - total(config['periods'][key]['rates'][tier][other_day])) <= tolerance:
+                    if expected['vip'] == expected['regular']:
+                        should = f"{expected['regular']}"
+                    else:
+                        should = f"{expected['regular']}（一般客）／{expected['vip']}（VIP）"
+                    return (f"金額異常：{amount} 是{label}{day_label}{tier_label}價；"
+                            f"服務日 {day.strftime('%Y/%m/%d')} 屬{PERIODS[current]}{'假日' if day_key == 'weekend' else '平日'}，"
+                            f"應為 {should}，請重新成立訂單")
+    return None
 
 
 def apply_booking_price(payload, tier, config=None):
