@@ -43,3 +43,12 @@ def test_scan_queries_each_day_and_dedupes(monkeypatch):
     result = ppc.scan(None, date(2026, 12, 3), date(2026, 12, 4), '服務日期', config=_config())
     assert len(calls) == 4 and result['scanned'] == 1 and len(result['rows']) == 1
     assert result['rows'][0]['訂單連結'].endswith('orderNo=LC00221437')
+
+
+def test_scan_reports_progress(monkeypatch):
+    from memo_system import memo
+    monkeypatch.setattr(ppc, '_fetch_list', lambda session, params: [])
+    monkeypatch.setattr(memo, 'BASE_URL', 'https://x', raising=False)
+    calls = []
+    ppc.scan(None, date(2026, 11, 11), date(2026, 11, 13), config=_config(), progress=lambda *a: calls.append(a[:2]))
+    assert calls == [(0, 3), (1, 3), (2, 3), (3, 3)]
