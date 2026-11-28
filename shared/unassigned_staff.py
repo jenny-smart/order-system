@@ -314,7 +314,9 @@ LEMON_KEEP_NOTE = "檸檬人勿動"
 
 def _lemon_keep(row: Dict) -> bool:
     """客服備註（或訂單任一文字欄位）有「檸檬人勿動」。"""
-    return any(LEMON_KEEP_NOTE in str(v) for v in row.values() if isinstance(v, str))
+    # 2026-11-28：「檸檬人1勿動」等寫法也算（同 memo_system.shift.has_lemon_keep）
+    from memo_system.shift import has_lemon_keep
+    return any(has_lemon_keep(v) for v in row.values() if isinstance(v, str))
 
 
 def lemon_only_reserves(rows: List[Dict]) -> List[Dict]:

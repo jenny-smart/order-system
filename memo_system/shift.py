@@ -1095,6 +1095,13 @@ def _norm_name(name: str) -> str:
 
 
 LEMON_KEEP_NOTE = "檸檬人勿動"
+# 2026-11-28 Jenny：「檸檬人勿動」常寫成「檸檬人1勿動」、「檸檬人 2 勿動」，或寫在 **N-J** 後方；
+# 客服備註任何位置符合都算（中間可夾人數與空白）。
+LEMON_KEEP_RE = re.compile(r"檸檬人\s*\d*\s*人?\s*勿動")
+
+
+def has_lemon_keep(text) -> bool:
+    return bool(LEMON_KEEP_RE.search(str(text or "")))
 
 
 def parse_purchase_notices(html: str) -> List[Dict]:
@@ -1147,7 +1154,7 @@ def parse_purchase_json_notices(html: str) -> Optional[List[Dict]]:
         if isinstance(member, dict):
             names.add(str(member.get("name") or ""))
         own = {k: v for k, v in item.items() if k != "member"}
-        notice = "\n".join(x for x in _json_strings(own) if LEMON_KEEP_NOTE in x)
+        notice = "\n".join(x for x in _json_strings(own) if has_lemon_keep(x))
         out.append({"order_no": str(item.get("order_no") or ""), "names": {n for n in names if n},
                     "notice": notice})
     return out
@@ -1178,7 +1185,7 @@ def _lemon_keep_customers(session: requests.Session, date_val: str) -> set:
         for x in new_rows:
             if x["order_no"]:
                 seen_orders.add(x["order_no"])
-            if LEMON_KEEP_NOTE in x["notice"]:
+            if has_lemon_keep(x["notice"]):
                 keep |= {_norm_name(n) for n in x["names"]}
         if len(rows) < 20:
             break
