@@ -12,7 +12,7 @@ from datetime import date, datetime
 import streamlit as st
 
 import quick_order as qo
-from function.ui_common import copy_button
+from function.ui_common import copy_button, info_panel, step
 from shared import main_sub_order as ms
 from shared.execution_log_service import log_execution
 
@@ -101,11 +101,11 @@ def render_person_hour_coupon(backend_email, backend_password, env, key_prefix, 
 
 
 def render_main_sub_section(backend_email, backend_password, env, key_prefix, main_order_no="",
-                            main_date=None, main_person=4, main_hour=8, main_period_s=""):
+                            main_date=None, main_person=4, main_hour=8, main_period_s="", expanded=False):
     """主單建好後：主單檸檬人數＋補單（實際出班人數／時段），建補單並寫合併備註。"""
     k = f"{key_prefix}_ms"
     st.markdown("<hr>", unsafe_allow_html=True)
-    with st.expander("➕ 主單＋補單（大單一次刷卡：主單收款、補單補實際人數時數）", expanded=False):
+    with st.expander("➕ 主單＋補單（大單一次刷卡：主單收款、補單補實際人數時數）", expanded=expanded):
         st.caption(
             "主單可先放檸檬人（還沒排班可放多位），佔位的檸檬人時數由補單補；檸檬人人時須少於主單＋補單。"
             "補單用優惠券折到 0 → 已付款＋不開立發票；主單＋補單客人備註寫合併訂單與每個時段幾人，有檸檬人的訂單客服備註加「檸檬人勿動」。"
@@ -189,3 +189,48 @@ def render_main_sub_section(backend_email, backend_password, env, key_prefix, ma
             if res.get("line_message"):
                 st.text_area("合併 LINE 訊息", res["line_message"], height=320, label_visibility="collapsed")
                 copy_button("複製合併 LINE 訊息", res["line_message"], f"{k}_copy_line")
+
+
+def render_main_sub_page(backend_email, backend_password, env):
+    """功能選單 A 組「主單＋補單」：輸入已建立的主單編號，讀取後台主單資料再建補單。"""
+    step("3", "主單＋補單")
+    info_panel("流程說明", [
+        "主單先用「建立舊客訂單」或「建立新客訂單」建立（優惠代碼欄上方可「依人時建立優惠券」折抵）。",
+        "這裡輸入主單編號 → 讀取主單 → 設定主單檸檬人數／佔位人數與各筆補單 → 一鍵建立。",
+        "補單用優惠券折到 0 → 已付款＋不開立發票；主單＋補單客人備註寫合併訂單與每個時段幾人，有檸檬人的訂單客服備註加「檸檬人勿動」。",
+    ])
+    c1, c2 = st.columns([3, 1])
+    with c1:
+        order_no = st.text_input("主單編號", placeholder="LC00221474", key="mspage_order_no").strip()
+    with c2:
+        st.markdown("<br>", unsafe_allow_html=True)
+        load = st.button("🔎 讀取主單", key="mspage_load", use_container_width=True)
+    if load:
+        if not (backend_email.strip() and backend_password.strip()):
+            st.error("請先輸入後台帳號密碼")
+        elif not order_no:
+            st.error("請輸入主單編號")
+        else:
+            try:
+                with st.spinner("讀取主單中…"):
+                    ctx = ms.read_main_order(env, backend_email.strip(), backend_password.strip(), order_no)
+                st.session_state["mspage_loaded"] = {
+                    "order_no": order_no, "date": ctx["service_date"], "period_s": ctx["period_s"],
+                    "person": ctx["person"], "hour": ctx["hour"], "address": ctx["address"],
+                    "payway": ctx["payway"], "service_label": ctx["service_label"],
+                }
+            except Exception as e:
+                st.session_state["mspage_loaded"] = None
+                st.error(f"讀取主單失敗：{e}")
+    loaded = st.session_state.get("mspage_loaded")
+    if not loaded:
+        return
+    st.success(
+        f"主單 {loaded['order_no']}：{loaded['date']} {loaded['period_s']}　{loaded['person']}人{loaded['hour']}小時　"
+        f"{loaded['service_label']}　{loaded['payway']}　{loaded['address']}"
+    )
+    render_main_sub_section(
+        backend_email, backend_password, env, f"mspage_{loaded['order_no']}",
+        main_order_no=loaded["order_no"], main_date=loaded["date"], main_person=loaded["person"] or 4,
+        main_hour=loaded["hour"] or 8, main_period_s=loaded["period_s"], expanded=True,
+    )
