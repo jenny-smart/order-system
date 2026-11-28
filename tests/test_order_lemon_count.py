@@ -165,3 +165,14 @@ class ReserveAttributionTest(unittest.TestCase):
         self.assertEqual(result["days"][0]["日期"], "2026-11-20")  # 含今天
         with patch.object(shift.memo, "today_tw", return_value=datetime(2026, 11, 25)):
             self.assertEqual(shift.count_order_lemons_range(None, "2026-11-01", "2026-11-23")["days"], [])
+
+
+def test_lemon_keep_note_variants():
+    """2026-11-28：客服備註寫「**N-J**檸檬人1勿動」等寫法也要算勿動。"""
+    from memo_system.shift import has_lemon_keep
+
+    assert has_lemon_keep("**N-J**檸檬人1勿動")
+    assert has_lemon_keep("原備註…檸檬人勿動")
+    assert has_lemon_keep("檸檬人 2 勿動")
+    assert not has_lemon_keep("檸檬人")
+    assert not has_lemon_keep("勿動")
