@@ -109,7 +109,7 @@ import threading as _threading
 import time as _time
 
 _IMPORT_LOCK = _sys.__dict__.setdefault("_ordersapp_import_lock", _threading.RLock())
-_PAGE_MODULES = ('function.ui_common', 'function.consistency_check', 'function.calendar_check', 'function.cleaner_next_day_reminder', 'function.weekend_reminder_page', 'function.no_line_link_search', 'function.line_compare_page', 'function.price_period_check_page', 'function.customer_memo_query', 'function.bonus_note', 'function.order_creation', 'function.line_notice_generator', 'function.completed_booking_notice', 'function.next_appointment_list', 'function.rating_complaint_page', 'function.rating_booking_order_page', 'function.sheet_link_tool', 'function.next_service_time_updater', 'function.member_preferences', 'function.member_phone_lookup', 'function.batch_booking_optimized', 'function.cloud_batch_booking', 'function.reserve_menu', 'function.lemon_staff_replacement', 'function.unassigned_staff_page')
+_PAGE_MODULES = ('function.ui_common', 'function.consistency_check', 'function.calendar_check', 'function.cleaner_next_day_reminder', 'function.weekend_reminder_page', 'function.no_line_link_search', 'function.line_compare_page', 'function.price_period_check_page', 'function.customer_memo_query', 'function.bonus_note', 'function.cleaning_pattern_ui', 'function.main_sub_order_ui', 'function.order_creation', 'function.line_notice_generator', 'function.completed_booking_notice', 'function.next_appointment_list', 'function.rating_complaint_page', 'function.rating_booking_order_page', 'function.sheet_link_tool', 'function.next_service_time_updater', 'function.member_preferences', 'function.member_phone_lookup', 'function.batch_booking_optimized', 'function.cloud_batch_booking', 'function.reserve_menu', 'function.lemon_staff_replacement', 'function.unassigned_staff_page')
 
 
 def _load_modules():
@@ -287,6 +287,7 @@ FUNCTION_OPTIONS = [
     ("檸檬保留刪除地址：只留信義路、館前路兩個地址，其他不再使用的客人地址一次刪除。", "orders", "檸檬保留刪除地址"),
     ("建立舊客訂單：電話查會員、帶入歷史資料建單；需求搜尋整合在此流程內。", "orders", "建立舊客訂單"),
     ("建立新客訂單：貼上制式文字拆成欄位，供客服修改後建立訂單。", "orders", "建立新客訂單"),
+    ("主單＋補單：大單一次刷卡，主單收款（可放檸檬人）、補單補實際人數時段並折到 0，寫合併備註。", "orders", "主單＋補單"),
     ("建立儲值金訂單：客人自行儲值／購買金額建單，付款方式與發票自動沿用會員最近一次設定。", "orders", "建立儲值金訂單"),
     ("訂單轉換：原單轉多筆新單，各建折價券，混合配班。", "orders", "訂單轉換"),
     ("儲值金補價差：兩段式流程，先建儲值金清零單，再建客付補差價單。", "orders", "儲值金補價差"),
@@ -496,6 +497,9 @@ elif mode == "建立舊客訂單":
     _order_creation_page.render_old_customer(backend_email, backend_password, env)
 elif mode == "建立新客訂單":
     _order_creation_page.render_new_customer(backend_email, backend_password, env)
+elif mode == "主單＋補單":
+    from function import main_sub_order_ui as _msui_page
+    _msui_page.render_main_sub_page(backend_email, backend_password, env)
 elif mode == "建立儲值金訂單":
     _order_creation_page.render_stored_value_order(backend_email, backend_password, env)
 elif mode == "訂單轉換":
