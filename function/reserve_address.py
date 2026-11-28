@@ -85,29 +85,82 @@ def _launch_browser(runtime):
     return runtime.chromium.launch(headless=True, **({"executable_path": executable} if executable else {}))
 
 
+# 會員管理頁會載入 Google 地圖、字型、圖片等外部資源；雲端主機連外慢時會拖住整頁載入（Page.goto 30 秒逾時）。
+# 讀地址、點垃圾桶都不需要這些，一律擋掉；後台自己的程式與 jQuery／Vue 照常載入。
+_BLOCK_TYPES = {"image", "font", "media", "stylesheet"}
+_BLOCK_HOSTS = ("maps.googleapis.com", "maps.gstatic.com", "fonts.googleapis.com", "fonts.gstatic.com",
+                "oss.maxcdn.com", "www.google-analytics.com", "www.googletagmanager.com")
+_GOTO_TIMEOUT_MS = 60000
+
+
+def _route_filter(route):
+    req = route.request
+    host = urlparse(req.url).hostname or ""
+    if req.resource_type in _BLOCK_TYPES or any(host == h or host.endswith("." + h) for h in _BLOCK_HOSTS):
+        return route.abort()
+    return route.continue_()
+
+
+def _new_page(browser, session, origin):
+    context = browser.new_context()
+    context.add_cookies(_browser_cookies(session, origin))
+    context.route("**/*", _route_filter)
+    page = context.new_page()
+    page.set_default_timeout(_GOTO_TIMEOUT_MS)
+    return page
+
+
 def _open_member_page(page, member_url):
-    """開會員管理頁，等地址清單（垃圾桶圖示）出現；清單由頁面程式產生，不能一載入就讀。"""
-    page.goto(member_url, wait_until="domcontentloaded")
+    """開會員管理頁，等地址清單（垃圾桶圖示）出現；清單由頁面程式產生，不能一載入就讀。
+
+    只等到伺服器開始回應（commit），不等整頁 DOMContentLoaded，避免被外部資源拖到逾時。
+    """
+    page.goto(member_url, wait_until="commit", timeout=_GOTO_TIMEOUT_MS)
     if "/login" in page.url:
         raise RuntimeError("後台登入已失效")
     try:
-        page.wait_for_selector("i.fa-trash-o", state="attached", timeout=15000)
+        page.wait_for_selector("i.fa-trash-o", state="attached", timeout=30000)
     except Exception:
         pass  # 真的沒有可刪地址時不會出現垃圾桶
 
 
+def _addresses_from_json(html: str) -> List[str]:
+    """頁面原始碼內嵌的 memberAddressList（不用瀏覽器）。"""
+    from memo_system.memo import _extract_json_after
+    found = []
+    for address_list in _extract_json_after(html or "", '"memberAddressList":'):
+        if not isinstance(address_list, list):
+            continue
+        for item in address_list:
+            address = re.sub(r"\s+", "", unicodedata.normalize("NFKC", str((item or {}).get("address") or "")))
+            if address and address not in found:
+                found.append(address)
+    return found
+
+
 def list_member_addresses(env_name, backend_email, backend_password, phone=RESERVE_PHONE) -> List[str]:
-    """會員管理頁上實際顯示、有垃圾桶的地址。地址清單由頁面程式產生，所以用瀏覽器開頁再讀。"""
-    from playwright.sync_api import sync_playwright
+    """會員管理頁上該會員的地址。
+
+    先直接抓頁面原始碼（快、不需瀏覽器）：有垃圾桶就照垃圾桶讀，否則讀內嵌的 memberAddressList；
+    兩者都讀不到才開瀏覽器讀頁面程式產生的清單。
+    """
     session, base_url = co._new_logged_in_session(env_name, backend_email, backend_password)
     origin = base_url.rstrip("/")
+    member_url = f"{origin}/member?keyword={quote(phone)}"
+    try:
+        resp = session.get(member_url, timeout=60)
+        if resp.status_code == 200 and "/login" not in resp.url:
+            found = parse_member_addresses(resp.text, phone) or _addresses_from_json(resp.text)
+            if found:
+                return found
+    except Exception:
+        pass
+    from playwright.sync_api import sync_playwright
     with sync_playwright() as runtime:
         browser = _launch_browser(runtime)
         try:
-            context = browser.new_context()
-            context.add_cookies(_browser_cookies(session, origin))
-            page = context.new_page()
-            _open_member_page(page, f"{origin}/member?keyword={quote(phone)}")
+            page = _new_page(browser, session, origin)
+            _open_member_page(page, member_url)
             return parse_member_addresses(page.content(), phone)
         finally:
             browser.close()
@@ -148,9 +201,7 @@ def delete_member_addresses(env_name, backend_email, backend_password, addresses
     with sync_playwright() as runtime:
         browser = _launch_browser(runtime)
         try:
-            context = browser.new_context()
-            context.add_cookies(_browser_cookies(session, origin))
-            page = context.new_page()
+            page = _new_page(browser, session, origin)
             page.on("dialog", lambda dialog: dialog.accept())
             for address in targets:
                 try:
